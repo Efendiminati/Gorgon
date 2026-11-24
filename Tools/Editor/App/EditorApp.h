@@ -1,6 +1,9 @@
 #pragma once
 
 #include "Core/Scene.h"
+#include "AssetBrowserPanel.h"
+#include "HierarchyPanel.h"
+#include "InspectorPanel.h"
 #include "Viewport.h"
 
 #include <Gorgon/UI/Organizers/Flow.h>
@@ -11,6 +14,7 @@
 #include <Gorgon/Widgets/Layerbox.h>
 #include <Gorgon/Widgets/Panel.h>
 
+#include <memory>
 #include <string>
 
 namespace Gorgon :: Editor {
@@ -39,7 +43,13 @@ namespace Gorgon :: Editor {
         EditorViewport &GetViewport() { return viewport_; }
         Gorgon::Widgets::Panel &GetHierarchyPanel() { return hierarchyPanel_; }
         Gorgon::Widgets::Panel &GetInspectorPanel() { return inspectorPanel_; }
-        Gorgon::Widgets::Panel &GetAssetBrowserPanel() { return assetBrowserPanel_; }
+        Gorgon::Widgets::Panel &GetAssetBrowserPanel() { return assetBrowser_.GetPanel(); }
+        AssetBrowserPanel &GetAssetBrowser() { return assetBrowser_; }
+
+        /// Inserts the asset selected in the browser into the scene at the viewport center.
+        bool InsertSelectedAssetIntoScene(std::string *outError = nullptr);
+        HierarchyPanel &GetHierarchy() { return *hierarchy_; }
+        InspectorPanel &GetInspector() { return *inspector_; }
         const std::string &GetCurrentFilePath() const { return currentFilePath_; }
         bool IsDirty() const { return dirty_; }
         PlayMode GetPlayMode() const { return playMode_; }
@@ -48,6 +58,8 @@ namespace Gorgon :: Editor {
         void buildToolbar();
         void buildDockPlaceholders();
         void populateSampleScene();
+        void markDirty();
+        void refreshPanels();
         void updateWindowTitle();
         void updateStatusText(float worldX, float worldY, float zoom);
         void updatePlayButtons();
@@ -60,6 +72,10 @@ namespace Gorgon :: Editor {
         void onPlayClicked();
         void onPauseClicked();
         void onStopClicked();
+
+        // Asset browser helpers
+        bool insertAsset(const AssetEntry &entry, std::string *outError);
+        void setupAssetBrowser();
 
         Gorgon::UI::Window &window_;
         Scene scene_;
@@ -84,17 +100,14 @@ namespace Gorgon :: Editor {
         // 4-pane docks + center viewport
         Gorgon::Widgets::Panel hierarchyPanel_{Gorgon::Widgets::Registry::Panel_Left};
         Gorgon::Widgets::Panel inspectorPanel_{Gorgon::Widgets::Registry::Panel_Right};
-        Gorgon::Widgets::Panel assetBrowserPanel_{Gorgon::Widgets::Registry::Panel_Bottom};
+        AssetBrowserPanel assetBrowser_;
         Gorgon::Widgets::Layerbox viewportBox_{Gorgon::Widgets::Registry::Layerbox_Blank};
 
-        Gorgon::Widgets::Label lblHierarchyHeader_{"Hierarchy", Gorgon::Widgets::Registry::Label_Bold};
-        Gorgon::Widgets::Label lblHierarchyHint_{"(Phase 3: Scene Tree)", Gorgon::Widgets::Registry::Label_Info};
-        Gorgon::Widgets::Label lblInspectorHeader_{"Inspector", Gorgon::Widgets::Registry::Label_Bold};
-        Gorgon::Widgets::Label lblInspectorHint_{"(Phase 3: Properties)", Gorgon::Widgets::Registry::Label_Info};
-        Gorgon::Widgets::Label lblAssetsHeader_{"Asset Browser", Gorgon::Widgets::Registry::Label_Bold};
-        Gorgon::Widgets::Label lblAssetsHint_{"(Phase 4: Project Assets)", Gorgon::Widgets::Registry::Label_Info};
+        // The Asset Browser dock itself lives in AssetBrowserPanel (Phase 4).
 
         EditorViewport viewport_;
+        std::unique_ptr<HierarchyPanel> hierarchy_;
+        std::unique_ptr<InspectorPanel> inspector_;
     };
 
 } // namespace Gorgon::Editor

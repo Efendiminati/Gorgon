@@ -32,13 +32,12 @@ namespace Gorgon :: Editor {
         window_.Add(toolbarPanel_);
         window_.Add(hierarchyPanel_);
         window_.Add(inspectorPanel_);
-        window_.Add(assetBrowserPanel_);
+        assetBrowser_.Attach(window_);
         window_.Add(viewportBox_);
 
         toolbarPanel_.EnableScroll(false, false);
         hierarchyPanel_.EnableScroll(true, false);
         inspectorPanel_.EnableScroll(true, false);
-        assetBrowserPanel_.EnableScroll(true, false);
 
         buildToolbar();
         buildDockPlaceholders();
@@ -46,17 +45,51 @@ namespace Gorgon :: Editor {
         viewport_.Attach(viewportBox_);
         viewport_.SetGridSnap(chkGridSnap_.GetState());
         viewport_.OnSelectionChanged = [this](EntityId) {
+            if(hierarchy_)
+                hierarchy_->SyncSelection();
+            if(inspector_)
+                inspector_->Rebuild();
             updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
         };
         viewport_.OnSceneModified = [this]() {
-            if(!dirty_) {
-                dirty_ = true;
-                updateWindowTitle();
-            }
+            if(inspector_)
+                inspector_->Refresh();
+            markDirty();
             updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
         };
         viewport_.OnStatusChanged = [this](float wx, float wy, float zoom) {
             updateStatusText(wx, wy, zoom);
+        };
+
+        // Phase 3 panels: hierarchy tree (left) and details inspector (right).
+        hierarchy_ = std::make_unique<HierarchyPanel>(scene_, viewport_, hierarchyPanel_);
+        inspector_ = std::make_unique<InspectorPanel>(scene_, viewport_, inspectorPanel_);
+
+        hierarchy_->OnSelectionChanged = [this](EntityId) {
+            if(inspector_)
+                inspector_->Rebuild();
+            updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        };
+        hierarchy_->OnSceneModified = [this]() {
+            viewport_.Redraw();
+            markDirty();
+        };
+        hierarchy_->OnStructureChanged = [this]() {
+            if(inspector_)
+                inspector_->Rebuild();
+            viewport_.Redraw();
+            markDirty();
+        };
+        inspector_->OnSceneModified = [this]() {
+            viewport_.Redraw();
+            markDirty();
+            updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        };
+        inspector_->OnStructureChanged = [this]() {
+            if(hierarchy_)
+                hierarchy_->Rebuild();
+            viewport_.Redraw();
+            markDirty();
         };
 
         // Keyboard preview for Space+left-drag pan and R to reset view
@@ -71,11 +104,31 @@ namespace Gorgon :: Editor {
         });
 
         populateSampleScene();
+        setupAssetBrowser();
+        if(hierarchy_)
+            hierarchy_->Rebuild();
+        if(inspector_)
+            inspector_->Rebuild();
         LayoutPanes();
         updatePlayButtons();
         updateWindowTitle();
         updateStatusText(0.0f, 0.0f, 1.0f);
         viewport_.Redraw();
+    }
+
+    void EditorApp::markDirty() {
+        if(dirty_)
+            return;
+
+        dirty_ = true;
+        updateWindowTitle();
+    }
+
+    void EditorApp::refreshPanels() {
+        if(hierarchy_)
+            hierarchy_->Rebuild();
+        if(inspector_)
+            inspector_->Rebuild();
     }
 
     void EditorApp::buildToolbar() {
@@ -116,20 +169,8 @@ namespace Gorgon :: Editor {
     void EditorApp::buildDockPlaceholders() {
         using Gorgon::UI::Pixels;
 
-        lblHierarchyHeader_.Move(Pixels(8, 8));
-        lblHierarchyHint_.Move(Pixels(8, 32));
-        hierarchyPanel_.Add(lblHierarchyHeader_);
-        hierarchyPanel_.Add(lblHierarchyHint_);
-
-        lblInspectorHeader_.Move(Pixels(8, 8));
-        lblInspectorHint_.Move(Pixels(8, 32));
-        inspectorPanel_.Add(lblInspectorHeader_);
-        inspectorPanel_.Add(lblInspectorHint_);
-
-        lblAssetsHeader_.Move(Pixels(8, 8));
-        lblAssetsHint_.Move(Pixels(8, 32));
-        assetBrowserPanel_.Add(lblAssetsHeader_);
-        assetBrowserPanel_.Add(lblAssetsHint_);
+        // Hierarchy (left) and Inspector (right) are owned by their Phase 3 panels.
+        // Only the asset browser still shows a Phase 4 placeholder.
     }
 
     void EditorApp::LayoutPanes() {
@@ -159,8 +200,12 @@ namespace Gorgon :: Editor {
         inspectorPanel_.Move(Pixels(leftW + centerW, middleY));
         inspectorPanel_.Resize(Pixels(rightW, middleH));
 
-        assetBrowserPanel_.Move(Pixels(0, middleY + middleH));
-        assetBrowserPanel_.Resize(Pixels(sz.Width, sz.Height - (middleY + middleH)));
+        assetBrowser_.Layout(0, middleY + middleH, sz.Width, sz.Height - (middleY + middleH));
+
+        if(hierarchy_)
+            hierarchy_->Layout();
+        if(inspector_)
+            inspector_->Layout();
 
         viewport_.Redraw();
     }
@@ -209,6 +254,7 @@ namespace Gorgon :: Editor {
             viewport_.SetSelectedEntity(InvalidEntityId, false);
         }
         viewport_.ResetCamera();
+        refreshPanels();
         updateWindowTitle();
         updateStatusText(0.0f, 0.0f, viewport_.GetCamera().zoom);
     }
@@ -224,8 +270,12 @@ namespace Gorgon :: Editor {
 
         std::filesystem::path p(path);
         viewport_.SetAssetBaseDir(p.has_parent_path() ? p.parent_path().string() : std::string{});
+        if(p.has_parent_path() && std::filesystem::is_directory(p.parent_path())) {
+            assetBrowser_.SetRoot(p.parent_path().generic_string());
+        }
         viewport_.SetSelectedEntity(InvalidEntityId, false);
         viewport_.ResetCamera();
+        refreshPanels();
         updateWindowTitle();
         updateStatusText(0.0f, 0.0f, viewport_.GetCamera().zoom);
         return true;
@@ -347,6 +397,88 @@ namespace Gorgon :: Editor {
         playMode_ = PlayMode::Stopped;
         updatePlayButtons();
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+    }
+
+    void EditorApp::setupAssetBrowser() {
+        assetBrowser_.OnAssetActivated = [this](const AssetEntry &entry) {
+            std::string error;
+            if(!insertAsset(entry, &error) && !error.empty()) {
+                Gorgon::UI::ShowMessage("Add to Scene", error);
+            }
+        };
+        assetBrowser_.OnAssetSelected = [this](const AssetEntry &) {
+            updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        };
+
+        std::error_code ec;
+        std::string root;
+        if(std::filesystem::is_directory("Examples", ec)) {
+            root = std::filesystem::absolute("Examples", ec).generic_string();
+        }
+        if(root.empty() || ec) {
+            root = std::filesystem::current_path(ec).generic_string();
+        }
+        if(!root.empty()) {
+            assetBrowser_.SetRoot(root);
+        }
+        if(!assetBrowser_.GetRoot().empty()) {
+            // Scenes without a path of their own resolve sprite paths against the browser root,
+            // so a freshly inserted asset is visible straight away.
+            viewport_.SetAssetBaseDir(assetBrowser_.GetRoot());
+        }
+    }
+
+    bool EditorApp::insertAsset(const AssetEntry &entry, std::string *outError) {
+        if(entry.isDirectory) {
+            if(outError) *outError = "Folders cannot be added to the scene.";
+            return false;
+        }
+        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts) {
+            if(outError) *outError = "Only image and script assets can be added to the scene.";
+            return false;
+        }
+
+        // An unsaved scene resolves sprite paths against the browser root, so keep that in
+        // sync when the user browses to a different project folder.
+        if(currentFilePath_.empty() && !assetBrowser_.GetRoot().empty() &&
+           viewport_.GetAssetBaseDir() != assetBrowser_.GetRoot()) {
+            viewport_.SetAssetBaseDir(assetBrowser_.GetRoot());
+        }
+
+        const auto size = viewport_.GetViewportSize();
+        const float viewW = static_cast<float>(size.Width);
+        const float viewH = static_cast<float>(size.Height);
+        const auto center = viewport_.GetCamera().ScreenToWorld(viewW * 0.5f, viewH * 0.5f, viewW, viewH);
+
+        float wx = center.X;
+        float wy = center.Y;
+        if(chkGridSnap_.GetState()) {
+            const float grid = static_cast<float>(std::max(1, scene_.settings.gridSize));
+            wx = std::round(wx / grid) * grid;
+            wy = std::round(wy / grid) * grid;
+        }
+
+        const EntityId id = InsertAssetAsEntity(scene_, entry, viewport_.GetAssetBaseDir(), wx, wy);
+        if(id == InvalidEntityId) {
+            if(outError) *outError = "Could not add this asset to the scene.";
+            return false;
+        }
+
+        viewport_.SetSelectedEntity(id, true);
+        viewport_.Redraw();
+        markDirty();
+        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        return true;
+    }
+
+    bool EditorApp::InsertSelectedAssetIntoScene(std::string *outError) {
+        const AssetEntry *entry = assetBrowser_.GetSelected();
+        if(!entry) {
+            if(outError) *outError = "No asset is selected in the Asset Browser.";
+            return false;
+        }
+
+        return insertAsset(*entry, outError);
     }
 
     bool EditorApp::OnClosing() {
