@@ -5,6 +5,7 @@
 #include "Viewport.h"
 
 #include <Gorgon/Main.h>
+#include <Gorgon/UI.h>
 #include <Gorgon/UI/Window.h>
 
 #include <algorithm>
@@ -416,11 +417,351 @@ namespace {
         return 0;
     }
 
+    /// Diagnostic: isolates which component's construction/teardown corrupts the heap.
+    /// Run as `GorgonEditor --diag <variant>`; the process exit code is the verdict.
+    int RunDiag(const std::string &variant) {
+        using namespace Gorgon::Editor;
+
+        Gorgon::Initialize("GorgonEditor");
+        int result = 0;
+        {
+            // Same lifetime rule as main(): the theme must outlive the window.
+            std::unique_ptr<Gorgon::Widgets::SimpleGenerator> theme;
+            Gorgon::UI::Window window({1280, 800}, "Gorgon 2D Editor diag");
+            theme = CreateDarkEditorTheme(9.5f);
+
+            const auto frames = [](int count) {
+                for(int i = 0; i < count; ++i)
+                    Gorgon::NextFrame();
+            };
+
+            if(variant == "panels4") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    Gorgon::Widgets::Panel left{Gorgon::Widgets::Registry::Panel_Left};
+                    Gorgon::Widgets::Panel right{Gorgon::Widgets::Registry::Panel_Right};
+                    Gorgon::Widgets::Layerbox box{Gorgon::Widgets::Registry::Layerbox_Blank};
+                    window.Add(left);
+                    window.Add(right);
+                    window.Add(top);
+                    window.Add(box);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "controls") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    Gorgon::UI::Organizers::Flow flow;
+                    Gorgon::Widgets::Button b1{"New"}, b2{"Open"}, b3{"Save"};
+                    Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                    Gorgon::Widgets::Label lbl{"Ready"};
+                    top.AttachOrganizer(flow);
+                    flow << b1 << b2 << b3 << chk << lbl;
+                    window.Add(top);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "viewportobj") {
+                {
+                    Scene scene;
+                    EditorViewport vp(scene);
+                    vp.SetViewportSizeOverride({800, 600});
+                    vp.Redraw();
+                    frames(1);
+                }
+                frames(1);
+            }
+            else if(variant == "detached-layerbox") {
+                {
+                    Gorgon::Widgets::Layerbox box{Gorgon::Widgets::Registry::Layerbox_Blank};
+                    Gorgon::Graphics::Layer gfx;
+                    Gorgon::Input::Layer input;
+                    box.GetLayer().Add(gfx);
+                    box.GetLayer().Add(input);
+                }
+                frames(1);
+            }
+            else if(variant == "controls-noorg") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    Gorgon::Widgets::Button b1{"New"}, b2{"Open"}, b3{"Save"};
+                    Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                    Gorgon::Widgets::Label lbl{"Ready"};
+                    top.Add(b1); top.Add(b2); top.Add(b3); top.Add(chk); top.Add(lbl);
+                    window.Add(top);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "controls-flowonly") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    Gorgon::UI::Organizers::Flow flow;
+                    top.AttachOrganizer(flow);
+                    window.Add(top);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "controls-orgfirst") {
+                {
+                    Gorgon::UI::Organizers::Flow flow;
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    top.AttachOrganizer(flow);
+                    window.Add(top);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "controls-noframes") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    Gorgon::UI::Organizers::Flow flow;
+                    Gorgon::Widgets::Button b1{"New"}, b2{"Open"}, b3{"Save"};
+                    top.AttachOrganizer(flow);
+                    flow << b1 << b2 << b3;
+                    window.Add(top);
+                }
+                frames(1);
+            }
+            else if(variant == "controls-scrolloff") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    top.EnableScroll(false, false);
+                    Gorgon::Widgets::Button b1{"New"}, b2{"Open"}, b3{"Save"};
+                    Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                    Gorgon::Widgets::Label lbl{"Ready"};
+                    top.Add(b1); top.Add(b2); top.Add(b3); top.Add(chk); top.Add(lbl);
+                    window.Add(top);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "controls-vscroll") {
+                {
+                    Gorgon::Widgets::Panel right{Gorgon::Widgets::Registry::Panel_Right};
+                    right.EnableScroll(true, false);
+                    Gorgon::Widgets::Button b1{"A"}, b2{"B"};
+                    right.Add(b1); right.Add(b2);
+                    window.Add(right);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "controls-onewidget") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    Gorgon::Widgets::Button b1{"New"};
+                    top.Add(b1);
+                    window.Add(top);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "controls-checkboxonly") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                    top.Add(chk);
+                    window.Add(top);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "checkbox-window") {
+                {
+                    Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                    window.Add(chk);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "checkbox-noframes") {
+                {
+                    Gorgon::Widgets::Panel top{Gorgon::Widgets::Registry::Panel_Top};
+                    Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                    top.Add(chk);
+                    window.Add(top);
+                }
+                frames(1);
+            }
+            else if(variant == "button-window") {
+                {
+                    Gorgon::Widgets::Button b{"New"};
+                    window.Add(b);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "checkbox-nochecked") {
+                {
+                    Gorgon::Widgets::Checkbox chk{"Grid Snap", false};
+                    window.Add(chk);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "checkbox-orphan") {
+                {
+                    // Never added to the window.
+                    Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                    (void)chk;
+                }
+                frames(1);
+            }
+            else if(variant == "checkbox-orphan-window") {
+                Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                frames(2);
+            }
+            else if(variant == "checkbox-orphan-noframes") {
+                Gorgon::Widgets::Checkbox chk{"Grid Snap", true};
+                (void)chk;
+            }
+            else if(variant == "template-checkbox") {
+                // Force the generator to produce the checkbox template, no widget involved.
+                (void)Gorgon::Widgets::Registry::Active()[Gorgon::Widgets::Registry::Checkbox_Regular];
+                frames(1);
+            }
+            else if(variant == "template-button") {
+                (void)Gorgon::Widgets::Registry::Active()[Gorgon::Widgets::Registry::Button_Regular];
+                frames(1);
+            }
+            else if(variant == "asset-box") {
+                (void)theme->GetAsset({Gorgon::Widgets::SimpleGenerator::AssetID::Box,
+                                       Gorgon::Graphics::Color::Regular,
+                                       Gorgon::Widgets::SimpleGenerator::AssetID::None});
+                frames(1);
+            }
+            else if(variant == "asset-tick") {
+                (void)theme->GetAsset({Gorgon::Widgets::SimpleGenerator::AssetID::Tick,
+                                       Gorgon::Graphics::Color::Regular,
+                                       Gorgon::Widgets::SimpleGenerator::AssetID::None});
+                frames(1);
+            }
+            else if(variant == "asset-background") {
+                (void)theme->GetAsset({Gorgon::Widgets::SimpleGenerator::AssetID::Background,
+                                       Gorgon::Graphics::Color::Regular,
+                                       Gorgon::Widgets::SimpleGenerator::AssetID::All});
+                frames(1);
+            }
+            else if(variant == "cb-default-theme") {
+                // A generator with stock Init() defaults, leaked so its templates survive.
+                auto *gen = new Gorgon::Widgets::SimpleGenerator();
+                gen->Init();
+                Gorgon::UI::Initialize(*gen);
+                (void)Gorgon::Widgets::Registry::Active()[Gorgon::Widgets::Registry::Checkbox_Regular];
+                frames(1);
+            }
+            else if(variant == "noop") {
+                // Window + theme construct and destroy, nothing else.
+            }
+            else if(variant == "frames1") {
+                frames(1);
+            }
+            else if(variant == "base") {
+                frames(2);
+            }
+            else if(variant == "noclose") {
+                frames(3);
+            }
+            else if(variant == "close") {
+                frames(2);
+                window.Close();
+            }
+            else if(variant == "close-frames") {
+                frames(2);
+                window.Close();
+                frames(2);
+            }
+            else if(variant == "theme-first") {
+                // Hand the theme over so it outlives the window.
+                theme.release();
+                frames(2);
+                window.Close();
+                frames(1);
+            }
+            else if(variant == "panel") {
+                // Constructed and destroyed, never attached to the window.
+                AssetBrowserPanel browser;
+                (void)browser;
+                frames(2);
+            }
+            else if(variant == "layers") {
+                // Two extra layers attached to a bare Layerbox, mirroring the browser grid.
+                {
+                    Gorgon::Widgets::Layerbox box{Gorgon::Widgets::Registry::Layerbox_Blank};
+                    window.Add(box);
+                    Gorgon::Graphics::Layer gfx;
+                    Gorgon::Input::Layer input;
+                    box.GetLayer().Add(gfx);
+                    box.GetLayer().Add(input);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "browser-nodraw") {
+                {
+                    AssetBrowserPanel browser;
+                    browser.Attach(window);
+                    browser.Layout(0, 0, 1280, 200);
+                    frames(2);
+                }
+                frames(2);
+            }
+            else if(variant == "browser") {
+                {
+                    AssetBrowserPanel browser;
+                    browser.Attach(window);
+                    browser.Layout(0, 0, 1280, 200);
+                    frames(3);
+                }
+                frames(3);
+            }
+            else if(variant == "browser-thumbs") {
+                std::error_code ec;
+                const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_diag_assets";
+                std::filesystem::remove_all(dir, ec);
+                std::filesystem::create_directories(dir, ec);
+                WriteTinyPng(dir / "a.png");
+                WriteTinyPng(dir / "b.png");
+                {
+                    AssetBrowserPanel browser;
+                    browser.Attach(window);
+                    browser.SetRoot(dir.generic_string());
+                    browser.Layout(0, 0, 1280, 200);
+                    frames(4);
+                }
+                frames(4);
+                std::filesystem::remove_all(dir, ec);
+            }
+            else if(variant == "app") {
+                {
+                    EditorApp app(window);
+                    frames(3);
+                    window.Close();
+                    frames(2);
+                }
+                frames(2);
+            }
+            else {
+                std::cerr << "unknown diag variant: " << variant << "\n";
+                result = 2;
+            }
+
+            window.Close();
+            frames(1);
+        }
+        return result;
+    }
+
 } // namespace
 
 int main(int argc, char *argv[]) {
     bool selftest = false;
     bool smoke = false;
+    std::string diagVariant;
     std::string initialScenePath;
 
     for(int i = 1; i < argc; ++i) {
@@ -429,9 +770,17 @@ int main(int argc, char *argv[]) {
             selftest = true;
         } else if(arg == "--smoke") {
             smoke = true;
+        } else if(arg == "--diag") {
+            if(i + 1 < argc) {
+                diagVariant = argv[++i];
+            }
         } else if(initialScenePath.empty() && !arg.empty() && arg[0] != '-') {
             initialScenePath = arg;
         }
+    }
+
+    if(!diagVariant.empty()) {
+        return RunDiag(diagVariant);
     }
 
     if(selftest) {
@@ -440,8 +789,14 @@ int main(int argc, char *argv[]) {
 
     Gorgon::Initialize("GorgonEditor");
 
+    // The widget theme (Widgets::Registry) must outlive the window: Gorgon's window/widget
+    // teardown still dereferences the active registry's templates, so destroying the theme
+    // first corrupts the heap at process exit (exit code 0xC0000374). Declared before the
+    // window, assigned after it exists, so it is destroyed *after* the window closes.
+    std::unique_ptr<Gorgon::Widgets::SimpleGenerator> theme;
+
     Gorgon::UI::Window window({1280, 800}, "Gorgon 2D Editor");
-    auto theme = Gorgon::Editor::CreateDarkEditorTheme(9.5f);
+    theme = Gorgon::Editor::CreateDarkEditorTheme(9.5f);
 
     Gorgon::Editor::EditorApp app(window);
     window.AllowResize();

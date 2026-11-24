@@ -923,8 +923,9 @@ namespace Gorgon :: Widgets {
         
         CGI::DrawLines(*icon, border, (float)Border.Object, CGI::SolidFill<>(color));
         icon->Prepare();
-        drawables.Add(icon);
-        
+
+        // Do not add to drawables: GetAsset registers the returned provider in `assets`,
+        // which already owns it. Adding it to both containers double-frees the bitmap.
         return icon;
     }
  
@@ -975,8 +976,8 @@ namespace Gorgon :: Widgets {
         CGI::Circle<16>(*icon, center, (float)borderstart_r, (float)Border.Object, CGI::SolidFill<>(color));
 
         icon->Prepare();
-        drawables.Add(icon);
-        
+
+        // Owned by GetAsset's `assets` map; adding it to drawables too would double-free it.
         return icon;
     }
     

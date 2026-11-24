@@ -85,8 +85,11 @@ namespace Gorgon :: Editor {
         PlayMode playMode_ = PlayMode::Stopped;
 
         // Top toolbar
-        Gorgon::Widgets::Panel toolbarPanel_{Gorgon::Widgets::Registry::Panel_Top};
+        // NOTE: the organizer is declared *before* the panel it drives. Gorgon's
+        // WidgetContainer keeps a raw pointer to its organizer and touches it while
+        // tearing down, so the organizer must outlive the panel (reverse-order destruction).
         Gorgon::UI::Organizers::Flow toolbarOrganizer_;
+        Gorgon::Widgets::Panel toolbarPanel_{Gorgon::Widgets::Registry::Panel_Top};
         Gorgon::Widgets::Button btnNew_{"New"};
         Gorgon::Widgets::Button btnOpen_{"Open"};
         Gorgon::Widgets::Button btnSave_{"Save"};

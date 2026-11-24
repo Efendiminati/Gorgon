@@ -67,44 +67,51 @@ namespace Gorgon :: Editor {
         hierarchy_ = std::make_unique<HierarchyPanel>(scene_, viewport_, hierarchyPanel_);
         inspector_ = std::make_unique<InspectorPanel>(scene_, viewport_, inspectorPanel_);
 
-        hierarchy_->OnSelectionChanged = [this](EntityId) {
-            if(inspector_)
-                inspector_->Rebuild();
-            updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
-        };
-        hierarchy_->OnSceneModified = [this]() {
-            viewport_.Redraw();
-            markDirty();
-        };
-        hierarchy_->OnStructureChanged = [this]() {
-            if(inspector_)
-                inspector_->Rebuild();
-            viewport_.Redraw();
-            markDirty();
-        };
+        if(hierarchy_)
+            hierarchy_->OnSelectionChanged = [this](EntityId) {
+                if(inspector_)
+                    inspector_->Rebuild();
+                updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+            };
+        if(hierarchy_)
+            hierarchy_->OnSceneModified = [this]() {
+                viewport_.Redraw();
+                markDirty();
+            };
+        if(hierarchy_)
+            hierarchy_->OnStructureChanged = [this]() {
+                if(inspector_)
+                    inspector_->Rebuild();
+                viewport_.Redraw();
+                markDirty();
+            };
 
-        inspector_->OnSceneModified = [this]() {
-            viewport_.Redraw();
-            markDirty();
-            updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
-        };
-        inspector_->OnStructureChanged = [this]() {
-            if(hierarchy_)
-                hierarchy_->Rebuild();
-            viewport_.Redraw();
-            markDirty();
-        };
+        if(inspector_)
+            inspector_->OnSceneModified = [this]() {
+                viewport_.Redraw();
+                markDirty();
+                updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+            };
+        if(inspector_)
+            inspector_->OnStructureChanged = [this]() {
+                if(hierarchy_)
+                    hierarchy_->Rebuild();
+                viewport_.Redraw();
+                markDirty();
+            };
 
         // Keyboard preview for Space+left-drag pan and R to reset view
-        window_.KeyPreviewEvent.Register([this](Gorgon::Input::Key key, float amount) {
-            if(key == Gorgon::Input::Keyboard::Keycodes::Space) {
-                viewport_.SetSpaceHeld(amount > 0.0f);
-            }
-        });
+        {
+            window_.KeyPreviewEvent.Register([this](Gorgon::Input::Key key, float amount) {
+                if(key == Gorgon::Input::Keyboard::Keycodes::Space) {
+                    viewport_.SetSpaceHeld(amount > 0.0f);
+                }
+            });
 
-        window_.ResizedEvent.Register([this]() {
-            LayoutPanes();
-        });
+            window_.ResizedEvent.Register([this]() {
+                LayoutPanes();
+            });
+        }
 
         populateSampleScene();
         setupAssetBrowser();
