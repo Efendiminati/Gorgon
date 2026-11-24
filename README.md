@@ -2,6 +2,19 @@
 
 Gorgon is a cross-platform framework for games and visual applications. It provides a powerful, flexible, and easy to use set of tools for creating games, GUI, computer graphics and image processing applications. Gorgon abstracts OS, graphics, audio, and input handling natively on Windows and Linux. It has a built-in programming language called GScript which has a similar syntax to Basic/Fortran.
 
+## 2D Scene Editor
+
+This fork adds a standalone **2D Scene Editor** built directly with Gorgon (`Gorgon::UI`, `Layerbox`, `Gorgon/Encoding/JSON`, and the GScript `VirtualMachine`) with no extra external dependencies, plus a reusable `Gorgon::EditorCore` runtime library for loading `.gscene.json` scenes in games.
+
+* **Editor (`GorgonEditor`):** Four-pane layout with scene hierarchy, interactive 2D viewport (pan, zoom, drag-move with grid snap, scale handles, axis gizmos), details inspector, thumbnail asset browser, undo/redo, and play-in-editor GScript execution.
+* **Runtime (`Gorgon::EditorCore`):** Static library (`SceneRuntime`) so games can load and run `.gscene.json` scenes without linking the editor UI — see `Examples/EditorDemo`.
+* **Build:** Opt-in via `-DBUILD_EDITOR=ON`:
+  ```bat
+  cmake --preset WindowsTesting -DBUILD_EDITOR=ON
+  cmake --build build/WindowsTesting --config Release --target GorgonEditor EditorDemo UnitTest-EditorCore
+  ```
+* **Docs:** See [Tools/Editor/README.md](Tools/Editor/README.md) for controls, scene format, GScript contract, and `SceneRuntime` API.
+
 ## Modules
 
 * **Core & Application Lifecycle** (Main engine loop, Scene system & scene management, Event & ConsumableEvent dispatcher, high-resolution Time, Configuration, Logging)
