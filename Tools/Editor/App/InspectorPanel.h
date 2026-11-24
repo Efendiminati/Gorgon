@@ -53,6 +53,7 @@ namespace Gorgon :: Editor {
     class InspectorPanel {
     public:
         InspectorPanel(Scene &scene, EditorViewport &viewport, Gorgon::Widgets::Panel &panel);
+        ~InspectorPanel();
 
         InspectorPanel(const InspectorPanel &) = delete;
         InspectorPanel &operator=(const InspectorPanel &) = delete;
@@ -159,6 +160,8 @@ namespace Gorgon :: Editor {
 
         std::vector<Row> rows_;
         bool updating_ = false;
+        Gorgon::Event<Gorgon::UI::Widget>::Token boundsToken_ =
+            Gorgon::Event<Gorgon::UI::Widget>::EmptyToken;
     };
 
 } // namespace Gorgon::Editor

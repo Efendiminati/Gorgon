@@ -48,6 +48,7 @@ namespace Gorgon :: Editor {
     class HierarchyPanel {
     public:
         HierarchyPanel(Scene &scene, EditorViewport &viewport, Gorgon::Widgets::Panel &panel);
+        ~HierarchyPanel();
 
         HierarchyPanel(const HierarchyPanel &) = delete;
         HierarchyPanel &operator=(const HierarchyPanel &) = delete;
@@ -115,6 +116,8 @@ namespace Gorgon :: Editor {
 
         std::vector<HierarchyRow> rows_;
         std::vector<EntityId> parentChoices_;
+        Gorgon::Event<Gorgon::UI::Widget>::Token boundsToken_ =
+            Gorgon::Event<Gorgon::UI::Widget>::EmptyToken;
 
         bool suppressSelection_ = false;
         bool suppressParent_ = false;

@@ -10,6 +10,8 @@
 #include <cmath>
 #include <filesystem>
 #include <iomanip>
+#include <iostream>
+#include <cstdlib>
 #include <sstream>
 
 namespace Gorgon :: Editor {
@@ -80,6 +82,7 @@ namespace Gorgon :: Editor {
             viewport_.Redraw();
             markDirty();
         };
+
         inspector_->OnSceneModified = [this]() {
             viewport_.Redraw();
             markDirty();
@@ -114,6 +117,12 @@ namespace Gorgon :: Editor {
         updateWindowTitle();
         updateStatusText(0.0f, 0.0f, 1.0f);
         viewport_.Redraw();
+    }
+
+    EditorApp::~EditorApp() {
+        // Tear the Phase 3 panels down before the dock panels they populate.
+        hierarchy_.reset();
+        inspector_.reset();
     }
 
     void EditorApp::markDirty() {

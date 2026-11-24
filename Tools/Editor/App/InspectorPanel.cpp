@@ -1,6 +1,7 @@
 #include "InspectorPanel.h"
 
 #include <algorithm>
+#include <iostream>
 #include <cstddef>
 #include <string>
 
@@ -34,6 +35,10 @@ namespace Gorgon :: Editor {
         buildRows();
         registerEvents();
         Rebuild();
+    }
+
+    InspectorPanel::~InspectorPanel() {
+        panel_.BoundsChangedEvent.Unregister(boundsToken_);
     }
 
     void InspectorPanel::build() {
@@ -104,7 +109,7 @@ namespace Gorgon :: Editor {
         colliderType_.List.Add(std::string(ColliderTypeNames[2]));
         colliderType_.List.SetSelectedIndex(0);
 
-        panel_.BoundsChangedEvent.Register([this]() {
+        boundsToken_ = panel_.BoundsChangedEvent.Register([this]() {
             Layout();
         });
     }

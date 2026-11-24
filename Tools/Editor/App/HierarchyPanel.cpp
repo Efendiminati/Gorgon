@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <iostream>
 #include <string>
 #include <utility>
 
@@ -34,6 +35,10 @@ namespace Gorgon :: Editor {
         Rebuild();
     }
 
+    HierarchyPanel::~HierarchyPanel() {
+        panel_.BoundsChangedEvent.Unregister(boundsToken_);
+    }
+
     void HierarchyPanel::build() {
         panel_.EnableScroll(true, false);
 
@@ -49,7 +54,7 @@ namespace Gorgon :: Editor {
         panel_.Add(parentBox_);
         panel_.Add(list_);
 
-        panel_.BoundsChangedEvent.Register([this]() {
+        boundsToken_ = panel_.BoundsChangedEvent.Register([this]() {
             Layout();
         });
     }

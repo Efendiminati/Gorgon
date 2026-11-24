@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -438,15 +439,11 @@ int main(int argc, char *argv[]) {
     }
 
     Gorgon::Initialize("GorgonEditor");
-    std::cerr << "[trace] initialized" << std::endl;
 
     Gorgon::UI::Window window({1280, 800}, "Gorgon 2D Editor");
-    std::cerr << "[trace] window created" << std::endl;
     auto theme = Gorgon::Editor::CreateDarkEditorTheme(9.5f);
-    std::cerr << "[trace] theme created" << std::endl;
 
     Gorgon::Editor::EditorApp app(window);
-    std::cerr << "[trace] app created" << std::endl;
     window.AllowResize();
 
     if(!initialScenePath.empty()) {

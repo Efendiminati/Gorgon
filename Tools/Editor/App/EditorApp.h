@@ -28,6 +28,7 @@ namespace Gorgon :: Editor {
     class EditorApp {
     public:
         explicit EditorApp(Gorgon::UI::Window &window);
+        ~EditorApp();
 
         bool OnClosing();
         void LayoutPanes();
