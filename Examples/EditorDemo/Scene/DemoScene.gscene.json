@@ -1,0 +1,78 @@
+{
+  "schemaVersion": 1,
+  "name": "EditorDemo",
+  "settings": {
+    "gridSize": 32,
+    "backgroundColor": [22, 26, 38, 255]
+  },
+  "entities": [
+    {
+      "id": 1,
+      "parentId": 0,
+      "name": "Ground",
+      "visible": true,
+      "locked": false,
+      "zOrder": -10,
+      "transform": { "x": 240.0, "y": 340.0, "scaleX": 1.0, "scaleY": 1.0, "rotation": 0.0 },
+      "sprite": { "asset": "assets/ground.png", "tint": [255, 255, 255, 255] },
+      "collider": { "type": "aabb", "w": 480.0, "h": 80.0, "radius": 16.0, "offsetX": 0.0, "offsetY": 0.0 }
+    },
+    {
+      "id": 2,
+      "parentId": 0,
+      "name": "Tree",
+      "visible": true,
+      "locked": false,
+      "zOrder": -5,
+      "transform": { "x": 78.0, "y": 246.0, "scaleX": 1.0, "scaleY": 1.0, "rotation": 0.0 },
+      "sprite": { "asset": "assets/tree.png", "tint": [255, 255, 255, 255] },
+      "collider": { "type": "aabb", "w": 24.0, "h": 24.0, "radius": 16.0, "offsetX": 0.0, "offsetY": 40.0 }
+    },
+    {
+      "id": 3,
+      "parentId": 0,
+      "name": "Crate Stack",
+      "visible": true,
+      "locked": false,
+      "zOrder": 0,
+      "transform": { "x": 352.0, "y": 308.0, "scaleX": 1.0, "scaleY": 1.0, "rotation": 0.0 },
+      "sprite": { "asset": "assets/crate.png", "tint": [255, 255, 255, 255] },
+      "collider": { "type": "aabb", "w": 64.0, "h": 64.0, "radius": 16.0, "offsetX": 0.0, "offsetY": 0.0 }
+    },
+    {
+      "id": 4,
+      "parentId": 3,
+      "name": "Crate Top",
+      "visible": true,
+      "locked": true,
+      "zOrder": 0,
+      "transform": { "x": 12.0, "y": -60.0, "scaleX": 0.75, "scaleY": 0.75, "rotation": 8.0 },
+      "sprite": { "asset": "assets/crate.png", "tint": [255, 236, 208, 255] },
+      "collider": { "type": "aabb", "w": 48.0, "h": 48.0, "radius": 16.0, "offsetX": 0.0, "offsetY": 0.0 }
+    },
+    {
+      "id": 5,
+      "parentId": 0,
+      "name": "Lantern",
+      "visible": true,
+      "locked": false,
+      "zOrder": 4,
+      "transform": { "x": 168.0, "y": 250.0, "scaleX": 1.0, "scaleY": 1.0, "rotation": 0.0 },
+      "sprite": { "asset": "assets/lantern.png", "tint": [255, 255, 255, 255] },
+      "collider": { "type": "circle", "w": 32.0, "h": 32.0, "radius": 14.0, "offsetX": 0.0, "offsetY": 12.0 },
+      "script": { "path": "scripts/bob.gs" }
+    },
+    {
+      "id": 6,
+      "parentId": 0,
+      "name": "Orb",
+      "visible": true,
+      "locked": false,
+      "zOrder": 8,
+      "transform": { "x": 240.0, "y": 200.0, "scaleX": 1.0, "scaleY": 1.0, "rotation": 0.0 },
+      "sprite": { "asset": "assets/orb.png", "tint": [255, 255, 255, 255] },
+      "collider": { "type": "circle", "w": 56.0, "h": 56.0, "radius": 28.0, "offsetX": 0.0, "offsetY": 0.0 },
+      "script": { "path": "scripts/orbit.gs" }
+    }
+  ]
+}

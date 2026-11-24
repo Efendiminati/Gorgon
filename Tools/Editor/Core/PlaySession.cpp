@@ -104,17 +104,29 @@ namespace Gorgon :: Editor {
         impl.entityType = new Gorgon::Scripting::MappedReferenceType<ScriptTransform>(
             "EntityTransform", "Transform of the entity the running script is attached to"
         );
+
+        // The transform values are 32bit floats, while GScript arithmetic (and Math) produces
+        // doubles and integer literals produce ints. Mapping the members directly would copy the
+        // raw bytes of whatever the script assigned, silently corrupting the value, so the members
+        // are exposed through function accessors instead: reads return the float reference, and
+        // writes go through a typed function call which converts the value to float.
+        auto member = [](float ScriptTransform::*slot, const std::string &name, const std::string &help,
+                         const Gorgon::Scripting::Type *parent) {
+            return new Gorgon::Scripting::MappedInstanceMember_Function(
+                [slot](ScriptTransform &values) -> float & { return values.*slot; },
+                [slot](ScriptTransform &values, float value) { values.*slot = value; },
+                name, help,
+                Gorgon::Scripting::Types::Float(), parent,
+                false, true, false, false
+            );
+        };
+
         impl.entityType->AddMembers({
-            new Gorgon::Scripting::MappedInstanceMember<ScriptTransform, float>(
-                &ScriptTransform::x, "x", "World position on x", Gorgon::Scripting::Types::Float()),
-            new Gorgon::Scripting::MappedInstanceMember<ScriptTransform, float>(
-                &ScriptTransform::y, "y", "World position on y", Gorgon::Scripting::Types::Float()),
-            new Gorgon::Scripting::MappedInstanceMember<ScriptTransform, float>(
-                &ScriptTransform::rotation, "rotation", "Rotation in degrees", Gorgon::Scripting::Types::Float()),
-            new Gorgon::Scripting::MappedInstanceMember<ScriptTransform, float>(
-                &ScriptTransform::scaleX, "scaleX", "Scale on x", Gorgon::Scripting::Types::Float()),
-            new Gorgon::Scripting::MappedInstanceMember<ScriptTransform, float>(
-                &ScriptTransform::scaleY, "scaleY", "Scale on y", Gorgon::Scripting::Types::Float()),
+            member(&ScriptTransform::x, "x", "World position on x", impl.entityType),
+            member(&ScriptTransform::y, "y", "World position on y", impl.entityType),
+            member(&ScriptTransform::rotation, "rotation", "Rotation in degrees", impl.entityType),
+            member(&ScriptTransform::scaleX, "scaleX", "Scale on x", impl.entityType),
+            member(&ScriptTransform::scaleY, "scaleY", "Scale on y", impl.entityType),
         });
         impl.library->AddMembers({impl.entityType});
 

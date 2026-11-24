@@ -11,6 +11,8 @@ add_library(GorgonEditorCore STATIC
     Core/CommandStack.cpp
     Core/PlaySession.h
     Core/PlaySession.cpp
+    Core/SceneRuntime.h
+    Core/SceneRuntime.cpp
 )
 add_library(Gorgon::EditorCore ALIAS GorgonEditorCore)
 

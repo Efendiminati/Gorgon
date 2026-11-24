@@ -4,8 +4,10 @@
 #include "Core/CommandStack.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
+#include "Core/SceneRuntime.h"
 #include "Core/SceneSerializer.h"
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -409,6 +411,136 @@ TEST_CASE("Play session runs a GScript and restores the snapshot", "[EditorCore]
     REQUIRE_FALSE(failing.Start(broken, dir.generic_string(), &failError));
     REQUIRE_FALSE(failError.empty());
     REQUIRE_FALSE(failing.IsRunning());
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("SceneRuntime loads a scene file, resolves paths and steps scripts", "[EditorCore][Runtime]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_runtime_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir / "assets", ec);
+    std::filesystem::create_directories(dir / "scripts", ec);
+
+    { std::ofstream out(dir / "assets" / "hero.png", std::ios::binary); out << "not-a-real-png"; }
+    {
+        // Script globals must survive between Update calls: `phase` accumulates dt and drives both
+        // a Math call and the entity transform.
+        std::ofstream out(dir / "scripts" / "orbit.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Math\n"
+               "phase = 0.0\n"
+               "function Update(self, dt)\n"
+               "    phase = phase + dt\n"
+               "    self.x = 100 + 100 * phase\n"
+               "    self.y = 50 + 10 * Sin(phase)\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    const auto scenePath = dir / "RuntimeTest.gscene.json";
+    {
+        std::ofstream out(scenePath, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "{\n"
+               "  \"schemaVersion\": 1,\n"
+               "  \"name\": \"RuntimeTest\",\n"
+               "  \"settings\": { \"gridSize\": 16, \"backgroundColor\": [10, 20, 30, 255] },\n"
+               "  \"entities\": [\n"
+               "    { \"id\": 1, \"parentId\": 0, \"name\": \"Hero\", \"visible\": true, \"locked\": false,\n"
+               "      \"zOrder\": 2,\n"
+               "      \"transform\": { \"x\": 100.0, \"y\": 50.0, \"scaleX\": 1.0, \"scaleY\": 1.0, \"rotation\": 0.0 },\n"
+               "      \"sprite\": { \"asset\": \"assets/hero.png\", \"tint\": [255, 255, 255, 255] },\n"
+               "      \"script\": { \"path\": \"scripts/orbit.gs\" } },\n"
+               "    { \"id\": 2, \"parentId\": 1, \"name\": \"Child\", \"visible\": true, \"locked\": false,\n"
+               "      \"zOrder\": 1,\n"
+               "      \"transform\": { \"x\": 10.0, \"y\": 5.0, \"scaleX\": 1.0, \"scaleY\": 1.0, \"rotation\": 0.0 },\n"
+               "      \"collider\": { \"type\": \"aabb\", \"w\": 20.0, \"h\": 20.0, \"radius\": 8.0, \"offsetX\": 0.0, \"offsetY\": 0.0 } }\n"
+               "  ]\n"
+               "}\n";
+    }
+
+    SceneRuntime runtime;
+    std::string error;
+    REQUIRE(runtime.Load(scenePath.string(), &error));
+    INFO("runtime load error: " << error);
+    REQUIRE(runtime.IsLoaded());
+    REQUIRE(runtime.GetScene().name == "RuntimeTest");
+    REQUIRE(runtime.GetScene().GetEntityCount() == 2);
+    REQUIRE(runtime.GetScenePath() == scenePath.string());
+    REQUIRE(runtime.GetBaseDir() == dir.string());
+    REQUIRE(runtime.GetScriptCount() == 1);
+    REQUIRE(runtime.GetLastError().empty());
+
+    // Relative references resolve against the scene file's directory; absolute ones pass through.
+    const auto resolved = runtime.ResolveAssetPath("assets/hero.png");
+    REQUIRE(std::filesystem::path(resolved) == dir / "assets" / "hero.png");
+    REQUIRE(std::filesystem::exists(resolved));
+    const auto absolute = (dir / "assets" / "hero.png").string();
+    REQUIRE(runtime.ResolveAssetPath(absolute) == absolute);
+
+    // Ticking drives the script; the hierarchy still composes child transforms on top.
+    runtime.Update(0.25f);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(1)->transform.x) == 125.0);
+    runtime.Update(0.25f);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(1)->transform.x) == 150.0);
+    const float expectedRuntimeY = 50.0f + 10.0f * std::sin(0.5f);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(1)->transform.y).epsilon(1e-3) == expectedRuntimeY);
+    REQUIRE(Catch::Approx(runtime.GetScene().GetWorldTransform(2).x) == 160.0);
+
+    // A second tick keeps accumulating from the script global instead of restarting at zero.
+    REQUIRE(runtime.GetLastError().find("Script error") == std::string::npos);
+
+    // An explicit base dir override re-resolves assets and restarts the scripts.
+    runtime.SetBaseDir(dir.generic_string());
+    REQUIRE(runtime.GetScriptCount() == 1);
+
+    // Camera: pan centre maps to the viewport centre, and the inverse round-trips.
+    RuntimeCamera camera;
+    camera.panX = 120.0f;
+    camera.panY = 80.0f;
+    camera.zoom = 2.0f;
+    const auto centre = camera.WorldToScreen(120.0f, 80.0f, 800.0f, 600.0f);
+    REQUIRE(Catch::Approx(centre.X) == 400.0);
+    REQUIRE(Catch::Approx(centre.Y) == 300.0);
+    const auto world = camera.ScreenToWorld(560.0f, 180.0f, 800.0f, 600.0f);
+    REQUIRE(Catch::Approx(world.X) == 200.0);
+    REQUIRE(Catch::Approx(world.Y) == 20.0);
+    camera.Reset();
+    REQUIRE(camera.panX == 0.0f);
+    REQUIRE(camera.zoom == 1.0f);
+
+    {
+        const auto size = runtime.GetScene().FindEntity(1)->transform;
+        (void)size;
+        runtime.GetCamera().zoom = 1.0f;
+        runtime.CenterCamera(0, 0);
+        // Entity 1 is at y = 50 + 10*sin(0.5) and entity 2 hangs off it; the camera centres the
+        // bounds with zoom left untouched when the target size is unknown.
+        REQUIRE(runtime.GetCamera().panX > 100.0f);
+        REQUIRE(Catch::Approx(runtime.GetCamera().zoom) == 1.0);
+    }
+
+    SceneRenderOptions defaults;
+    REQUIRE(defaults.drawBackground);
+    REQUIRE(defaults.drawEntities);
+    REQUIRE_FALSE(defaults.drawColliders);
+    runtime.GetRenderOptions().drawColliders = true;
+    REQUIRE(runtime.GetRenderOptions().drawColliders);
+
+    // Unloading drops the scene, the scripts and the path resolution root.
+    runtime.Unload();
+    REQUIRE_FALSE(runtime.IsLoaded());
+    REQUIRE(runtime.GetScriptCount() == 0);
+    REQUIRE(runtime.GetScene().GetEntityCount() == 0);
+    REQUIRE(runtime.GetBaseDir().empty());
+
+    // A missing file fails cleanly and reports why.
+    SceneRuntime missing;
+    std::string missingError;
+    REQUIRE_FALSE(missing.Load((dir / "nope.gscene.json").string(), &missingError));
+    REQUIRE_FALSE(missingError.empty());
+    REQUIRE_FALSE(missing.IsLoaded());
 
     std::filesystem::remove_all(dir, ec);
 }

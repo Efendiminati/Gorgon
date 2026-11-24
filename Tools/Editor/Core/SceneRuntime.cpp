@@ -1,0 +1,507 @@
+#include "SceneRuntime.h"
+
+#include "PlaySession.h"
+#include "SceneSerializer.h"
+
+#include <Gorgon/Graphics/Bitmap.h>
+
+#include <algorithm>
+#include <cmath>
+#include <filesystem>
+#include <unordered_map>
+
+namespace Gorgon :: Editor {
+
+    namespace {
+        constexpr float kPi = 3.14159265358979323846f;
+        constexpr float kDegToRad = kPi / 180.0f;
+        constexpr float kDefaultEntitySize = 64.0f;
+
+        Gorgon::Graphics::RGBAf ToRGBAf(const ColorRGBA &c) {
+            return Gorgon::Graphics::RGBAf(
+                c.r / 255.0f,
+                c.g / 255.0f,
+                c.b / 255.0f,
+                c.a / 255.0f
+            );
+        }
+
+        /// Placeholder fill for entities without a (loadable) sprite. Matches the editor viewport so
+        /// a scene looks the same in both.
+        Gorgon::Graphics::RGBAf FallbackColorForEntity(const Entity &entity) {
+            if(entity.sprite.has_value()) {
+                const auto &t = entity.sprite->tint;
+                if(t.r != 255 || t.g != 255 || t.b != 255) {
+                    return Gorgon::Graphics::RGBAf(
+                        t.r / 255.0f, t.g / 255.0f, t.b / 255.0f,
+                        std::max(0.45f, t.a / 255.0f)
+                    );
+                }
+            }
+
+            static const Gorgon::Graphics::RGBAf palette[] = {
+                {0.26f, 0.52f, 0.85f, 0.85f},
+                {0.85f, 0.42f, 0.28f, 0.85f},
+                {0.30f, 0.72f, 0.52f, 0.85f},
+                {0.76f, 0.45f, 0.82f, 0.85f},
+                {0.85f, 0.70f, 0.26f, 0.85f},
+                {0.28f, 0.70f, 0.78f, 0.85f}
+            };
+            return palette[entity.id % (sizeof(palette) / sizeof(palette[0]))];
+        }
+
+        void DrawLine(Gorgon::Graphics::Layer &target, float x1, float y1, float x2, float y2,
+                      float thickness, Gorgon::Graphics::RGBAf color) {
+            const float dx = x2 - x1;
+            const float dy = y2 - y1;
+            const float len = std::sqrt(dx * dx + dy * dy);
+            if(len < 0.5f)
+                return;
+
+            const float nx = -dy / len * (thickness * 0.5f);
+            const float ny = dx / len * (thickness * 0.5f);
+
+            target.Draw(
+                Gorgon::Geometry::Pointf{x1 + nx, y1 + ny},
+                Gorgon::Geometry::Pointf{x2 + nx, y2 + ny},
+                Gorgon::Geometry::Pointf{x2 - nx, y2 - ny},
+                Gorgon::Geometry::Pointf{x1 - nx, y1 - ny},
+                color
+            );
+        }
+    } // namespace
+
+    // ---- RuntimeCamera -------------------------------------------------------
+
+    Gorgon::Geometry::Pointf RuntimeCamera::WorldToScreen(float wx, float wy, float viewW, float viewH) const {
+        return {
+            (wx - panX) * zoom + viewW * 0.5f,
+            (wy - panY) * zoom + viewH * 0.5f
+        };
+    }
+
+    Gorgon::Geometry::Pointf RuntimeCamera::ScreenToWorld(float sx, float sy, float viewW, float viewH) const {
+        return {
+            (sx - viewW * 0.5f) / zoom + panX,
+            (sy - viewH * 0.5f) / zoom + panY
+        };
+    }
+
+    void RuntimeCamera::CenterOn(float wx, float wy) {
+        panX = wx;
+        panY = wy;
+    }
+
+    void RuntimeCamera::Reset() {
+        panX = 0.0f;
+        panY = 0.0f;
+        zoom = 1.0f;
+    }
+
+    // ---- SceneRuntime --------------------------------------------------------
+
+    struct SceneRuntime::Impl {
+        Scene scene;
+        std::string scenePath;
+        std::string baseDir;
+
+        RuntimeCamera camera;
+        SceneRenderOptions options;
+
+        std::unique_ptr<PlaySession> play;
+        std::unordered_map<std::string, std::unique_ptr<Gorgon::Graphics::Bitmap>> sprites;
+
+        std::string lastError;
+        bool loaded = false;
+
+        void clearRuntimeState() {
+            play.reset();
+            sprites.clear();
+        }
+
+        bool sceneHasScripts() const {
+            for(const auto &entity : scene.GetEntities()) {
+                if(entity.script && !entity.script->path.empty())
+                    return true;
+            }
+            return false;
+        }
+
+        void startScripts() {
+            play.reset();
+            lastError.clear();
+
+            if(!sceneHasScripts())
+                return;
+
+            play = std::unique_ptr<PlaySession>(new PlaySession);
+            std::string error;
+            if(!play->Start(scene, baseDir, &error)) {
+                lastError = error;
+                play.reset();
+            }
+        }
+
+        /// Bitmaps are cached per resolved path; a missing/invalid image is cached as nullptr so a
+        /// broken reference is only attempted once.
+        const Gorgon::Graphics::Bitmap *getSprite(const std::string &asset) {
+            if(asset.empty())
+                return nullptr;
+
+            auto it = sprites.find(asset);
+            if(it != sprites.end())
+                return it->second.get();
+
+            std::unique_ptr<Gorgon::Graphics::Bitmap> bitmap;
+            const std::string full = ResolvePath(asset);
+            if(!full.empty() && std::filesystem::exists(full)) {
+                auto candidate = std::unique_ptr<Gorgon::Graphics::Bitmap>(new Gorgon::Graphics::Bitmap);
+                // A corrupt or unsupported image must not take the runtime down; it is reported as
+                // a missing sprite and the entity falls back to its placeholder rectangle.
+                try {
+                    if(candidate->Import(full) && candidate->HasData()) {
+                        candidate->Prepare();
+                        bitmap = std::move(candidate);
+                    }
+                }
+                catch(const std::exception &ex) {
+                    lastError = std::string("Sprite could not be loaded: ") + full + ": " + ex.what();
+                }
+                catch(...) {
+                    lastError = "Sprite could not be loaded: " + full;
+                }
+            }
+
+            const auto *result = bitmap.get();
+            sprites.emplace(asset, std::move(bitmap));
+            return result;
+        }
+
+        std::string ResolvePath(const std::string &path) const {
+            if(path.empty())
+                return {};
+
+            const std::filesystem::path p(path);
+            if(p.is_absolute() || baseDir.empty())
+                return p.string();
+
+            return (std::filesystem::path(baseDir) / p).string();
+        }
+
+        Gorgon::Geometry::Pointf entityBaseSize(const Entity &entity) {
+            if(entity.sprite.has_value() && !entity.sprite->asset.empty()) {
+                if(const auto *bitmap = getSprite(entity.sprite->asset)) {
+                    const auto size = bitmap->GetSize();
+                    if(size.Width > 0 && size.Height > 0)
+                        return {float(size.Width), float(size.Height)};
+                }
+            }
+
+            if(entity.collider.has_value()) {
+                if(entity.collider->type == ColliderType::AABB &&
+                   entity.collider->width > 0.0f && entity.collider->height > 0.0f) {
+                    return {entity.collider->width, entity.collider->height};
+                }
+                if(entity.collider->type == ColliderType::Circle && entity.collider->radius > 0.0f) {
+                    const float diameter = entity.collider->radius * 2.0f;
+                    return {diameter, diameter};
+                }
+            }
+
+            return {kDefaultEntitySize, kDefaultEntitySize};
+        }
+    };
+
+    SceneRuntime::SceneRuntime() : impl_(new Impl) { }
+
+    SceneRuntime::~SceneRuntime() = default;
+
+    bool SceneRuntime::Load(const std::string &sceneFile, std::string *outError) {
+        auto &impl = *impl_;
+
+        Scene scene;
+        std::string error;
+        if(!SceneSerializer::LoadFromFile(sceneFile, scene, &error)) {
+            impl.lastError = error.empty() ? ("Could not load scene: " + sceneFile) : error;
+            if(outError)
+                *outError = impl.lastError;
+            return false;
+        }
+
+        std::string baseDir;
+        const std::filesystem::path path(sceneFile);
+        const auto parent = path.parent_path();
+        if(!parent.empty())
+            baseDir = parent.string();
+
+        if(!LoadFromScene(std::move(scene), baseDir, outError))
+            return false;
+
+        impl.scenePath = sceneFile;
+        return true;
+    }
+
+    bool SceneRuntime::LoadFromScene(Scene scene, const std::string &baseDir, std::string *outError) {
+        auto &impl = *impl_;
+
+        impl.clearRuntimeState();
+        impl.scene = std::move(scene);
+        impl.baseDir = baseDir;
+        impl.scenePath.clear();
+        impl.lastError.clear();
+        impl.loaded = true;
+
+        impl.startScripts();
+
+        if(outError)
+            *outError = impl.lastError;
+
+        return true;
+    }
+
+    void SceneRuntime::Unload() {
+        auto &impl = *impl_;
+        impl.clearRuntimeState();
+        impl.scene = Scene{};
+        impl.scenePath.clear();
+        impl.baseDir.clear();
+        impl.lastError.clear();
+        impl.loaded = false;
+    }
+
+    bool SceneRuntime::IsLoaded() const {
+        return impl_->loaded;
+    }
+
+    void SceneRuntime::Update(float dt) {
+        auto &impl = *impl_;
+        if(!impl.loaded || !impl.play)
+            return;
+
+        impl.play->Tick(impl.scene, dt);
+
+        const auto &error = impl.play->GetLastError();
+        if(!error.empty())
+            impl.lastError = error;
+    }
+
+    void SceneRuntime::Render(Gorgon::Graphics::Layer &target) {
+        const auto size = target.GetTargetSize();
+        Render(target, size.Width, size.Height);
+    }
+
+    void SceneRuntime::Render(Gorgon::Graphics::Layer &target, int viewWidth, int viewHeight) {
+        auto &impl = *impl_;
+        if(!impl.loaded)
+            return;
+
+        if(viewWidth <= 0 || viewHeight <= 0)
+            return;
+
+        const float viewW = float(viewWidth);
+        const float viewH = float(viewHeight);
+        const auto &camera = impl.camera;
+
+        if(impl.options.drawBackground) {
+            const auto bg = ToRGBAf(impl.scene.settings.backgroundColor);
+            target.Draw(0.0f, 0.0f, viewW, viewH, bg);
+        }
+
+        const auto order = impl.scene.GetRenderOrder();
+        for(EntityId id : order) {
+            const Entity *entity = impl.scene.FindEntity(id);
+            if(!entity || !entity->visible)
+                continue;
+
+            const Transform world = impl.scene.GetWorldTransform(entity->id);
+            const auto baseSize = impl.entityBaseSize(*entity);
+
+            const float halfW = baseSize.X * 0.5f * world.scaleX;
+            const float halfH = baseSize.Y * 0.5f * world.scaleY;
+            const float rad = world.rotation * kDegToRad;
+            const float c = std::cos(rad);
+            const float s = std::sin(rad);
+
+            auto toScreen = [&](float lx, float ly) -> Gorgon::Geometry::Pointf {
+                const float wx = world.x + lx * c - ly * s;
+                const float wy = world.y + lx * s + ly * c;
+                return camera.WorldToScreen(wx, wy, viewW, viewH);
+            };
+
+            if(impl.options.drawEntities) {
+                const Gorgon::Geometry::Pointf corners[4] = {
+                    toScreen(-halfW, -halfH),
+                    toScreen( halfW, -halfH),
+                    toScreen( halfW,  halfH),
+                    toScreen(-halfW,  halfH)
+                };
+
+                const Gorgon::Graphics::Bitmap *bitmap = entity->sprite.has_value()
+                    ? impl.getSprite(entity->sprite->asset)
+                    : nullptr;
+
+                if(bitmap) {
+                    target.Draw(*bitmap, corners[0], corners[1], corners[2], corners[3],
+                                ToRGBAf(entity->sprite->tint));
+                }
+                else {
+                    const auto fill = FallbackColorForEntity(*entity);
+                    target.Draw(corners[0], corners[1], corners[2], corners[3], fill);
+                }
+            }
+
+            if(impl.options.drawColliders && entity->collider.has_value() &&
+               entity->collider->type != ColliderType::None) {
+                const auto &collider = *entity->collider;
+                const Gorgon::Graphics::RGBAf wire(0.29f, 0.87f, 0.50f, 0.90f);
+
+                auto colliderPoint = [&](float lx, float ly) -> Gorgon::Geometry::Pointf {
+                    const float offX = (collider.offsetX + lx) * world.scaleX;
+                    const float offY = (collider.offsetY + ly) * world.scaleY;
+                    const float wx = world.x + offX * c - offY * s;
+                    const float wy = world.y + offX * s + offY * c;
+                    return camera.WorldToScreen(wx, wy, viewW, viewH);
+                };
+
+                if(collider.type == ColliderType::AABB) {
+                    const float hw = collider.width * 0.5f;
+                    const float hh = collider.height * 0.5f;
+                    const Gorgon::Geometry::Pointf pts[4] = {
+                        colliderPoint(-hw, -hh), colliderPoint(hw, -hh),
+                        colliderPoint(hw, hh), colliderPoint(-hw, hh)
+                    };
+                    for(int i = 0; i < 4; ++i) {
+                        const auto &a = pts[i];
+                        const auto &b = pts[(i + 1) % 4];
+                        DrawLine(target, a.X, a.Y, b.X, b.Y, 1.5f, wire);
+                    }
+                }
+                else if(collider.type == ColliderType::Circle) {
+                    constexpr int kSegments = 24;
+                    auto prev = colliderPoint(collider.radius, 0.0f);
+                    for(int i = 1; i <= kSegments; ++i) {
+                        const float angle = 2.0f * kPi * float(i) / float(kSegments);
+                        const auto curr = colliderPoint(std::cos(angle) * collider.radius,
+                                                        std::sin(angle) * collider.radius);
+                        DrawLine(target, prev.X, prev.Y, curr.X, curr.Y, 1.5f, wire);
+                        prev = curr;
+                    }
+                }
+            }
+        }
+    }
+
+    Scene &SceneRuntime::GetScene() {
+        return impl_->scene;
+    }
+
+    const Scene &SceneRuntime::GetScene() const {
+        return impl_->scene;
+    }
+
+    RuntimeCamera &SceneRuntime::GetCamera() {
+        return impl_->camera;
+    }
+
+    const RuntimeCamera &SceneRuntime::GetCamera() const {
+        return impl_->camera;
+    }
+
+    void SceneRuntime::SetCamera(const RuntimeCamera &camera) {
+        impl_->camera = camera;
+    }
+
+    void SceneRuntime::CenterCamera(int viewWidth, int viewHeight) {
+        auto &impl = *impl_;
+        if(!impl.loaded)
+            return;
+
+        const auto order = impl.scene.GetRenderOrder();
+        bool hasBounds = false;
+        float minX = 0.0f, minY = 0.0f, maxX = 0.0f, maxY = 0.0f;
+
+        for(EntityId id : order) {
+            const Entity *entity = impl.scene.FindEntity(id);
+            if(!entity || !entity->visible)
+                continue;
+
+            const Transform world = impl.scene.GetWorldTransform(entity->id);
+            const auto baseSize = impl.entityBaseSize(*entity);
+            const float halfW = std::abs(baseSize.X * 0.5f * world.scaleX);
+            const float halfH = std::abs(baseSize.Y * 0.5f * world.scaleY);
+
+            minX = hasBounds ? std::min(minX, world.x - halfW) : world.x - halfW;
+            maxX = hasBounds ? std::max(maxX, world.x + halfW) : world.x + halfW;
+            minY = hasBounds ? std::min(minY, world.y - halfH) : world.y - halfH;
+            maxY = hasBounds ? std::max(maxY, world.y + halfH) : world.y + halfH;
+            hasBounds = true;
+        }
+
+        if(!hasBounds) {
+            impl.camera.Reset();
+            return;
+        }
+
+        impl.camera.panX = (minX + maxX) * 0.5f;
+        impl.camera.panY = (minY + maxY) * 0.5f;
+
+        if(viewWidth > 0 && viewHeight > 0) {
+            const float spanX = maxX - minX;
+            const float spanY = maxY - minY;
+            if(spanX > 1.0f && spanY > 1.0f) {
+                const float fit = std::min((viewWidth * 0.9f) / spanX, (viewHeight * 0.9f) / spanY);
+                impl.camera.zoom = std::clamp(fit, 0.1f, 4.0f);
+            }
+        }
+    }
+
+    SceneRenderOptions &SceneRuntime::GetRenderOptions() {
+        return impl_->options;
+    }
+
+    const SceneRenderOptions &SceneRuntime::GetRenderOptions() const {
+        return impl_->options;
+    }
+
+    const std::string &SceneRuntime::GetScenePath() const {
+        return impl_->scenePath;
+    }
+
+    const std::string &SceneRuntime::GetBaseDir() const {
+        return impl_->baseDir;
+    }
+
+    void SceneRuntime::SetBaseDir(const std::string &baseDir) {
+        auto &impl = *impl_;
+        if(impl.baseDir == baseDir)
+            return;
+
+        // Cached bitmaps were resolved against the old root; scripts resolve paths at start.
+        impl.baseDir = baseDir;
+        impl.sprites.clear();
+        if(impl.loaded)
+            impl.startScripts();
+    }
+
+    std::string SceneRuntime::ResolveAssetPath(const std::string &path) const {
+        return impl_->ResolvePath(path);
+    }
+
+    int SceneRuntime::GetScriptCount() const {
+        return impl_->play ? impl_->play->GetScriptCount() : 0;
+    }
+
+    int SceneRuntime::GetLoadedSpriteCount() const {
+        int count = 0;
+        for(const auto &entry : impl_->sprites) {
+            if(entry.second)
+                ++count;
+        }
+        return count;
+    }
+
+    const std::string &SceneRuntime::GetLastError() const {
+        return impl_->lastError;
+    }
+
+} // namespace Gorgon::Editor

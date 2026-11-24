@@ -47,13 +47,13 @@ target_include_directories(Gorgon PUBLIC
 
 include(Dependencies)
 
+if(BUILD_EDITOR)
+    add_subdirectory(Tools/Editor)
+endif()
+
 if(BUILD_EXAMPLES)
     include(Scripts/Public.cmake)
     add_subdirectory(Examples)
-endif()
-
-if(BUILD_EDITOR)
-    add_subdirectory(Tools/Editor)
 endif()
 
 if(MSVC)
