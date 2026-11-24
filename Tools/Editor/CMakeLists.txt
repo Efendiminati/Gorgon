@@ -20,6 +20,8 @@ target_link_libraries(GorgonEditorCore PUBLIC
     Gorgon::Gorgon
 )
 
+add_subdirectory(App)
+
 if(TESTS AND UNIT_TESTS AND TARGET Catch2::Catch2WithMain)
     add_subdirectory(Tests)
 endif()
