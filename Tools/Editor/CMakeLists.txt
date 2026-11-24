@@ -7,6 +7,10 @@ add_library(GorgonEditorCore STATIC
     Core/Scene.cpp
     Core/SceneSerializer.h
     Core/SceneSerializer.cpp
+    Core/CommandStack.h
+    Core/CommandStack.cpp
+    Core/PlaySession.h
+    Core/PlaySession.cpp
 )
 add_library(Gorgon::EditorCore ALIAS GorgonEditorCore)
 

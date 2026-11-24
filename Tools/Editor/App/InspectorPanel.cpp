@@ -75,6 +75,7 @@ namespace Gorgon :: Editor {
         panel_.Add(lblSprite_);
         panel_.Add(lblSpriteAsset_);
         panel_.Add(spriteAsset_);
+        panel_.Add(btnPickSprite_);
         panel_.Add(lblSpriteTint_);
         panel_.Add(spriteTint_);
         panel_.Add(btnAddSprite_);
@@ -97,6 +98,7 @@ namespace Gorgon :: Editor {
         panel_.Add(lblScript_);
         panel_.Add(lblScriptPath_);
         panel_.Add(scriptPath_);
+        panel_.Add(btnPickScript_);
         panel_.Add(btnAddScript_);
         panel_.Add(btnRemoveScript_);
 
@@ -133,6 +135,11 @@ namespace Gorgon :: Editor {
             rows_.push_back(Row{{&widget}, {1.0f}});
         };
 
+        // Label + editable path + asset-browser picker button.
+        auto pickRow = [&](Widget &label, Widget &field, Widget &button) {
+            rows_.push_back(Row{{&label, &field, &button}, {0.34f, 0.46f, 0.20f}});
+        };
+
         sectionRow(lblScene_);
         fieldRow(lblSceneName_, sceneName_);
         fieldRow(lblGridSize_, gridSize_);
@@ -149,7 +156,7 @@ namespace Gorgon :: Editor {
         fieldRow(lblRotation_, rotation_);
 
         sectionRow(lblSprite_);
-        fieldRow(lblSpriteAsset_, spriteAsset_);
+        pickRow(lblSpriteAsset_, spriteAsset_, btnPickSprite_);
         fieldRow(lblSpriteTint_, spriteTint_);
         fullRow(btnAddSprite_);
         fullRow(btnRemoveSprite_);
@@ -163,7 +170,7 @@ namespace Gorgon :: Editor {
         fullRow(btnRemoveCollider_);
 
         sectionRow(lblScript_);
-        fieldRow(lblScriptPath_, scriptPath_);
+        pickRow(lblScriptPath_, scriptPath_, btnPickScript_);
         fullRow(btnAddScript_);
         fullRow(btnRemoveScript_);
     }
@@ -349,6 +356,12 @@ namespace Gorgon :: Editor {
 
         btnAddSprite_.ClickEvent.Register([this]() { addSprite(); });
         btnRemoveSprite_.ClickEvent.Register([this]() { removeSprite(); });
+        btnPickSprite_.ClickEvent.Register([this]() {
+            if(OnBrowseRequested) OnBrowseRequested(false);
+        });
+        btnPickScript_.ClickEvent.Register([this]() {
+            if(OnBrowseRequested) OnBrowseRequested(true);
+        });
         btnAddCollider_.ClickEvent.Register([this]() { addCollider(); });
         btnRemoveCollider_.ClickEvent.Register([this]() { removeCollider(); });
         btnAddScript_.ClickEvent.Register([this]() { addScript(); });
@@ -389,6 +402,7 @@ namespace Gorgon :: Editor {
         lblSprite_.SetVisible(hasEntity);
         lblSpriteAsset_.SetVisible(hasSprite);
         spriteAsset_.SetVisible(hasSprite);
+        btnPickSprite_.SetVisible(hasSprite);
         lblSpriteTint_.SetVisible(hasSprite);
         spriteTint_.SetVisible(hasSprite);
         btnAddSprite_.SetVisible(hasEntity && !hasSprite);
@@ -414,6 +428,7 @@ namespace Gorgon :: Editor {
         lblScript_.SetVisible(hasEntity);
         lblScriptPath_.SetVisible(hasScript);
         scriptPath_.SetVisible(hasScript);
+        btnPickScript_.SetVisible(hasScript);
         btnAddScript_.SetVisible(hasEntity && !hasScript);
         btnRemoveScript_.SetVisible(hasScript);
     }
@@ -621,6 +636,36 @@ namespace Gorgon :: Editor {
 
         entity->script.reset();
         modified(true);
+    }
+
+    void InspectorPanel::SetPickedAsset(const std::string &path, bool isScript) {
+        Entity *entity = selectedEntity();
+        if(!entity || path.empty())
+            return;
+
+        bool structural = false;
+        if(isScript) {
+            if(!entity->script) {
+                entity->script = ScriptComponent{};
+                structural = true;
+            }
+            if(entity->script->path == path && !structural)
+                return;
+            entity->script->path = path;
+        } else {
+            if(!entity->sprite) {
+                entity->sprite = SpriteComponent{};
+                structural = true;
+            }
+            if(entity->sprite->asset == path && !structural)
+                return;
+            entity->sprite->asset = path;
+            viewport_.ClearSpriteCache();
+        }
+
+        modified(structural);
+        if(!structural)
+            Refresh();
     }
 
     void InspectorPanel::onColliderTypeChanged(long index) {

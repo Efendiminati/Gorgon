@@ -355,6 +355,7 @@ namespace Gorgon :: Editor {
         }
 
         if(!hasButton(btn, Btn::Left)) return;
+        if(!editEnabled_) return;
 
         const float sx = static_cast<float>(pt.X);
         const float sy = static_cast<float>(pt.Y);
@@ -374,6 +375,7 @@ namespace Gorgon :: Editor {
                 } else {
                     dragMode_ = DragMode::ScaleEntity;
                 }
+                if(OnInteractionChanged) OnInteractionChanged(true);
                 return;
             }
         }
@@ -386,6 +388,7 @@ namespace Gorgon :: Editor {
                 dragStartLocalTransform_ = e->transform;
                 dragStartWorldTransform_ = scene_.GetWorldTransform(e->id);
                 dragMode_ = DragMode::MoveEntity;
+                if(OnInteractionChanged) OnInteractionChanged(true);
             }
         } else {
             dragMode_ = DragMode::None;
@@ -494,8 +497,13 @@ namespace Gorgon :: Editor {
     }
 
     void EditorViewport::HandleMouseUp(Gorgon::Geometry::Point /*pt*/, Gorgon::Input::Mouse::Button /*btn*/) {
+        const bool wasEditing = dragMode_ == DragMode::MoveEntity ||
+                                dragMode_ == DragMode::MoveEntityX ||
+                                dragMode_ == DragMode::MoveEntityY ||
+                                dragMode_ == DragMode::ScaleEntity;
         dragMode_ = DragMode::None;
         activeHandle_ = GizmoHandle::None;
+        if(wasEditing && OnInteractionChanged) OnInteractionChanged(false);
     }
 
     bool EditorViewport::HandleMouseScroll(Gorgon::Geometry::Point pt, float amount) {
@@ -654,6 +662,7 @@ namespace Gorgon :: Editor {
     }
 
     void EditorViewport::drawSelectionGizmo(float viewW, float viewH) {
+        if(!editEnabled_) return;
         if(selectedEntity_ == InvalidEntityId) return;
         const Entity *e = scene_.FindEntity(selectedEntity_);
         if(!e || !e->visible) return;

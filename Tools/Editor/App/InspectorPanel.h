@@ -70,8 +70,16 @@ namespace Gorgon :: Editor {
         /// Fired after any edit that changes the scene.
         std::function<void()> OnSceneModified;
 
-        /// Fired after an edit that changes the entity tree (component add/remove, rename).
+        /// Fired after any edit that changes the entity tree (component add/remove, rename).
         std::function<void()> OnStructureChanged;
+
+        /// Fired when the user asks the Asset Browser to pick a sprite (false) or script (true)
+        /// path for the selected entity. EditorApp routes this to AssetBrowserPanel::BeginPicker.
+        std::function<void(bool isScript)> OnBrowseRequested;
+
+        /// Applies a picked asset path to the selected entity's sprite or script component,
+        /// creating the component when it is missing. Used by the asset-browser picker.
+        void SetPickedAsset(const std::string &path, bool isScript);
 
     private:
         using Widget = Gorgon::UI::Widget;
@@ -133,6 +141,7 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Label     lblSprite_{"Sprite", Gorgon::Widgets::Registry::Label_Subtitle};
         Gorgon::Widgets::Label     lblSpriteAsset_{"Asset"};
         Gorgon::Widgets::Textbox   spriteAsset_;
+        Gorgon::Widgets::Button    btnPickSprite_{"..."};
         Gorgon::Widgets::Label     lblSpriteTint_{"Tint"};
         Gorgon::Widgets::ColorPicker spriteTint_;
         Gorgon::Widgets::Button    btnAddSprite_{"+ Add Sprite"};
@@ -155,6 +164,7 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Label     lblScript_{"Script", Gorgon::Widgets::Registry::Label_Subtitle};
         Gorgon::Widgets::Label     lblScriptPath_{"Path"};
         Gorgon::Widgets::Textbox   scriptPath_;
+        Gorgon::Widgets::Button    btnPickScript_{"..."};
         Gorgon::Widgets::Button    btnAddScript_{"+ Add Script"};
         Gorgon::Widgets::Button    btnRemoveScript_{"- Remove Script"};
 

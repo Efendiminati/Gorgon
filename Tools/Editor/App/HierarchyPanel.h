@@ -68,6 +68,11 @@ namespace Gorgon :: Editor {
         /// Number of rows currently shown (used by the smoke test).
         long GetRowCount() const;
 
+        /// Public entry points for editor-wide shortcuts (Ctrl+D / Delete).
+        void DuplicateSelected();
+        void DeleteSelected();
+        void AddEntity();
+
         /// Fired after any structural change (add / child / duplicate / delete / reparent / rename).
         std::function<void()> OnStructureChanged;
 

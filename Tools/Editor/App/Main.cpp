@@ -850,6 +850,219 @@ int main(int argc, char *argv[]) {
             }
         }
 
+        // ---- Phase 5: undo/redo, play-in-editor -----------------------------
+        {
+            using namespace Gorgon::Editor;
+
+            int historyUndoSteps = 0;
+            int historyRedoSteps = 0;
+            float dragStartX = 0.0f;
+            float dragEndX = 0.0f;
+            float dragUndoneX = 0.0f;
+            int playScripts = 0;
+            float playStartX = 0.0f;
+            float playMovedX = 0.0f;
+            float playRestoredX = 0.0f;
+            std::string playError;
+
+            auto fail = [&](const std::string &message) {
+                std::cerr << "FAIL: " << message << "\n";
+                window.Close();
+                return 1;
+            };
+
+            if(picked == InvalidEntityId)
+                return fail("phase 5 needs a selectable entity");
+
+            app.GetViewport().SetSelectedEntity(picked, true);
+            Gorgon::NextFrame();
+
+            // -- 1. A real viewport drag becomes exactly one undo step -------------
+            {
+                const auto size = app.GetViewport().GetViewportSize();
+                const auto &cam = app.GetViewport().GetCamera();
+                const Transform world = scene.GetWorldTransform(picked);
+                const auto press = cam.WorldToScreen(world.x, world.y,
+                                                     float(size.Width), float(size.Height));
+                dragStartX = scene.FindEntity(picked)->transform.x;
+
+                if(app.GetViewport().HitTestEntity(press.X, press.Y) != picked) {
+                    return fail("phase 5 drag press point did not hit the selected entity");
+                }
+
+                app.GetViewport().HandleMouseDown({int(press.X), int(press.Y)},
+                                                 Gorgon::Input::Mouse::Button::Left);
+                app.GetViewport().HandleMouseMove({int(press.X) + 45, int(press.Y) + 18});
+                app.GetViewport().HandleMouseUp({int(press.X) + 45, int(press.Y) + 18},
+                                                Gorgon::Input::Mouse::Button::Left);
+
+                dragEndX = scene.FindEntity(picked)->transform.x;
+                if(std::abs(dragEndX - dragStartX) < 1.0f) {
+                    return fail("phase 5 drag did not move the entity");
+                }
+                if(!app.IsDirty()) {
+                    return fail("phase 5 drag did not mark the scene dirty");
+                }
+                if(app.GetCommandStack().GetUndoCount() < 1) {
+                    return fail("phase 5 drag did not push an undo step");
+                }
+                if(app.GetUndoName() != "Move Entity") {
+                    return fail("phase 5 undo name is '" + app.GetUndoName() + "', expected 'Move Entity'");
+                }
+                historyUndoSteps = int(app.GetCommandStack().GetUndoCount());
+
+                app.Undo();
+                dragUndoneX = scene.FindEntity(picked)->transform.x;
+                if(std::abs(dragUndoneX - dragStartX) > 1e-3f) {
+                    return fail("phase 5 undo did not restore the dragged position");
+                }
+                if(!app.GetCommandStack().CanRedo()) {
+                    return fail("phase 5 undo did not fill the redo stack");
+                }
+                historyRedoSteps = int(app.GetCommandStack().GetRedoCount());
+
+                app.Redo();
+                if(std::abs(scene.FindEntity(picked)->transform.x - dragEndX) > 1e-3f) {
+                    return fail("phase 5 redo did not reapply the drag");
+                }
+            }
+
+            // -- 2. Structural undo: duplicate, undo, redo ------------------------
+            {
+                const auto before = scene.GetEntityCount();
+                app.DuplicateSelected();
+                Gorgon::NextFrame();
+                if(scene.GetEntityCount() != before + 1) {
+                    return fail("phase 5 duplicate did not add an entity");
+                }
+                app.Undo();
+                if(scene.GetEntityCount() != before) {
+                    return fail("phase 5 undo did not remove the duplicate");
+                }
+                app.Redo();
+                if(scene.GetEntityCount() != before + 1) {
+                    return fail("phase 5 redo did not bring the duplicate back");
+                }
+                // Leave the scene as it was.
+                app.Undo();
+                app.GetCommandStack().Clear();
+                Gorgon::NextFrame();
+            }
+
+            // -- 2b. Ctrl+Z / Ctrl+Y through the real shortcut dispatcher ---------
+            {
+                app.GetViewport().SetSelectedEntity(picked, true);
+                const auto before = scene.GetEntityCount();
+                app.DuplicateSelected();
+                Gorgon::NextFrame();
+                if(scene.GetEntityCount() != before + 1) {
+                    return fail("phase 5 duplicate did not add an entity");
+                }
+
+                // The shortcuts manager listens on the window's KeyPreviewEvent and matches
+                // Keyboard::CurrentModifier, so this drives the same path a real keypress does.
+                auto &modifier = Gorgon::Input::Keyboard::CurrentModifier;
+                const auto previousModifier = modifier;
+
+                modifier = Gorgon::Input::Keyboard::Modifier::Ctrl;
+                window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::Z, 1.0f);
+                if(scene.GetEntityCount() != before) {
+                    return fail("Ctrl+Z did not undo the duplicate");
+                }
+                window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::Y, 1.0f);
+                if(scene.GetEntityCount() != before + 1) {
+                    return fail("Ctrl+Y did not redo the duplicate");
+                }
+                // Shortcuts must not fire while nothing is bound to them either.
+                window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::Z, 0.0f);
+
+                modifier = previousModifier;
+
+                app.Undo();
+                app.GetCommandStack().Clear();
+                Gorgon::NextFrame();
+            }
+
+            // -- 3. Play runs a real .gs script and Stop restores the transform ---
+            {
+                std::error_code pec;
+                const auto playDir = std::filesystem::temp_directory_path() / "gorgon_editor_smoke_play";
+                std::filesystem::remove_all(playDir, pec);
+                std::filesystem::create_directories(playDir, pec);
+
+                {
+                    std::ofstream script(playDir / "spin.gs", std::ios::binary | std::ios::trunc);
+                    if(!script.good())
+                        return fail("could not write the play test script");
+                    script << "function Update(self, dt)\n"
+                              "    self.x = self.x + 100 * dt\n"
+                              "    self.rotation = self.rotation + 90 * dt\n"
+                              "    return 0\n"
+                              "end function\n";
+                }
+
+                Entity *target = scene.FindEntity(picked);
+                if(!target)
+                    return fail("play target entity disappeared");
+
+                const std::string previousBase = app.GetViewport().GetAssetBaseDir();
+                target->script = ScriptComponent{"spin.gs"};
+                app.GetViewport().SetAssetBaseDir(playDir.generic_string());
+
+                playStartX = target->transform.x;
+                if(!app.StartPlay(&playError)) {
+                    return fail("phase 5 play did not start: " + playError);
+                }
+                playScripts = app.GetPlayingScriptCount();
+                if(playScripts != 1) {
+                    return fail("phase 5 play compiled " + std::to_string(playScripts) +
+                                " scripts, expected 1");
+                }
+
+                // One deterministic step instead of waiting on frame deltas.
+                app.TickPlay(0.25f);
+                playMovedX = scene.FindEntity(picked)->transform.x;
+                if(std::abs(playMovedX - (playStartX + 25.0f)) > 1e-2f) {
+                    return fail("phase 5 play script did not move the entity (got "
+                                + std::to_string(playMovedX) + ")");
+                }
+
+                app.StopPlay();
+                playRestoredX = scene.FindEntity(picked)->transform.x;
+                if(std::abs(playRestoredX - playStartX) > 1e-3f) {
+                    return fail("phase 5 stop did not restore the pre-play transform (got "
+                                + std::to_string(playRestoredX) + ")");
+                }
+                if(!app.GetViewport().IsEditEnabled()) {
+                    return fail("phase 5 stop did not re-enable viewport editing");
+                }
+
+                if(Entity *restored = scene.FindEntity(picked))
+                    restored->script.reset();
+                app.GetViewport().SetAssetBaseDir(previousBase);
+                std::filesystem::remove_all(playDir, pec);
+                Gorgon::NextFrame();
+            }
+
+            {
+                std::ofstream report(std::filesystem::temp_directory_path() /
+                                         "gorgon_editor_phase5_report.txt",
+                                     std::ios::trunc);
+                report << "undoSteps=" << historyUndoSteps << "\n"
+                       << "redoSteps=" << historyRedoSteps << "\n"
+                       << "dragStartX=" << dragStartX << "\n"
+                       << "dragEndX=" << dragEndX << "\n"
+                       << "dragUndoneX=" << dragUndoneX << "\n"
+                       << "playScripts=" << playScripts << "\n"
+                       << "playStartX=" << playStartX << "\n"
+                       << "playMovedX=" << playMovedX << "\n"
+                       << "playRestoredX=" << playRestoredX << "\n"
+                       << "playMode=" << int(app.GetPlayMode()) << "\n";
+            }
+
+            Gorgon::NextFrame();
+        }
+
         // A live edit written straight into the scene must survive an inspector refresh
         // and the save/open round-trip below.
         if(Entity *entity = scene.FindEntity(picked)) {

@@ -3,6 +3,8 @@
 #include "Core/SceneSerializer.h"
 
 #include <Gorgon/Input/Keyboard.h>
+#include <Gorgon/Main.h>
+#include <Gorgon/Time.h>
 #include <Gorgon/UI/Dialog.h>
 #include <Gorgon/UI/Dimension.h>
 
@@ -56,8 +58,17 @@ namespace Gorgon :: Editor {
         viewport_.OnSceneModified = [this]() {
             if(inspector_)
                 inspector_->Refresh();
-            markDirty();
+            // A drag reports every mouse move; collapse the whole gesture into one undo step.
+            recordEdit(gestureActive_ ? "Move Entity" : "Viewport Edit",
+                       gestureActive_ && gesturePushed_);
+            if(gestureActive_)
+                gesturePushed_ = true;
             updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        };
+        viewport_.OnInteractionChanged = [this](bool active) {
+            gestureActive_ = active;
+            if(active)
+                gesturePushed_ = false;
         };
         viewport_.OnStatusChanged = [this](float wx, float wy, float zoom) {
             updateStatusText(wx, wy, zoom);
@@ -76,20 +87,20 @@ namespace Gorgon :: Editor {
         if(hierarchy_)
             hierarchy_->OnSceneModified = [this]() {
                 viewport_.Redraw();
-                markDirty();
+                recordEdit("Edit Entity");
             };
         if(hierarchy_)
             hierarchy_->OnStructureChanged = [this]() {
                 if(inspector_)
                     inspector_->Rebuild();
                 viewport_.Redraw();
-                markDirty();
+                recordEdit("Edit Hierarchy");
             };
 
         if(inspector_)
             inspector_->OnSceneModified = [this]() {
                 viewport_.Redraw();
-                markDirty();
+                recordEdit("Edit Property");
                 updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
             };
         if(inspector_)
@@ -97,7 +108,28 @@ namespace Gorgon :: Editor {
                 if(hierarchy_)
                     hierarchy_->Rebuild();
                 viewport_.Redraw();
-                markDirty();
+                recordEdit("Edit Component");
+            };
+        if(inspector_)
+            inspector_->OnBrowseRequested = [this](bool isScript) {
+                // Route the Inspector's "..." buttons through the Asset Browser picker.
+                const std::string base = viewport_.GetAssetBaseDir();
+                assetBrowser_.BeginPicker(
+                    isScript ? AssetType::Scripts : AssetType::Images,
+                    [this, isScript, base](const AssetEntry &entry) {
+                        if(entry.isDirectory)
+                            return;
+
+                        std::string path = assetBrowser_.GetLibrary().MakeSceneRelativePath(
+                            entry.fullPath, base);
+                        if(path.empty())
+                            path = entry.relativePath;
+
+                        if(inspector_)
+                            inspector_->SetPickedAsset(path, isScript);
+                        assetBrowser_.EndPicker();
+                        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+                    });
             };
 
         // Keyboard preview for Space+left-drag pan and R to reset view
@@ -120,6 +152,17 @@ namespace Gorgon :: Editor {
         if(inspector_)
             inspector_->Rebuild();
         LayoutPanes();
+
+        // Phase 5: history baseline (the sample scene is not an unsaved change), shortcuts and
+        // the per-frame play tick.
+        lastCommittedScene_ = scene_;
+        savedScene_ = scene_;
+        dirty_ = false;
+        commands_.Clear();
+        setupShortcuts();
+        frameToken_ = Gorgon::BeforeFrameEvent.Register([this]() { onFrame(); });
+
+        updateUndoButtons();
         updatePlayButtons();
         updateWindowTitle();
         updateStatusText(0.0f, 0.0f, 1.0f);
@@ -127,17 +170,143 @@ namespace Gorgon :: Editor {
     }
 
     EditorApp::~EditorApp() {
+        if(frameToken_) {
+            Gorgon::BeforeFrameEvent.Unregister(frameToken_);
+            frameToken_ = 0;
+        }
+
+        // Detach shortcuts and end play before the panels/scene go away; both hold `this`.
+        shortcuts_.Detach();
+        play_.Stop(scene_);
+
         // Tear the Phase 3 panels down before the dock panels they populate.
         hierarchy_.reset();
         inspector_.reset();
     }
 
-    void EditorApp::markDirty() {
-        if(dirty_)
+    // ---- Phase 5: history ---------------------------------------------------
+
+    void EditorApp::recordEdit(const std::string &name, bool merge) {
+        // Play-in-editor owns the scene; editing is disabled until Stop restores the snapshot.
+        if(playMode_ != PlayMode::Stopped)
             return;
 
-        dirty_ = true;
+        // Callbacks can arrive without an actual change (panel refresh, no-op widget event).
+        // Those must not create undo steps.
+        if(scene_ == lastCommittedScene_) {
+            syncDirtyFromScene();
+            return;
+        }
+
+        commands_.Push(std::unique_ptr<Command>(
+            new SceneSnapshotCommand(name, lastCommittedScene_, scene_)), merge);
+        lastCommittedScene_ = scene_;
+        syncDirtyFromScene();
+        updateUndoButtons();
+    }
+
+    void EditorApp::Undo() {
+        if(playMode_ != PlayMode::Stopped)
+            return;
+
+        if(!commands_.Undo(scene_))
+            return;
+
+        applyHistoryChange();
+    }
+
+    void EditorApp::Redo() {
+        if(playMode_ != PlayMode::Stopped)
+            return;
+
+        if(!commands_.Redo(scene_))
+            return;
+
+        applyHistoryChange();
+    }
+
+    void EditorApp::applyHistoryChange() {
+        // The restored scene *is* the new committed baseline: undoing must not record an edit.
+        lastCommittedScene_ = scene_;
+
+        if(!scene_.HasEntity(viewport_.GetSelectedEntity()))
+            viewport_.SetSelectedEntity(InvalidEntityId, false);
+
+        viewport_.ClearSpriteCache();
+        refreshPanels();
+        viewport_.Redraw();
+        syncDirtyFromScene();
+        updateUndoButtons();
+        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+    }
+
+    void EditorApp::syncDirtyFromScene() {
+        const bool dirty = scene_ != savedScene_;
+        if(dirty == dirty_)
+            return;
+
+        dirty_ = dirty;
         updateWindowTitle();
+    }
+
+    void EditorApp::updateUndoButtons() {
+        btnUndo_.SetEnabled(commands_.CanUndo() && playMode_ == PlayMode::Stopped);
+        btnRedo_.SetEnabled(commands_.CanRedo() && playMode_ == PlayMode::Stopped);
+    }
+
+    bool EditorApp::confirmDiscardChanges(const std::string &action, std::function<void()> proceed) {
+        if(!dirty_) {
+            proceed();
+            return true;
+        }
+
+        // Non-modal confirmation: the action runs from the callback when the user accepts.
+        Gorgon::UI::Confirm(
+            action,
+            "The scene has unsaved changes. Discard them and continue?",
+            [proceed]() {
+                if(proceed)
+                    proceed();
+            });
+
+        return false;
+    }
+
+    void EditorApp::setupShortcuts() {
+        namespace Keys = Gorgon::Input::Keyboard::Keycodes;
+        using M = Gorgon::Input::Keyboard::Modifier;
+
+        shortcuts_.AttachTo(window_);
+
+        shortcuts_.Set(Keys::Z, M::Ctrl, [this]() { Undo(); });
+        shortcuts_.Set(Keys::Y, M::Ctrl, [this]() { Redo(); });
+        shortcuts_.Set(Keys::Z, M::ShiftCtrl, [this]() { Redo(); });
+        shortcuts_.Set(Keys::N, M::Ctrl, [this]() { NewSceneInteractive(); });
+        shortcuts_.Set(Keys::O, M::Ctrl, [this]() { OpenSceneInteractive(); });
+        shortcuts_.Set(Keys::S, M::Ctrl, [this]() { onSaveClicked(); });
+        shortcuts_.Set(Keys::S, M::ShiftCtrl, [this]() { onSaveAsClicked(); });
+
+        // Entity shortcuts are meaningless while a widget is capturing keystrokes: typing a name
+        // in the inspector must not delete the entity or move the camera.
+        shortcuts_.Set(Keys::D, M::Ctrl, [this]() {
+            if(window_.HasFocusedWidget())
+                return;
+            DuplicateSelected();
+        });
+        shortcuts_.Set(Keys::Delete, [this]() {
+            if(window_.HasFocusedWidget())
+                return;
+            DeleteSelected();
+        });
+        shortcuts_.Set(Keys::F, [this]() {
+            if(window_.HasFocusedWidget())
+                return;
+            FocusSelectedEntity();
+        });
+    }
+
+    void EditorApp::markDirty() {
+        syncDirtyFromScene();
     }
 
     void EditorApp::refreshPanels() {
@@ -158,6 +327,8 @@ namespace Gorgon :: Editor {
         btnPlay_.SetWidth(Units(2.5));
         btnPause_.SetWidth(Units(2.7));
         btnStop_.SetWidth(Units(2.5));
+        btnUndo_.SetWidth(Units(2.5));
+        btnRedo_.SetWidth(Units(2.5));
         btnResetView_.SetWidth(Units(3.8));
         chkGridSnap_.SetWidth(Units(4.0));
         lblStatus_.SetWidth(Units(14.0));
@@ -169,6 +340,8 @@ namespace Gorgon :: Editor {
         btnPlay_.ClickEvent.Register(*this, &EditorApp::onPlayClicked);
         btnPause_.ClickEvent.Register(*this, &EditorApp::onPauseClicked);
         btnStop_.ClickEvent.Register(*this, &EditorApp::onStopClicked);
+        btnUndo_.ClickEvent.Register([this]() { Undo(); });
+        btnRedo_.ClickEvent.Register([this]() { Redo(); });
         btnResetView_.ClickEvent.Register([this]() {
             viewport_.ResetCamera();
         });
@@ -179,6 +352,7 @@ namespace Gorgon :: Editor {
         toolbarOrganizer_
             << btnNew_ << btnOpen_ << btnSave_ << btnSaveAs_
             << btnPlay_ << btnPause_ << btnStop_
+            << btnUndo_ << btnRedo_
             << btnResetView_ << chkGridSnap_ << lblStatus_;
     }
 
@@ -260,7 +434,6 @@ namespace Gorgon :: Editor {
 
     void EditorApp::NewScene(bool populateSample) {
         currentFilePath_.clear();
-        dirty_ = false;
         viewport_.ClearSpriteCache();
         if(populateSample) {
             populateSampleScene();
@@ -271,8 +444,22 @@ namespace Gorgon :: Editor {
         }
         viewport_.ResetCamera();
         refreshPanels();
+
+        // A new scene starts with empty history and a clean saved baseline.
+        commands_.Clear();
+        lastCommittedScene_ = scene_;
+        savedScene_ = scene_;
+        dirty_ = false;
+        gestureActive_ = false;
+        gesturePushed_ = false;
+
+        updateUndoButtons();
         updateWindowTitle();
         updateStatusText(0.0f, 0.0f, viewport_.GetCamera().zoom);
+    }
+
+    void EditorApp::NewSceneInteractive() {
+        confirmDiscardChanges("New Scene", [this]() { NewScene(false); });
     }
 
     bool EditorApp::OpenSceneFile(const std::string &path, std::string *outError) {
@@ -282,7 +469,6 @@ namespace Gorgon :: Editor {
         }
         scene_ = std::move(loaded);
         currentFilePath_ = path;
-        dirty_ = false;
 
         std::filesystem::path p(path);
         viewport_.SetAssetBaseDir(p.has_parent_path() ? p.parent_path().string() : std::string{});
@@ -291,10 +477,23 @@ namespace Gorgon :: Editor {
         }
         viewport_.SetSelectedEntity(InvalidEntityId, false);
         viewport_.ResetCamera();
+
+        commands_.Clear();
+        lastCommittedScene_ = scene_;
+        savedScene_ = scene_;
+        dirty_ = false;
+        gestureActive_ = false;
+        gesturePushed_ = false;
+
         refreshPanels();
+        updateUndoButtons();
         updateWindowTitle();
         updateStatusText(0.0f, 0.0f, viewport_.GetCamera().zoom);
         return true;
+    }
+
+    void EditorApp::OpenSceneInteractive() {
+        confirmDiscardChanges("Open Scene", [this]() { onOpenClicked(); });
     }
 
     bool EditorApp::SaveSceneFile(const std::string &path, std::string *outError) {
@@ -303,6 +502,8 @@ namespace Gorgon :: Editor {
             return false;
         }
         currentFilePath_ = finalPath;
+        // Undo history survives a save; only the dirty baseline moves.
+        savedScene_ = scene_;
         dirty_ = false;
         updateWindowTitle();
         return true;
@@ -341,13 +542,7 @@ namespace Gorgon :: Editor {
     }
 
     void EditorApp::onNewClicked() {
-        if(dirty_) {
-            Gorgon::UI::Confirm("New Scene", "Discard unsaved changes and create a new empty scene?", [this]() {
-                NewScene(false);
-            });
-        } else {
-            NewScene(false);
-        }
+        NewSceneInteractive();
     }
 
     void EditorApp::onOpenClicked() {
@@ -398,21 +593,136 @@ namespace Gorgon :: Editor {
     }
 
     void EditorApp::onPlayClicked() {
-        playMode_ = PlayMode::Playing;
-        updatePlayButtons();
-        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        std::string err;
+        if(!StartPlay(&err))
+            showPlayError(err);
+        else
+            viewport_.Redraw();
     }
 
     void EditorApp::onPauseClicked() {
-        playMode_ = PlayMode::Paused;
+        PausePlay();
+    }
+
+    void EditorApp::onStopClicked() {
+        StopPlay();
+    }
+
+    // ---- Phase 5: play-in-editor -------------------------------------------
+
+    void EditorApp::onFrame() {
+        if(playMode_ != PlayMode::Playing)
+            return;
+
+        TickPlay(float(Gorgon::Time::DeltaTime()) / 1000.0f);
+    }
+
+    void EditorApp::TickPlay(float dt) {
+        if(playMode_ != PlayMode::Playing)
+            return;
+
+        play_.Tick(scene_, dt);
+        viewport_.Redraw();
+    }
+
+    bool EditorApp::StartPlay(std::string *outError) {
+        if(playMode_ == PlayMode::Playing)
+            return true;
+
+        if(playMode_ == PlayMode::Paused) {
+            // Play resumes a paused session.
+            playMode_ = PlayMode::Playing;
+            updatePlayButtons();
+            updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+            return true;
+        }
+
+        std::string error;
+        if(!play_.Start(scene_, viewport_.GetAssetBaseDir(), &error)) {
+            if(outError)
+                *outError = error;
+            return false;
+        }
+
+        playMode_ = PlayMode::Playing;
+        gestureActive_ = false;
+        gesturePushed_ = false;
+        // Edit-only gizmos, click-select and drag are off while the scripts own the scene.
+        viewport_.SetEditEnabled(false);
+        viewport_.Redraw();
+        updatePlayButtons();
+        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        return true;
+    }
+
+    void EditorApp::PausePlay() {
+        if(playMode_ == PlayMode::Playing) {
+            playMode_ = PlayMode::Paused;
+        } else if(playMode_ == PlayMode::Paused) {
+            playMode_ = PlayMode::Playing;
+        } else {
+            return;
+        }
+
         updatePlayButtons();
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
     }
 
-    void EditorApp::onStopClicked() {
+    void EditorApp::StopPlay() {
+        if(playMode_ == PlayMode::Stopped)
+            return;
+
+        // Tears the VMs down and puts the exact pre-play scene back.
+        play_.Stop(scene_);
+
         playMode_ = PlayMode::Stopped;
+        viewport_.SetEditEnabled(true);
+
+        // The restored snapshot is the committed state; playing never dirties the scene.
+        lastCommittedScene_ = scene_;
+        gestureActive_ = false;
+        gesturePushed_ = false;
+
+        refreshPanels();
+        viewport_.Redraw();
+        syncDirtyFromScene();
         updatePlayButtons();
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+    }
+
+    void EditorApp::showPlayError(const std::string &message) {
+        Gorgon::UI::ShowMessage("Play", message.empty() ? "Play could not start." : message);
+    }
+
+    // ---- Entity actions -----------------------------------------------------
+
+    void EditorApp::FocusSelectedEntity() {
+        const EntityId id = viewport_.GetSelectedEntity();
+        if(!scene_.HasEntity(id))
+            return;
+
+        const Transform world = scene_.GetWorldTransform(id);
+        auto &cam = viewport_.GetCamera();
+        cam.panX = world.x;
+        cam.panY = world.y;
+        viewport_.Redraw();
+        updateStatusText(cam.panX, cam.panY, cam.zoom);
+    }
+
+    void EditorApp::DuplicateSelected() {
+        if(playMode_ != PlayMode::Stopped)
+            return;
+
+        if(hierarchy_)
+            hierarchy_->DuplicateSelected();
+    }
+
+    void EditorApp::DeleteSelected() {
+        if(playMode_ != PlayMode::Stopped)
+            return;
+
+        if(hierarchy_)
+            hierarchy_->DeleteSelected();
     }
 
     void EditorApp::setupAssetBrowser() {
@@ -445,6 +755,11 @@ namespace Gorgon :: Editor {
     }
 
     bool EditorApp::insertAsset(const AssetEntry &entry, std::string *outError) {
+        if(playMode_ != PlayMode::Stopped) {
+            if(outError) *outError = "Stop play mode before editing the scene.";
+            return false;
+        }
+
         if(entry.isDirectory) {
             if(outError) *outError = "Folders cannot be added to the scene.";
             return false;
@@ -482,7 +797,7 @@ namespace Gorgon :: Editor {
 
         viewport_.SetSelectedEntity(id, true);
         viewport_.Redraw();
-        markDirty();
+        recordEdit("Insert Asset");
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
         return true;
     }
@@ -498,7 +813,16 @@ namespace Gorgon :: Editor {
     }
 
     bool EditorApp::OnClosing() {
-        return true;
+        if(!dirty_)
+            return true;
+
+        // Non-modal dialogs: refuse this close and close again from the confirmation callback.
+        Gorgon::UI::Confirm(
+            "Unsaved Changes",
+            "The scene has unsaved changes. Close without saving?",
+            [this]() { window_.Close(); });
+
+        return false;
     }
 
 } // namespace Gorgon::Editor

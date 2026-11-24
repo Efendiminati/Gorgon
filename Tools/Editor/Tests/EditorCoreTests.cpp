@@ -1,10 +1,15 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include "Core/CommandStack.h"
+#include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "Core/SceneSerializer.h"
 
 #include <filesystem>
+#include <fstream>
+#include <memory>
+#include <vector>
 #include <string>
 
 using namespace Gorgon::Editor;
@@ -242,4 +247,168 @@ TEST_CASE("Scene JSON deserializer rejects invalid inputs cleanly", "[EditorCore
         ]
     })", out, &err));
     REQUIRE_FALSE(err.empty());
+}
+
+TEST_CASE("Command stack undo and redo", "[EditorCore][Undo]") {
+    Scene scene;
+    const EntityId first = scene.CreateEntity("Player").id;
+
+    CommandStack stack;
+    REQUIRE_FALSE(stack.CanUndo());
+    REQUIRE_FALSE(stack.CanRedo());
+    REQUIRE(stack.Undo(scene) == false);
+
+    auto push = [&](const std::string &name, const Scene &before, bool merge) {
+        stack.Push(std::unique_ptr<Command>(new SceneSnapshotCommand(name, before, scene)), merge);
+    };
+
+    // Move
+    Scene beforeMove = scene;
+    scene.FindEntity(first)->transform.x = 64.0f;
+    push("Move", beforeMove, false);
+    REQUIRE(stack.CanUndo());
+    REQUIRE(stack.GetUndoName() == "Move");
+
+    // Property edit
+    Scene beforeProp = scene;
+    scene.FindEntity(first)->name = "Hero";
+    scene.FindEntity(first)->visible = false;
+    push("Edit Properties", beforeProp, false);
+
+    // Entity creation
+    Scene beforeCreate = scene;
+    const EntityId second = scene.CreateEntity("Orb").id;
+    push("Add Entity", beforeCreate, false);
+    REQUIRE(stack.GetUndoCount() == 3);
+
+    // Undo creation, the property edit and the move, newest first.
+    REQUIRE(stack.Undo(scene));
+    REQUIRE_FALSE(scene.HasEntity(second));
+    REQUIRE(stack.Undo(scene));
+    REQUIRE(scene.FindEntity(first)->name == "Player");
+    REQUIRE(scene.FindEntity(first)->visible == true);
+    REQUIRE(stack.Undo(scene));
+    REQUIRE(Catch::Approx(scene.FindEntity(first)->transform.x) == 0.0);
+    REQUIRE_FALSE(stack.CanUndo());
+    REQUIRE(stack.GetUndoCount() == 0);
+    REQUIRE(stack.GetRedoCount() == 3);
+
+    // Redo reapplies them in the same order.
+    REQUIRE(stack.Redo(scene));
+    REQUIRE(Catch::Approx(scene.FindEntity(first)->transform.x) == 64.0);
+    REQUIRE(stack.Redo(scene));
+    REQUIRE(scene.FindEntity(first)->name == "Hero");
+    REQUIRE(stack.Redo(scene));
+    REQUIRE(scene.HasEntity(second));
+    REQUIRE_FALSE(stack.CanRedo());
+
+    // A new edit after an undo drops the redo branch.
+    REQUIRE(stack.Undo(scene));   // redo branch now holds "Add Entity"
+    REQUIRE_FALSE(scene.HasEntity(second));
+    Scene beforeDelete = scene;
+    scene.CreateEntity("Temp");
+    push("Add Temp", beforeDelete, false);
+    REQUIRE_FALSE(stack.CanRedo());
+    REQUIRE(stack.Undo(scene));
+    REQUIRE_FALSE(scene.HasEntity(second));
+
+    // Merging collapses a continuous drag into a single step.
+    CommandStack merged;
+    Scene baseline = scene;
+    const float baselineX = baseline.FindEntity(first)->transform.x;
+    for(int i = 0; i < 5; ++i) {
+        scene.FindEntity(first)->transform.x = float(i + 1) * 10.0f;
+        merged.Push(std::unique_ptr<Command>(new SceneSnapshotCommand("Drag", baseline, scene)),
+                    i > 0);
+    }
+    REQUIRE(merged.GetUndoCount() == 1);
+    REQUIRE(merged.Undo(scene));
+    REQUIRE(Catch::Approx(scene.FindEntity(first)->transform.x) == baselineX);
+    REQUIRE(merged.Redo(scene));
+    REQUIRE(Catch::Approx(scene.FindEntity(first)->transform.x) == 50.0);
+
+    // The stack honours its limit.
+    CommandStack limited(2);
+    Scene state = scene;
+    for(int i = 0; i < 4; ++i) {
+        Scene before = state;
+        state.FindEntity(first)->transform.y = float(i + 1);
+        limited.Push(std::unique_ptr<Command>(new SceneSnapshotCommand("Move", before, state)), false);
+    }
+    REQUIRE(limited.GetUndoCount() == 2);
+
+    // Clearing drops both sides.
+    limited.Clear();
+    REQUIRE_FALSE(limited.CanUndo());
+    REQUIRE_FALSE(limited.CanRedo());
+}
+
+TEST_CASE("Play session runs a GScript and restores the snapshot", "[EditorCore][Play]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_play_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    const auto script = dir / "spin.gs";
+    {
+        std::ofstream out(script, std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Update(self, dt)\n"
+               "    self.x = self.x + 100 * dt\n"
+               "    self.rotation = self.rotation + 90 * dt\n"
+               "    return 0\n"
+               "end function\n";
+    }
+    REQUIRE(std::filesystem::exists(script));
+
+    Scene scene;
+    Entity &entity = scene.CreateEntity("Spinner");
+    entity.transform.x = 10.0f;
+    entity.transform.y = 20.0f;
+    entity.transform.rotation = 5.0f;
+    entity.script = ScriptComponent{"spin.gs"};
+    const EntityId id = entity.id;
+
+    PlaySession session;
+    std::string error;
+    const bool started = session.Start(scene, dir.generic_string(), &error);
+    INFO("play start error: " << error);
+    REQUIRE(started);
+    REQUIRE(session.IsRunning());
+    REQUIRE(session.GetScriptCount() == 1);
+    REQUIRE(session.GetScriptedEntities() == std::vector<EntityId>{id});
+
+    // dt is clamped to 0.25 s per tick so a stalled frame cannot teleport an entity.
+    session.Tick(scene, 0.5f);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.x) == 35.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.rotation) == 27.5);
+
+    session.Tick(scene, 0.1f);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.x) == 45.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.rotation) == 36.5);
+
+    // Stop restores the exact pre-play scene, including values the script overwrote.
+    session.Stop(scene);
+    REQUIRE_FALSE(session.IsRunning());
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.x) == 10.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.y) == 20.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.rotation) == 5.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.scaleX) == 1.0);
+
+    // Playing again works from the restored state, and a missing script is reported.
+    REQUIRE(session.Start(scene, dir.generic_string()));
+    session.Tick(scene, 0.1f);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.x) == 20.0);
+    session.Stop(scene);
+    REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.x) == 10.0);
+
+    Scene broken;
+    broken.CreateEntity("NoScript").script = ScriptComponent{"missing.gs"};
+    PlaySession failing;
+    std::string failError;
+    REQUIRE_FALSE(failing.Start(broken, dir.generic_string(), &failError));
+    REQUIRE_FALSE(failError.empty());
+    REQUIRE_FALSE(failing.IsRunning());
+
+    std::filesystem::remove_all(dir, ec);
 }

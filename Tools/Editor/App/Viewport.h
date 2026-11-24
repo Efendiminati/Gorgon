@@ -79,6 +79,11 @@ namespace Gorgon :: Editor {
         void SetGridSnap(bool enabled) { gridSnap_ = enabled; }
         bool IsGridSnapEnabled() const { return gridSnap_; }
 
+        /// Edit interactions (click-select, translate/scale gizmos, drag-move). Pan and zoom stay
+        /// available while editing is disabled, which is what play-in-editor needs.
+        void SetEditEnabled(bool enabled) { editEnabled_ = enabled; }
+        bool IsEditEnabled() const { return editEnabled_; }
+
         /// Space-bar state (fed from window KeyPreviewEvent for Space+left-drag panning)
         void SetSpaceHeld(bool held) { spaceHeld_ = held; }
         bool IsSpaceHeld() const { return spaceHeld_; }
@@ -103,6 +108,10 @@ namespace Gorgon :: Editor {
         std::function<void(EntityId)> OnSelectionChanged;
         std::function<void()> OnSceneModified;
         std::function<void(float worldX, float worldY, float zoom)> OnStatusChanged;
+
+        /// Fired with true when an entity transform drag begins and false when it ends, so the
+        /// editor can collapse a whole drag into a single undo step.
+        std::function<void(bool active)> OnInteractionChanged;
 
     private:
         struct CachedSprite {
@@ -140,6 +149,7 @@ namespace Gorgon :: Editor {
         ViewportCamera camera_;
         EntityId selectedEntity_ = InvalidEntityId;
         bool gridSnap_ = true;
+        bool editEnabled_ = true;
         bool spaceHeld_ = false;
         Gorgon::Geometry::Size sizeOverride_{0, 0};
 

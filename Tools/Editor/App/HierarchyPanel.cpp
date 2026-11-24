@@ -102,6 +102,18 @@ namespace Gorgon :: Editor {
         return long(rows_.size());
     }
 
+    void HierarchyPanel::DuplicateSelected() {
+        onDuplicate();
+    }
+
+    void HierarchyPanel::DeleteSelected() {
+        onDelete();
+    }
+
+    void HierarchyPanel::AddEntity() {
+        onAddEntity();
+    }
+
     void HierarchyPanel::rebuildRows() {
         rows_.clear();
 

@@ -1,11 +1,14 @@
 #pragma once
 
+#include "Core/CommandStack.h"
+#include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "AssetBrowserPanel.h"
 #include "HierarchyPanel.h"
 #include "InspectorPanel.h"
 #include "Viewport.h"
 
+#include <Gorgon/Input/Shortcuts.h>
 #include <Gorgon/UI/Organizers/Flow.h>
 #include <Gorgon/UI/Window.h>
 #include <Gorgon/Widgets/Button.h>
@@ -14,6 +17,7 @@
 #include <Gorgon/Widgets/Layerbox.h>
 #include <Gorgon/Widgets/Panel.h>
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -55,6 +59,38 @@ namespace Gorgon :: Editor {
         bool IsDirty() const { return dirty_; }
         PlayMode GetPlayMode() const { return playMode_; }
 
+        // ---- Phase 5: history, shortcuts, play-in-editor --------------------
+        CommandStack &GetCommandStack() { return commands_; }
+
+        /// Undo/redo the last edit. Ignored while playing (the scene belongs to the play VM).
+        void Undo();
+        void Redo();
+
+        /// Prompts for confirmation when the scene is dirty, then starts a new scene.
+        void NewSceneInteractive();
+        /// Prompts for confirmation when the scene is dirty, then prompts for a path to open.
+        void OpenSceneInteractive();
+
+        /// Play-in-editor. StartPlay snapshots the scene and runs every attached script;
+        /// TickPlay advances the scripts; PausePlay toggles between Playing and Paused;
+        /// StopPlay tears the VM down and restores the exact pre-play scene.
+        bool StartPlay(std::string *outError = nullptr);
+        void PausePlay();
+        void StopPlay();
+        void TickPlay(float dt);
+        bool IsPlaying() const { return playMode_ == PlayMode::Playing; }
+        /// Number of entity scripts the running play session compiled and drives.
+        int GetPlayingScriptCount() const { return play_.GetScriptCount(); }
+
+        /// Camera focus / entity actions, also bound to shortcuts.
+        void FocusSelectedEntity();
+        void DuplicateSelected();
+        void DeleteSelected();
+
+        /// Name of the command Ctrl+Z would revert ("" when history is empty).
+        const std::string &GetUndoName() const { return commands_.GetUndoName(); }
+        const std::string &GetRedoName() const { return commands_.GetRedoName(); }
+
     private:
         void buildToolbar();
         void buildDockPlaceholders();
@@ -64,6 +100,16 @@ namespace Gorgon :: Editor {
         void updateWindowTitle();
         void updateStatusText(float worldX, float worldY, float zoom);
         void updatePlayButtons();
+
+        // Phase 5 helpers
+        void setupShortcuts();
+        void recordEdit(const std::string &name, bool merge = false);
+        void applyHistoryChange();
+        void syncDirtyFromScene();
+        void updateUndoButtons();
+        void onFrame();
+        bool confirmDiscardChanges(const std::string &action, std::function<void()> proceed);
+        void showPlayError(const std::string &message);
 
         // Toolbar actions
         void onNewClicked();
@@ -84,6 +130,19 @@ namespace Gorgon :: Editor {
         bool dirty_ = false;
         PlayMode playMode_ = PlayMode::Stopped;
 
+        // ---- Phase 5 state ---------------------------------------------------
+        // Scene state as of the last commit; each edit pushes a before/after pair built from it.
+        Scene lastCommittedScene_;
+        // Scene state as of the last New/Open/Save, used to derive the "*" dirty marker.
+        Scene savedScene_;
+        CommandStack commands_;
+        PlaySession play_;
+        // True while a viewport drag is in progress: consecutive "Move" edits collapse into one
+        // undo step instead of one step per mouse move.
+        bool gestureActive_ = false;
+        bool gesturePushed_ = false;
+        Gorgon::Event<>::Token frameToken_ = 0;
+
         // Top toolbar
         // NOTE: the organizer is declared *before* the panel it drives. Gorgon's
         // WidgetContainer keeps a raw pointer to its organizer and touches it while
@@ -97,6 +156,8 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button btnPlay_{"Play"};
         Gorgon::Widgets::Button btnPause_{"Pause"};
         Gorgon::Widgets::Button btnStop_{"Stop"};
+        Gorgon::Widgets::Button btnUndo_{"Undo"};
+        Gorgon::Widgets::Button btnRedo_{"Redo"};
         Gorgon::Widgets::Button btnResetView_{"Reset View"};
         Gorgon::Widgets::Checkbox chkGridSnap_{"Grid Snap", true};
         Gorgon::Widgets::Label lblStatus_{"Ready"};
@@ -112,6 +173,10 @@ namespace Gorgon :: Editor {
         EditorViewport viewport_;
         std::unique_ptr<HierarchyPanel> hierarchy_;
         std::unique_ptr<InspectorPanel> inspector_;
+
+        // Declared last so it detaches from the window before the rest of the editor dies:
+        // the shortcut handlers capture `this`.
+        Gorgon::Input::Shortcuts shortcuts_{false};
     };
 
 } // namespace Gorgon::Editor
