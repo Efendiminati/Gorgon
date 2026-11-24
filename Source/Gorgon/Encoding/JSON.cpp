@@ -632,13 +632,17 @@ namespace {
             }
             while(true) {
                 JSON::Value elem;
-                try {
-                    elem = parseValue();
+                if(best_effort) {
+                    try {
+                        elem = parseValue();
+                    }
+                    catch(const JSON::Error &) {
+                        elem = JSON::Value(JSON::Null{});
+                        while(!input.atEnd() && input.peekRaw() != ',' && input.peekRaw() != ']') input.skip();
+                    }
                 }
-                catch(const JSON::Error &) {
-                    if(!best_effort) throw;
-                    elem = JSON::Value(JSON::Null{});
-                    while(!input.atEnd() && input.peekRaw() != ',' && input.peekRaw() != ']') input.skip();
+                else {
+                    elem = parseValue();
                 }
                 arr.push_back(std::move(elem));
 
@@ -690,14 +694,18 @@ namespace {
                 }
 
                 std::string key;
-                try {
-                    key = parseString();
+                if(best_effort) {
+                    try {
+                        key = parseString();
+                    }
+                    catch(const JSON::Error &) {
+                        while(!input.atEnd() && input.peekRaw() != ':' && input.peekRaw() != '}') input.skip();
+                        if(!input.atEnd() && input.peekRaw() == '}') { input.skip(); return JSON::Value(std::move(obj)); }
+                        continue;
+                    }
                 }
-                catch(const JSON::Error &) {
-                    if(!best_effort) throw;
-                    while(!input.atEnd() && input.peekRaw() != ':' && input.peekRaw() != '}') input.skip();
-                    if(!input.atEnd() && input.peekRaw() == '}') { input.skip(); return JSON::Value(std::move(obj)); }
-                    continue;
+                else {
+                    key = parseString();
                 }
 
                 skipwhitespace();
@@ -712,13 +720,17 @@ namespace {
                 }
 
                 JSON::Value val;
-                try {
-                    val = parseValue();
+                if(best_effort) {
+                    try {
+                        val = parseValue();
+                    }
+                    catch(const JSON::Error &) {
+                        val = JSON::Value(JSON::Null{});
+                        while(!input.atEnd() && input.peekRaw() != ',' && input.peekRaw() != '}') input.skip();
+                    }
                 }
-                catch(const JSON::Error &) {
-                    if(!best_effort) throw;
-                    val = JSON::Value(JSON::Null{});
-                    while(!input.atEnd() && input.peekRaw() != ',' && input.peekRaw() != '}') input.skip();
+                else {
+                    val = parseValue();
                 }
                 obj[key] = std::move(val);
 

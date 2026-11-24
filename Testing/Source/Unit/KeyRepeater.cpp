@@ -16,6 +16,7 @@ using namespace Gorgon::Input;
 
 TEST_CASE("Manual", "[KeyRepeater]") {
     Initialize("KeyRepeater_test");
+    SetMinimumFrameDuration(0);
     
     namespace Key = Keyboard::Keycodes;
     KeyRepeater repeater({Key::Left, Key::Right}, 200);
@@ -181,7 +182,7 @@ TEST_CASE("Manual", "[KeyRepeater]") {
     NextFrame();
     repeater.Press(Key::Down);
     
-    wait = 200; //enough to press 4 keys due late acceleration start
+    wait = 220; //enough to press 4 keys due late acceleration start (4th at 200ms, 5th at 240ms)
     while(wait) {
         NextFrame();
         

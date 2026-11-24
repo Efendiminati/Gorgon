@@ -532,7 +532,7 @@ TEST_CASE( "Load - Loading binary file", "[Save][Load]") {
 	remove("test.bin");
 }
 
-TEST_CASE( "Load - PathNotFoundError", "[Load][PathNotFoundError") {	
+TEST_CASE( "Load - PathNotFoundError", "[Load][PathNotFoundError]") {	
 	REQUIRE_THROWS_AS( 
 		fs::Load("thisfiledoesnotexists/iamsureofit.neverever"), 
 		fs::PathNotFoundError 

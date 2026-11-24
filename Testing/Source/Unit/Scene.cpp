@@ -5,6 +5,7 @@
 #undef TEST
 
 #include <Gorgon/Scene.h>
+#include <Gorgon/UI.h>
 
 using namespace Gorgon;
 
@@ -59,6 +60,7 @@ TEST_CASE("All", "[Scene]") {
 	Initialize("Unittestscene");
 
 	SceneManager manager({200, 200}, "Manager");
+	UI::Initialize();
 
 	int mods1 = 5, mods2;
 

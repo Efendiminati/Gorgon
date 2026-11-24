@@ -911,8 +911,8 @@ TEST_CASE( "Size point interaction", "[Size][Point]" ) {
 	REQUIRE( (p1/s1) == Point(5, 4) );
 	REQUIRE( (p1*s2) == Pointf(22, 104) );
 	p3=(p1/s2);
-	REQUIRE( p3.X == Approx(4.5454) );
-	REQUIRE( p3.Y == Approx(3.8461) );
+	REQUIRE( p3.X == Approx(4.54545) );
+	REQUIRE( p3.Y == Approx(3.84615) );
 	
 	p3=(p2*s1);
 	REQUIRE(  p3.X == Approx(2.4) );
