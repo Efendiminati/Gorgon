@@ -52,6 +52,10 @@ if(BUILD_EXAMPLES)
     add_subdirectory(Examples)
 endif()
 
+if(BUILD_EDITOR)
+    add_subdirectory(Tools/Editor)
+endif()
+
 if(MSVC)
     include(SourceTree)
 endif()

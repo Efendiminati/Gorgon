@@ -27,6 +27,7 @@ endif()
 
 option(EXPORT_BUILD_TREE "Export the build tree for local examples" OFF)
 option(BUILD_EXAMPLES "Enable compiling example applications." OFF)
+option(BUILD_EDITOR "Enable building the Gorgon 2D Editor." ON)
 option(COVERAGE "Enable code coverage instrumentation (only valid in Debug builds)." OFF)
 option(DOCUMENTATION "Enable generation of documentation." ON)
 if(DOCUMENTATION)
