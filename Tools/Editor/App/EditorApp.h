@@ -86,6 +86,10 @@ namespace Gorgon :: Editor {
         void FocusSelectedEntity();
         void DuplicateSelected();
         void DeleteSelected();
+        bool CopySelected();
+        bool PasteClipboard();
+        bool HasClipboard() const { return !clipboardJson_.empty(); }
+        const std::string &GetClipboardJson() const { return clipboardJson_; }
 
         /// Name of the command Ctrl+Z would revert ("" when history is empty).
         const std::string &GetUndoName() const { return commands_.GetUndoName(); }
@@ -142,6 +146,8 @@ namespace Gorgon :: Editor {
         bool gestureActive_ = false;
         bool gesturePushed_ = false;
         Gorgon::Event<>::Token frameToken_ = 0;
+        std::string clipboardJson_;
+        int pasteCount_ = 0;
 
         // Top toolbar
         // NOTE: the organizer is declared *before* the panel it drives. Gorgon's

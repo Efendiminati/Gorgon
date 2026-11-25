@@ -251,6 +251,142 @@ TEST_CASE("Scene JSON deserializer rejects invalid inputs cleanly", "[EditorCore
     REQUIRE_FALSE(err.empty());
 }
 
+TEST_CASE("SceneSerializer clipboard subtree round-trip and remap", "[EditorCore][JSON][Clipboard]") {
+    Scene scene;
+    scene.settings.gridSize = 32;
+
+    Entity &root = scene.CreateEntity("Player");
+    const EntityId rootId = root.id;
+    root.visible = true;
+    root.locked = false;
+    root.zOrder = 7;
+    root.transform = {100.0f, 50.0f, 1.5f, 1.0f, 15.0f};
+    root.sprite = SpriteComponent{"assets/hero.png", ColorRGBA{200, 180, 160, 255}};
+    root.collider = ColliderComponent{ColliderType::AABB, 40.0f, 60.0f, 20.0f, 2.0f, -3.0f};
+    root.script = ScriptComponent{"scripts/hero.gs"};
+
+    Entity &child = scene.CreateEntity("Weapon", rootId);
+    const EntityId childId = child.id;
+    child.zOrder = 8;
+    child.transform = {12.0f, -4.0f, 1.0f, 1.0f, 0.0f};
+    child.sprite = SpriteComponent{"assets/sword.png", ColorRGBA{255, 255, 255, 255}};
+
+    Entity &grand = scene.CreateEntity("Glow", childId);
+    const EntityId grandId = grand.id;
+    grand.transform = {5.0f, 6.0f, 0.5f, 0.5f, 0.0f};
+    grand.collider = ColliderComponent{ColliderType::Circle, 0.0f, 0.0f, 10.0f, 0.0f, 0.0f};
+
+    Entity &other = scene.CreateEntity("Crate");
+    const EntityId otherId = other.id;
+    other.transform = {-64.0f, 32.0f, 1.0f, 1.0f, 0.0f};
+    other.sprite = SpriteComponent{"assets/crate.png", ColorRGBA{120, 90, 60, 255}};
+
+    // Selecting both an ancestor (rootId) and descendant (childId) plus another root (otherId)
+    // must deduplicate the subtree so Weapon is not pasted twice.
+    const std::string clipboard = SceneSerializer::EntitiesToJsonString(scene, {rootId, childId, otherId});
+    REQUIRE(clipboard.find("\"clipboard\"") != std::string::npos);
+
+    std::vector<EntityId> pastedRoots;
+    std::vector<EntityId> allPasted;
+    std::string err;
+    REQUIRE(SceneSerializer::PasteEntitiesFromJsonString(
+        clipboard, scene, &pastedRoots, 32.0f, 32.0f, &err, &allPasted));
+    REQUIRE(err.empty());
+    REQUIRE(pastedRoots.size() == 2);
+    REQUIRE(allPasted.size() == 4);
+    REQUIRE(scene.GetEntityCount() == 8);
+
+    const Entity *pRoot = scene.FindEntity(pastedRoots[0]);
+    const Entity *pOther = scene.FindEntity(pastedRoots[1]);
+    REQUIRE(pRoot != nullptr);
+    REQUIRE(pOther != nullptr);
+    REQUIRE(pRoot->id != rootId);
+    REQUIRE(pRoot->parentId == InvalidEntityId);
+    REQUIRE(pRoot->name == "Player Copy");
+    REQUIRE(pRoot->zOrder == 7);
+    REQUIRE(pRoot->transform.x == Catch::Approx(132.0f));
+    REQUIRE(pRoot->transform.y == Catch::Approx(82.0f));
+    REQUIRE(pRoot->transform.scaleX == Catch::Approx(1.5f));
+    REQUIRE(pRoot->transform.rotation == Catch::Approx(15.0f));
+    REQUIRE(pRoot->sprite.has_value());
+    REQUIRE(pRoot->sprite->asset == "assets/hero.png");
+    REQUIRE(pRoot->collider.has_value());
+    REQUIRE(pRoot->collider->width == Catch::Approx(40.0f));
+    REQUIRE(pRoot->script.has_value());
+    REQUIRE(pRoot->script->path == "scripts/hero.gs");
+
+    // Internal parentIds remapped to fresh IDs; child local transform NOT double-offset.
+    const auto pRootChildren = scene.GetChildIds(pRoot->id);
+    REQUIRE(pRootChildren.size() == 1);
+    const Entity *pChild = scene.FindEntity(pRootChildren[0]);
+    REQUIRE(pChild != nullptr);
+    REQUIRE(pChild->id != childId);
+    REQUIRE(pChild->parentId == pRoot->id);
+    REQUIRE(pChild->name == "Weapon Copy");
+    REQUIRE(pChild->transform.x == Catch::Approx(12.0f));
+    REQUIRE(pChild->transform.y == Catch::Approx(-4.0f));
+    REQUIRE(pChild->sprite.has_value());
+    REQUIRE(pChild->sprite->asset == "assets/sword.png");
+
+    const auto pChildChildren = scene.GetChildIds(pChild->id);
+    REQUIRE(pChildChildren.size() == 1);
+    const Entity *pGrand = scene.FindEntity(pChildChildren[0]);
+    REQUIRE(pGrand != nullptr);
+    REQUIRE(pGrand->id != grandId);
+    REQUIRE(pGrand->parentId == pChild->id);
+    REQUIRE(pGrand->name == "Glow Copy");
+    REQUIRE(pGrand->transform.x == Catch::Approx(5.0f));
+    REQUIRE(pGrand->transform.y == Catch::Approx(6.0f));
+    REQUIRE(pGrand->collider.has_value());
+    REQUIRE(pGrand->collider->type == ColliderType::Circle);
+
+    REQUIRE(pOther->id != otherId);
+    REQUIRE(pOther->parentId == InvalidEntityId);
+    REQUIRE(pOther->name == "Crate Copy");
+    REQUIRE(pOther->transform.x == Catch::Approx(-32.0f));
+    REQUIRE(pOther->transform.y == Catch::Approx(64.0f));
+
+    // Second paste produces incremented unique names (Copy 2).
+    std::vector<EntityId> secondRoots;
+    REQUIRE(SceneSerializer::PasteEntitiesFromJsonString(
+        clipboard, scene, &secondRoots, 64.0f, 64.0f, &err));
+    REQUIRE(secondRoots.size() == 2);
+    REQUIRE(scene.FindEntity(secondRoots[0])->name == "Player Copy 2");
+    REQUIRE(scene.FindEntity(secondRoots[1])->name == "Crate Copy 2");
+
+    // Copying a non-root child by itself detaches it to root in the clipboard and pastes cleanly into an empty scene.
+    const std::string childClip = SceneSerializer::EntitiesToJsonString(scene, {childId});
+    Scene freshScene;
+    std::vector<EntityId> freshRoots;
+    REQUIRE(SceneSerializer::PasteEntitiesFromJsonString(
+        childClip, freshScene, &freshRoots, 16.0f, 16.0f, &err));
+    REQUIRE(freshRoots.size() == 1);
+    REQUIRE(freshScene.GetEntityCount() == 2);
+    const Entity *freshWeapon = freshScene.FindEntity(freshRoots[0]);
+    REQUIRE(freshWeapon != nullptr);
+    REQUIRE(freshWeapon->parentId == InvalidEntityId);
+    REQUIRE(freshWeapon->name == "Weapon");
+    REQUIRE(freshWeapon->transform.x == Catch::Approx(28.0f));
+    REQUIRE(freshWeapon->transform.y == Catch::Approx(12.0f));
+    const auto freshWeaponChildren = freshScene.GetChildIds(freshWeapon->id);
+    REQUIRE(freshWeaponChildren.size() == 1);
+    REQUIRE(freshScene.FindEntity(freshWeaponChildren[0])->name == "Glow");
+
+    // Invalid clipboard payloads fail cleanly without mutating targetScene.
+    const std::size_t countBeforeInvalid = freshScene.GetEntityCount();
+    REQUIRE_FALSE(SceneSerializer::PasteEntitiesFromJsonString("{bad", freshScene, nullptr, 0.0f, 0.0f, &err));
+    REQUIRE_FALSE(err.empty());
+    REQUIRE_FALSE(SceneSerializer::PasteEntitiesFromJsonString(
+        R"({"schemaVersion": 1, "entities": []})", freshScene, nullptr, 0.0f, 0.0f, &err));
+    REQUIRE_FALSE(SceneSerializer::PasteEntitiesFromJsonString(
+        R"({"schemaVersion": 1, "entities": [{"id": 1, "parentId": 99, "name": "Dangling"}]})",
+        freshScene, nullptr, 0.0f, 0.0f, &err));
+    REQUIRE_FALSE(SceneSerializer::PasteEntitiesFromJsonString(
+        R"({"schemaVersion": 1, "entities": [{"id": 1, "parentId": 2, "name": "A"}, {"id": 2, "parentId": 1, "name": "B"}]})",
+        freshScene, nullptr, 0.0f, 0.0f, &err));
+    REQUIRE(freshScene.GetEntityCount() == countBeforeInvalid);
+}
+
 TEST_CASE("Command stack undo and redo", "[EditorCore][Undo]") {
     Scene scene;
     const EntityId first = scene.CreateEntity("Player").id;

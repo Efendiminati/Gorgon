@@ -48,6 +48,7 @@ namespace {
 
     int RunAssetBrowserSelfTest();
     int RunMultiSelectSelfTest();
+    int RunCopyPasteSelfTest();
 
     int RunSelfTest() {
         using namespace Gorgon::Editor;
@@ -217,11 +218,15 @@ namespace {
             return multiResult;
         }
 
+        if(const int copyPasteResult = RunCopyPasteSelfTest()) {
+            return copyPasteResult;
+        }
+
         if(const int assetResult = RunAssetBrowserSelfTest()) {
             return assetResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, round-trip, asset browser)\n";
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, round-trip, asset browser)\n";
         return 0;
     }
 
@@ -438,6 +443,96 @@ namespace {
         }
         if(!commands.Undo(scene) || scene.GetEntityCount() != countBeforeDup + 2) {
             std::cerr << "FAIL: group delete undo did not restore deleted entities\n";
+            return 1;
+        }
+
+        return 0;
+    }
+
+    /// Copy/paste (Ctrl+C / Ctrl+V): single + multi-select subtree JSON clipboard,
+    /// remapped parentIds, unique names, root offset, selection update, and single-step undo.
+    int RunCopyPasteSelfTest() {
+        using namespace Gorgon::Editor;
+
+        Scene scene;
+        scene.settings.gridSize = 32;
+
+        Entity &hero = scene.CreateEntity("Hero");
+        const EntityId heroId = hero.id;
+        hero.transform = {64.0f, 32.0f, 1.0f, 1.0f, 0.0f};
+        hero.sprite = SpriteComponent{"hero.png", {255, 255, 255, 255}};
+
+        Entity &shield = scene.CreateEntity("Shield", heroId);
+        const EntityId shieldId = shield.id;
+        shield.transform = {16.0f, 0.0f, 1.0f, 1.0f, 0.0f};
+        shield.collider = ColliderComponent{ColliderType::Circle, 0.0f, 0.0f, 12.0f, 0.0f, 0.0f};
+
+        Entity &crate = scene.CreateEntity("Crate");
+        const EntityId crateId = crate.id;
+        crate.transform = {-64.0f, 0.0f, 1.0f, 1.0f, 0.0f};
+
+        EditorViewport vp(scene);
+        vp.SetViewportSizeOverride({800, 600});
+        vp.SetGridSnap(true);
+
+        CommandStack commands;
+        Scene lastCommitted = scene;
+        auto recordEdit = [&](const std::string &name) {
+            if(scene == lastCommitted) return;
+            commands.Push(std::unique_ptr<Command>(
+                new SceneSnapshotCommand(name, lastCommitted, scene)), false);
+            lastCommitted = scene;
+        };
+
+        // 1. Copy multi-select (Hero + Crate, where Hero owns Shield) and paste in 1 undo step
+        vp.SetSelectedEntities({heroId, crateId}, false);
+        const std::string clip = SceneSerializer::EntitiesToJsonString(scene, vp.GetSelectedEntities(), 2);
+        const std::size_t countBefore = scene.GetEntityCount();
+        std::vector<EntityId> pastedRoots;
+        std::string err;
+        const float offset = static_cast<float>(scene.settings.gridSize);
+        if(!SceneSerializer::PasteEntitiesFromJsonString(clip, scene, &pastedRoots, offset, offset, &err) ||
+           pastedRoots.size() != 2 || scene.GetEntityCount() != countBefore + 3) {
+            std::cerr << "FAIL: copy/paste subtree did not add expected entities: " << err << "\n";
+            return 1;
+        }
+        vp.SetSelectedEntities(pastedRoots, false);
+        recordEdit("Paste Entities");
+
+        const Entity *pHero = scene.FindEntity(pastedRoots[0]);
+        const Entity *pCrate = scene.FindEntity(pastedRoots[1]);
+        if(!pHero || !pCrate || pHero->id == heroId || pCrate->id == crateId ||
+           pHero->name != "Hero Copy" || pCrate->name != "Crate Copy" ||
+           !Approx(pHero->transform.x, 96.0f) || !Approx(pHero->transform.y, 64.0f) ||
+           !Approx(pCrate->transform.x, -32.0f) || !Approx(pCrate->transform.y, 32.0f)) {
+            std::cerr << "FAIL: pasted root names, IDs, or offsets mismatch\n";
+            return 1;
+        }
+        const auto pHeroChildren = scene.GetChildIds(pHero->id);
+        if(pHeroChildren.size() != 1 || pHeroChildren[0] == shieldId) {
+            std::cerr << "FAIL: pasted subtree child was not remapped to pasted root\n";
+            return 1;
+        }
+        const Entity *pShield = scene.FindEntity(pHeroChildren[0]);
+        if(!pShield || pShield->parentId != pHero->id ||
+           !Approx(pShield->transform.x, 16.0f) || !Approx(pShield->transform.y, 0.0f)) {
+            std::cerr << "FAIL: pasted child parentId or local transform mismatch\n";
+            return 1;
+        }
+        if(vp.GetSelectionCount() != 2 || vp.GetSelectedEntities() != pastedRoots) {
+            std::cerr << "FAIL: paste did not select newly pasted root entities\n";
+            return 1;
+        }
+        if(commands.GetUndoCount() != 1) {
+            std::cerr << "FAIL: paste should be 1 undo step, got " << commands.GetUndoCount() << "\n";
+            return 1;
+        }
+        if(!commands.Undo(scene) || scene.GetEntityCount() != countBefore) {
+            std::cerr << "FAIL: paste undo did not remove all pasted entities\n";
+            return 1;
+        }
+        if(!commands.Redo(scene) || scene.GetEntityCount() != countBefore + 3) {
+            std::cerr << "FAIL: paste redo did not restore pasted entities\n";
             return 1;
         }
 
@@ -1244,6 +1339,35 @@ int main(int argc, char *argv[]) {
                 }
                 // Shortcuts must not fire while nothing is bound to them either.
                 window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::Z, 0.0f);
+
+                // Ctrl+C / Ctrl+V through the real shortcut dispatcher + single-step Ctrl+Z undo
+                const auto beforePaste = scene.GetEntityCount();
+                app.GetViewport().SetSelectedEntity(picked, true);
+                const float origX = scene.FindEntity(picked)->transform.x;
+                const float origY = scene.FindEntity(picked)->transform.y;
+                window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::C, 1.0f);
+                if(!app.HasClipboard()) {
+                    modifier = previousModifier;
+                    return fail("Ctrl+C did not populate clipboard");
+                }
+                window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::V, 1.0f);
+                if(scene.GetEntityCount() != beforePaste + 1) {
+                    modifier = previousModifier;
+                    return fail("Ctrl+V did not paste the copied entity");
+                }
+                const EntityId pastedId = app.GetViewport().GetSelectedEntity();
+                const Entity *pastedEntity = scene.FindEntity(pastedId);
+                if(!pastedEntity || pastedId == picked ||
+                   std::abs(pastedEntity->transform.x - (origX + float(scene.settings.gridSize))) > 1e-2f ||
+                   std::abs(pastedEntity->transform.y - (origY + float(scene.settings.gridSize))) > 1e-2f) {
+                    modifier = previousModifier;
+                    return fail("Ctrl+V pasted entity selection or offset mismatch");
+                }
+                window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::Z, 1.0f);
+                if(scene.GetEntityCount() != beforePaste) {
+                    modifier = previousModifier;
+                    return fail("Ctrl+Z did not undo Ctrl+V paste");
+                }
 
                 modifier = previousModifier;
 

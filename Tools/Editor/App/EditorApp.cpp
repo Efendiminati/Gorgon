@@ -290,6 +290,16 @@ namespace Gorgon :: Editor {
 
         // Entity shortcuts are meaningless while a widget is capturing keystrokes: typing a name
         // in the inspector must not delete the entity or move the camera.
+        shortcuts_.Set(Keys::C, M::Ctrl, [this]() {
+            if(window_.HasFocusedWidget())
+                return;
+            CopySelected();
+        });
+        shortcuts_.Set(Keys::V, M::Ctrl, [this]() {
+            if(window_.HasFocusedWidget())
+                return;
+            PasteClipboard();
+        });
         shortcuts_.Set(Keys::D, M::Ctrl, [this]() {
             if(window_.HasFocusedWidget())
                 return;
@@ -728,6 +738,49 @@ namespace Gorgon :: Editor {
 
         if(hierarchy_)
             hierarchy_->DeleteSelected();
+    }
+
+    bool EditorApp::CopySelected() {
+        if(playMode_ != PlayMode::Stopped)
+            return false;
+
+        const auto &selected = viewport_.GetSelectedEntities();
+        if(selected.empty())
+            return false;
+
+        const auto payload = SceneSerializer::EntitiesToJson(scene_, selected);
+        if(!payload.Has("entities") || !payload["entities"].IsArray() || payload["entities"].GetCount() == 0)
+            return false;
+
+        clipboardJson_ = Gorgon::Encoding::Json.Encode(payload, 2);
+        pasteCount_ = 0;
+        return true;
+    }
+
+    bool EditorApp::PasteClipboard() {
+        if(playMode_ != PlayMode::Stopped)
+            return false;
+        if(clipboardJson_.empty())
+            return false;
+
+        const float step = static_cast<float>(scene_.settings.gridSize > 0 ? scene_.settings.gridSize : 16);
+        const float offset = step * static_cast<float>(pasteCount_ + 1);
+
+        std::vector<EntityId> pastedRoots;
+        std::string err;
+        if(!SceneSerializer::PasteEntitiesFromJsonString(
+                clipboardJson_, scene_, &pastedRoots, offset, offset, &err) ||
+           pastedRoots.empty()) {
+            return false;
+        }
+
+        ++pasteCount_;
+        viewport_.SetSelectedEntities(pastedRoots, false);
+        refreshPanels();
+        viewport_.Redraw();
+        recordEdit(pastedRoots.size() > 1 ? "Paste Entities" : "Paste Entity");
+        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        return true;
     }
 
     void EditorApp::setupAssetBrowser() {
