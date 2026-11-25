@@ -1,6 +1,10 @@
 #include "Viewport.h"
 
+#include "Core/PlaySession.h"
+
+#include <Gorgon/Graphics/Font.h>
 #include <Gorgon/Input/Keyboard.h>
+#include <Gorgon/Widgets/Registry.h>
 
 #include <algorithm>
 #include <cmath>
@@ -28,6 +32,20 @@ namespace Gorgon :: Editor {
                 c.b / 255.0f,
                 c.a / 255.0f
             );
+        }
+
+        /// Stable preview colour per tile index, matching the runtime's tileset-less rendering.
+        Gorgon::Graphics::RGBAf TilePreviewColor(int index) {
+            static const Gorgon::Graphics::RGBAf palette[] = {
+                {0.34f, 0.56f, 0.32f, 1.0f},
+                {0.45f, 0.36f, 0.28f, 1.0f},
+                {0.42f, 0.45f, 0.52f, 1.0f},
+                {0.28f, 0.42f, 0.62f, 1.0f},
+                {0.62f, 0.55f, 0.30f, 1.0f},
+                {0.55f, 0.30f, 0.30f, 1.0f},
+            };
+            const std::size_t count = sizeof(palette) / sizeof(palette[0]);
+            return palette[std::size_t(std::max(0, index)) % count];
         }
 
         Gorgon::Graphics::RGBAf FallbackColorForEntity(const Entity &e) {
@@ -378,6 +396,25 @@ namespace Gorgon :: Editor {
     }
 
     Gorgon::Geometry::Pointf EditorViewport::ComputeEntityBaseSize(const Entity &entity) const {
+        if(entity.spriteAnim.has_value()) {
+            const auto &anim = *entity.spriteAnim;
+            if(anim.frameW > 0 && anim.frameH > 0) {
+                return {static_cast<float>(anim.frameW), static_cast<float>(anim.frameH)};
+            }
+        }
+        if(entity.tilemap.has_value()) {
+            const auto &map = *entity.tilemap;
+            if(map.cols > 0 && map.rows > 0) {
+                return {static_cast<float>(map.cols) * map.tileW,
+                        static_cast<float>(map.rows) * map.tileH};
+            }
+        }
+        if(entity.text.has_value()) {
+            const auto &text = *entity.text;
+            const float width = static_cast<float>(std::max<std::size_t>(1, text.text.size())) *
+                                text.fontSize * 0.6f;
+            return {std::max(16.0f, width), text.fontSize * 1.4f};
+        }
         if(entity.sprite.has_value() && !entity.sprite->asset.empty()) {
             if(const auto *cached = getOrLoadSprite(entity.sprite->asset); cached && cached->bitmap) {
                 auto sz = cached->bitmap->GetSize();
@@ -1029,15 +1066,128 @@ namespace Gorgon :: Editor {
                 sc[i] = camera_.WorldToScreen(wc[i].X, wc[i].Y, viewW, viewH);
             }
 
-            bool drewSprite = false;
-            if(e->sprite.has_value() && !e->sprite->asset.empty()) {
+            bool drewContent = false;
+
+            if(e->spriteAnim.has_value()) {
+                // Show the frame the play session currently has, or frame 0 while editing.
+                const auto &anim = *e->spriteAnim;
+                const auto *cached = getOrLoadSprite(anim.asset);
+                if(cached && cached->bitmap) {
+                    const auto size = cached->bitmap->GetSize();
+                    const int frameW = std::max(1, anim.frameW);
+                    const int frameH = std::max(1, anim.frameH);
+                    const float imageW = static_cast<float>(std::max(1, size.Width));
+                    const float imageH = static_cast<float>(std::max(1, size.Height));
+                    const int perRow = std::max(1, size.Width / frameW);
+                    const int frame = std::clamp(anim.currentFrame, 0, std::max(0, anim.frameCount - 1));
+                    const int fx = (frame % perRow) * frameW;
+                    const int fy = (frame / perRow) * frameH;
+
+                    const Gorgon::Geometry::Pointf t1{fx / imageW, fy / imageH};
+                    const Gorgon::Geometry::Pointf t2{(fx + frameW) / imageW, fy / imageH};
+                    const Gorgon::Geometry::Pointf t3{(fx + frameW) / imageW, (fy + frameH) / imageH};
+                    const Gorgon::Geometry::Pointf t4{fx / imageW, (fy + frameH) / imageH};
+                    gfxLayer_.Draw(*cached->bitmap, sc[0], sc[1], sc[2], sc[3],
+                                   t1, t2, t3, t4, ToRGBAf(anim.tint));
+                    drewContent = true;
+                }
+            }
+            else if(e->sprite.has_value() && !e->sprite->asset.empty()) {
                 if(const auto *cached = getOrLoadSprite(e->sprite->asset); cached && cached->bitmap) {
                     gfxLayer_.Draw(*cached->bitmap, sc[0], sc[1], sc[2], sc[3], ToRGBAf(e->sprite->tint));
-                    drewSprite = true;
+                    drewContent = true;
                 }
             }
 
-            if(!drewSprite) {
+            if(!drewContent && e->tilemap.has_value()) {
+                const auto &map = *e->tilemap;
+                const auto *tileset = map.tilesetAsset.empty() ? nullptr : getOrLoadSprite(map.tilesetAsset);
+                const Transform wt = scene_.GetWorldTransform(e->id);
+                const float rad = wt.rotation * kDegToRad;
+                const float c = std::cos(rad);
+                const float s = std::sin(rad);
+                auto tilePoint = [&](float lx, float ly) -> Gorgon::Geometry::Pointf {
+                    const float wx = wt.x + (lx * wt.scaleX) * c - (ly * wt.scaleY) * s;
+                    const float wy = wt.y + (lx * wt.scaleX) * s + (ly * wt.scaleY) * c;
+                    return camera_.WorldToScreen(wx, wy, viewW, viewH);
+                };
+
+                const int cols = std::max(0, map.cols);
+                const int rows = std::max(0, map.rows);
+                const float originX = -static_cast<float>(cols) * map.tileW * 0.5f;
+                const float originY = -static_cast<float>(rows) * map.tileH * 0.5f;
+
+                for(int row = 0; row < rows; ++row) {
+                    for(int col = 0; col < cols; ++col) {
+                        const std::size_t index = static_cast<std::size_t>(row) * static_cast<std::size_t>(cols) +
+                                                  static_cast<std::size_t>(col);
+                        if(index >= map.tiles.size() || map.tiles[index] < 0)
+                            continue;
+
+                        const float lx = originX + static_cast<float>(col) * map.tileW;
+                        const float ly = originY + static_cast<float>(row) * map.tileH;
+                        const Gorgon::Geometry::Pointf q[4] = {
+                            tilePoint(lx, ly),
+                            tilePoint(lx + map.tileW, ly),
+                            tilePoint(lx + map.tileW, ly + map.tileH),
+                            tilePoint(lx, ly + map.tileH)
+                        };
+
+                        const int tile = map.tiles[index];
+                        if(tileset && tileset->bitmap) {
+                            const auto size = tileset->bitmap->GetSize();
+                            const int perRow = std::max(1, map.tilesetCols);
+                            const int tx = (tile % perRow) * static_cast<int>(map.tileW);
+                            const int ty = (tile / perRow) * static_cast<int>(map.tileH);
+                            const float imageW = static_cast<float>(std::max(1, size.Width));
+                            const float imageH = static_cast<float>(std::max(1, size.Height));
+                            const Gorgon::Geometry::Pointf t1{tx / imageW, ty / imageH};
+                            const Gorgon::Geometry::Pointf t2{(tx + map.tileW) / imageW, ty / imageH};
+                            const Gorgon::Geometry::Pointf t3{(tx + map.tileW) / imageW, (ty + map.tileH) / imageH};
+                            const Gorgon::Geometry::Pointf t4{tx / imageW, (ty + map.tileH) / imageH};
+                            gfxLayer_.Draw(*tileset->bitmap, q[0], q[1], q[2], q[3],
+                                           t1, t2, t3, t4, Gorgon::Graphics::RGBAf(1.0f));
+                        }
+                        else {
+                            gfxLayer_.Draw(q[0], q[1], q[2], q[3], TilePreviewColor(tile));
+                        }
+                    }
+                }
+                drewContent = true;
+            }
+
+            if(!drewContent && e->text.has_value()) {
+                const auto &label = *e->text;
+                bool drew = false;
+                try {
+                    auto printer = Gorgon::Widgets::Registry::Active().Printer(Gorgon::Graphics::NamedFont::Info);
+                    printer.SetColor(ToRGBAf(label.color));
+                    const auto textSize = printer.GetSize(label.text);
+                    const Transform wt = scene_.GetWorldTransform(e->id);
+                    const auto center = camera_.WorldToScreen(wt.x, wt.y, viewW, viewH);
+                    int x = static_cast<int>(center.X);
+                    if(label.align == TextAlign::Center)
+                        x -= textSize.Width / 2;
+                    else if(label.align == TextAlign::Right)
+                        x -= textSize.Width;
+                    const int y = static_cast<int>(center.Y) - textSize.Height / 2;
+                    const auto align = label.align == TextAlign::Center
+                        ? Gorgon::Graphics::TextAlignment::Center
+                        : (label.align == TextAlign::Right
+                            ? Gorgon::Graphics::TextAlignment::Right
+                            : Gorgon::Graphics::TextAlignment::Left);
+                    printer.PrintNoWrap(gfxLayer_, label.text, x, y, std::max(1, textSize.Width), align);
+                    drew = true;
+                }
+                catch(...) {
+                    // No widget theme active (headless selftest): fall through to the placeholder.
+                    drew = false;
+                }
+                if(drew)
+                    drewContent = true;
+            }
+
+            if(!drewContent) {
                 const auto fill = FallbackColorForEntity(*e);
                 gfxLayer_.Draw(sc[0], sc[1], sc[2], sc[3], fill);
                 drawRectOutline(sc, 1.5f, Gorgon::Graphics::RGBAf(1.0f, 1.0f, 1.0f, 0.35f));
@@ -1084,6 +1234,101 @@ namespace Gorgon :: Editor {
                     drawLine(prev.X, prev.Y, curr.X, curr.Y, 1.5f, colColor);
                     prev = curr;
                 }
+            }
+        }
+    }
+
+    void EditorViewport::drawParticles(float viewW, float viewH) {
+        const auto order = scene_.GetRenderOrder();
+        for(EntityId id : order) {
+            const Entity *e = scene_.FindEntity(id);
+            if(!e || !e->visible || !e->particles.has_value())
+                continue;
+
+            const auto &emitter = *e->particles;
+            const Transform wt = scene_.GetWorldTransform(id);
+            const float rad = wt.rotation * kDegToRad;
+            const float c = std::cos(rad);
+            const float s = std::sin(rad);
+
+            auto toScreen = [&](float lx, float ly) -> Gorgon::Geometry::Pointf {
+                const float wx = wt.x + (lx * wt.scaleX) * c - (ly * wt.scaleY) * s;
+                const float wy = wt.y + (lx * wt.scaleX) * s + (ly * wt.scaleY) * c;
+                return camera_.WorldToScreen(wx, wy, viewW, viewH);
+            };
+
+            auto mix = [](std::uint8_t a, std::uint8_t b, float t) {
+                const float fa = a / 255.0f;
+                const float fb = b / 255.0f;
+                return fa + (fb - fa) * t;
+            };
+
+            const std::vector<Particle> *live = playSession_ ? playSession_->GetParticles(id) : nullptr;
+            if(live) {
+                // Live simulation (play-in-editor): draw every particle, faded over its lifetime.
+                const float size = std::max(0.5f, emitter.size);
+                for(const auto &particle : *live) {
+                    const float t = particle.life > 0.0f
+                        ? std::clamp(particle.age / particle.life, 0.0f, 1.0f)
+                        : 1.0f;
+                    const Gorgon::Graphics::RGBAf color(
+                        mix(emitter.startColor.r, emitter.endColor.r, t),
+                        mix(emitter.startColor.g, emitter.endColor.g, t),
+                        mix(emitter.startColor.b, emitter.endColor.b, t),
+                        mix(emitter.startColor.a, emitter.endColor.a, t)
+                    );
+                    const float half = size * 0.5f;
+                    const auto a = toScreen(particle.x - half, particle.y - half);
+                    const auto b = toScreen(particle.x + half, particle.y - half);
+                    const auto d = toScreen(particle.x + half, particle.y + half);
+                    const auto f = toScreen(particle.x - half, particle.y + half);
+                    gfxLayer_.Draw(a, b, d, f, color);
+                }
+            }
+
+            // Emitter marker, always visible while editing so an emitter can be selected and moved.
+            const auto center = toScreen(0.0f, 0.0f);
+            const Gorgon::Graphics::RGBAf marker(1.0f, 0.85f, 0.35f, emitter.active ? 0.95f : 0.45f);
+            drawLine(center.X - 7.0f, center.Y, center.X + 7.0f, center.Y, 1.5f, marker);
+            drawLine(center.X, center.Y - 7.0f, center.X, center.Y + 7.0f, 1.5f, marker);
+            drawLine(center.X - 5.0f, center.Y - 5.0f, center.X + 5.0f, center.Y + 5.0f, 1.0f, marker);
+            drawLine(center.X - 5.0f, center.Y + 5.0f, center.X + 5.0f, center.Y - 5.0f, 1.0f, marker);
+        }
+    }
+
+    void EditorViewport::drawCameraFrustum(float viewW, float viewH) {
+        for(const auto &entity : scene_.GetEntities()) {
+            if(!entity.camera.has_value() || !entity.camera->active)
+                continue;
+
+            // The component's view is the viewport size divided by its zoom, centred on the follow
+            // target (or the camera entity itself). Drawn as a wireframe so a designer can see what
+            // the game camera will show without entering play.
+            const EntityId followId = entity.camera->followTarget;
+            const EntityId centerId = (followId != InvalidEntityId && scene_.HasEntity(followId))
+                ? followId : entity.id;
+            const Transform centerWorld = scene_.GetWorldTransform(centerId);
+            const float zoom = std::max(0.01f, entity.camera->zoom);
+            const float halfW = viewW * 0.5f / zoom;
+            const float halfH = viewH * 0.5f / zoom;
+
+            const auto p0 = camera_.WorldToScreen(centerWorld.x - halfW, centerWorld.y - halfH, viewW, viewH);
+            const auto p1 = camera_.WorldToScreen(centerWorld.x + halfW, centerWorld.y - halfH, viewW, viewH);
+            const auto p2 = camera_.WorldToScreen(centerWorld.x + halfW, centerWorld.y + halfH, viewW, viewH);
+            const auto p3 = camera_.WorldToScreen(centerWorld.x - halfW, centerWorld.y + halfH, viewW, viewH);
+
+            const Gorgon::Graphics::RGBAf wire(1.0f, 0.62f, 0.28f, 0.85f);
+            drawLine(p0.X, p0.Y, p1.X, p1.Y, 1.5f, wire);
+            drawLine(p1.X, p1.Y, p2.X, p2.Y, 1.5f, wire);
+            drawLine(p2.X, p2.Y, p3.X, p3.Y, 1.5f, wire);
+            drawLine(p3.X, p3.Y, p0.X, p0.Y, 1.5f, wire);
+
+            if(centerId != entity.id) {
+                const Transform self = scene_.GetWorldTransform(entity.id);
+                const auto from = camera_.WorldToScreen(self.x, self.y, viewW, viewH);
+                const auto to = camera_.WorldToScreen(centerWorld.x, centerWorld.y, viewW, viewH);
+                drawLine(from.X, from.Y, to.X, to.Y, 1.0f,
+                         Gorgon::Graphics::RGBAf(1.0f, 0.62f, 0.28f, 0.45f));
             }
         }
     }
@@ -1211,13 +1456,19 @@ namespace Gorgon :: Editor {
         // 4. Collider wireframes
         drawColliders(viewW, viewH);
 
-        // 5. Selection bounding box & translate/scale gizmo
+        // 5. Particle emitters (live during play, marker while editing)
+        drawParticles(viewW, viewH);
+
+        // 6. CameraComponent frustum wireframe
+        drawCameraFrustum(viewW, viewH);
+
+        // 7. Selection bounding box & translate/scale gizmo
         drawSelectionGizmo(viewW, viewH);
 
-        // 6. Marquee selection box (translucent overlay)
+        // 8. Marquee selection box (translucent overlay)
         drawMarquee();
 
-        // 7. Asset drag-and-drop preview indicator
+        // 9. Asset drag-and-drop preview indicator
         drawDropPreview(viewW, viewH);
     }
 

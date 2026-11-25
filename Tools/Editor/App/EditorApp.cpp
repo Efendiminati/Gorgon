@@ -737,6 +737,8 @@ namespace Gorgon :: Editor {
         // Edit-only gizmos, click-select and drag are off while the scripts own the scene.
         viewport_.ClearDropPreview();
         viewport_.SetEditEnabled(false);
+        // The viewport reads live particle state from the running session.
+        viewport_.SetPlaySession(&play_);
         viewport_.Redraw();
         updatePlayButtons();
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
@@ -762,6 +764,7 @@ namespace Gorgon :: Editor {
 
         // Tears the VMs down and puts the exact pre-play scene back.
         play_.Stop(scene_);
+        viewport_.SetPlaySession(nullptr);
 
         playMode_ = PlayMode::Stopped;
         viewport_.SetEditEnabled(true);

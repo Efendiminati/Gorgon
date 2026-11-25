@@ -19,6 +19,8 @@
 
 namespace Gorgon :: Editor {
 
+    class PlaySession;
+
     struct ViewportCamera {
         float panX = 0.0f;
         float panY = 0.0f;
@@ -64,6 +66,10 @@ namespace Gorgon :: Editor {
 
         /// Clears cached sprite textures (e.g. when switching projects or reloading assets).
         void ClearSpriteCache();
+
+        /// Live play session to read particle state from while playing. The viewport never owns it;
+        /// passing nullptr (or stopping play) falls back to drawing the emitter marker only.
+        void SetPlaySession(const PlaySession *session) { playSession_ = session; }
 
         /// Sets the base directory used to resolve relative sprite asset paths.
         void SetAssetBaseDir(const std::string &dir);
@@ -193,6 +199,8 @@ namespace Gorgon :: Editor {
         void drawGrid(float viewW, float viewH);
         void drawEntities(float viewW, float viewH);
         void drawColliders(float viewW, float viewH);
+        void drawParticles(float viewW, float viewH);
+        void drawCameraFrustum(float viewW, float viewH);
         void drawSelectionGizmo(float viewW, float viewH);
         void drawMarquee();
         void drawDropPreview(float viewW, float viewH);
@@ -214,6 +222,8 @@ namespace Gorgon :: Editor {
         // seeing the buttons while play-in-editor has editing disabled. Order: left, right, middle.
         bool mouseDown_[3] = {false, false, false};
         Gorgon::Geometry::Size sizeOverride_{0, 0};
+
+        const PlaySession *playSession_ = nullptr;
 
         std::string assetBaseDir_;
         mutable std::unordered_map<std::string, CachedSprite> spriteCache_;
