@@ -117,6 +117,64 @@ namespace Gorgon :: Editor {
         panel_.Add(btnRevertPrefab_);
         panel_.Add(btnSavePrefab_);
 
+        // ---- tags -----------------------------------------------------------
+        panel_.Add(lblTags_);
+        panel_.Add(tags_);
+
+        // ---- sprite animation ----------------------------------------------
+        panel_.Add(lblAnim_);
+        panel_.Add(lblAnimAsset_);
+        panel_.Add(animAsset_);
+        panel_.Add(lblAnimFps_);
+        panel_.Add(animFps_);
+        panel_.Add(btnAddAnim_);
+        panel_.Add(btnRemoveAnim_);
+
+        // ---- text ----------------------------------------------------------
+        panel_.Add(lblText_);
+        panel_.Add(lblTextValue_);
+        panel_.Add(textValue_);
+        panel_.Add(lblTextSize_);
+        panel_.Add(textSize_);
+        panel_.Add(btnAddText_);
+        panel_.Add(btnRemoveText_);
+
+        // ---- audio ---------------------------------------------------------
+        panel_.Add(lblAudio_);
+        panel_.Add(lblAudioAsset_);
+        panel_.Add(audioAsset_);
+        panel_.Add(lblAudioVolume_);
+        panel_.Add(audioVolume_);
+        panel_.Add(btnAddAudio_);
+        panel_.Add(btnRemoveAudio_);
+
+        // ---- camera --------------------------------------------------------
+        panel_.Add(lblCameraC_);
+        panel_.Add(lblCameraZoom_);
+        panel_.Add(cameraZoom_);
+        panel_.Add(lblCameraFollow_);
+        panel_.Add(cameraFollow_);
+        panel_.Add(btnAddCamera_);
+        panel_.Add(btnRemoveCamera_);
+
+        // ---- tilemap -------------------------------------------------------
+        panel_.Add(lblTilemap_);
+        panel_.Add(lblTilemapCols_);
+        panel_.Add(tilemapCols_);
+        panel_.Add(lblTilemapRows_);
+        panel_.Add(tilemapRows_);
+        panel_.Add(btnAddTilemap_);
+        panel_.Add(btnRemoveTilemap_);
+
+        // ---- particles -----------------------------------------------------
+        panel_.Add(lblParticles_);
+        panel_.Add(lblParticlesRate_);
+        panel_.Add(particlesRate_);
+        panel_.Add(lblParticlesSize_);
+        panel_.Add(particlesSize_);
+        panel_.Add(btnAddParticles_);
+        panel_.Add(btnRemoveParticles_);
+
         // Sprite tint supports alpha so tint can fade an entity out.
         spriteTint_.SetAlpha(true);
         backgroundColor_.SetAlpha(false);
@@ -125,6 +183,8 @@ namespace Gorgon :: Editor {
         colliderType_.List.Add(std::string(ColliderTypeNames[1]));
         colliderType_.List.Add(std::string(ColliderTypeNames[2]));
         colliderType_.List.SetSelectedIndex(0);
+
+        registerComponentEvents();
 
         boundsToken_ = panel_.BoundsChangedEvent.Register([this]() {
             Layout();
@@ -198,6 +258,39 @@ namespace Gorgon :: Editor {
         fieldRow(lblPrefabSource_, lblPrefabPath_);
         pairRow(btnApplyPrefab_, btnRevertPrefab_);
         fullRow(btnSavePrefab_);
+
+        sectionRow(lblTags_);
+        fullRow(tags_);
+
+        sectionRow(lblAnim_);
+        fieldRow(lblAnimAsset_, animAsset_);
+        fieldRow(lblAnimFps_, animFps_);
+        pairRow(btnAddAnim_, btnRemoveAnim_);
+
+        sectionRow(lblText_);
+        fieldRow(lblTextValue_, textValue_);
+        fieldRow(lblTextSize_, textSize_);
+        pairRow(btnAddText_, btnRemoveText_);
+
+        sectionRow(lblAudio_);
+        fieldRow(lblAudioAsset_, audioAsset_);
+        fieldRow(lblAudioVolume_, audioVolume_);
+        pairRow(btnAddAudio_, btnRemoveAudio_);
+
+        sectionRow(lblCameraC_);
+        fieldRow(lblCameraZoom_, cameraZoom_);
+        fieldRow(lblCameraFollow_, cameraFollow_);
+        pairRow(btnAddCamera_, btnRemoveCamera_);
+
+        sectionRow(lblTilemap_);
+        fieldRow(lblTilemapCols_, tilemapCols_);
+        fieldRow(lblTilemapRows_, tilemapRows_);
+        pairRow(btnAddTilemap_, btnRemoveTilemap_);
+
+        sectionRow(lblParticles_);
+        fieldRow(lblParticlesRate_, particlesRate_);
+        fieldRow(lblParticlesSize_, particlesSize_);
+        pairRow(btnAddParticles_, btnRemoveParticles_);
     }
 
     Entity *InspectorPanel::selectedEntity() {
@@ -427,6 +520,227 @@ namespace Gorgon :: Editor {
         });
     }
 
+    void InspectorPanel::registerComponentEvents() {
+        tags_.ChangedEvent.Register([this](const std::string &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity)
+                return;
+
+            std::vector<std::string> tags;
+            std::string current;
+            for(char ch : value) {
+                if(ch == ',') {
+                    if(!current.empty())
+                        tags.push_back(current);
+                    current.clear();
+                }
+                else if(ch != ' ' || !current.empty()) {
+                    current.push_back(ch);
+                }
+            }
+            if(!current.empty())
+                tags.push_back(current);
+
+            if(tags == entity->tags)
+                return;
+            entity->tags = std::move(tags);
+            modified(false);
+        });
+
+        animAsset_.ChangedEvent.Register([this](const std::string &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->spriteAnim || entity->spriteAnim->asset == value)
+                return;
+            entity->spriteAnim->asset = value;
+            viewport_.ClearSpriteCache();
+            modified(false);
+        });
+        animFps_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->spriteAnim)
+                return;
+            entity->spriteAnim->fps = value;
+            modified(false);
+        });
+
+        textValue_.ChangedEvent.Register([this](const std::string &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->text || entity->text->text == value)
+                return;
+            entity->text->text = value;
+            modified(false);
+        });
+        textSize_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->text)
+                return;
+            entity->text->fontSize = value;
+            modified(false);
+        });
+
+        audioAsset_.ChangedEvent.Register([this](const std::string &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->audio || entity->audio->asset == value)
+                return;
+            entity->audio->asset = value;
+            modified(false);
+        });
+        audioVolume_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->audio)
+                return;
+            entity->audio->volume = value;
+            modified(false);
+        });
+
+        cameraZoom_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->camera)
+                return;
+            entity->camera->zoom = value;
+            modified(false);
+        });
+        cameraFollow_.ChangedEvent.Register([this](const int &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->camera)
+                return;
+            entity->camera->followTarget = static_cast<EntityId>(value < 0 ? 0 : value);
+            modified(false);
+        });
+
+        tilemapCols_.ChangedEvent.Register([this](const int &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->tilemap)
+                return;
+            entity->tilemap->cols = value;
+            entity->tilemap->tiles.resize(
+                static_cast<std::size_t>(std::max(0, entity->tilemap->cols)) *
+                static_cast<std::size_t>(std::max(0, entity->tilemap->rows)), -1);
+            modified(false);
+        });
+        tilemapRows_.ChangedEvent.Register([this](const int &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->tilemap)
+                return;
+            entity->tilemap->rows = value;
+            entity->tilemap->tiles.resize(
+                static_cast<std::size_t>(std::max(0, entity->tilemap->cols)) *
+                static_cast<std::size_t>(std::max(0, entity->tilemap->rows)), -1);
+            modified(false);
+        });
+
+        particlesRate_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->particles)
+                return;
+            entity->particles->emitRate = value;
+            modified(false);
+        });
+        particlesSize_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->particles)
+                return;
+            entity->particles->size = value;
+            modified(false);
+        });
+
+        btnAddAnim_.ClickEvent.Register([this]() { addComponent(ComponentKind::SpriteAnim); });
+        btnRemoveAnim_.ClickEvent.Register([this]() { removeComponent(ComponentKind::SpriteAnim); });
+        btnAddText_.ClickEvent.Register([this]() { addComponent(ComponentKind::Text); });
+        btnRemoveText_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Text); });
+        btnAddAudio_.ClickEvent.Register([this]() { addComponent(ComponentKind::Audio); });
+        btnRemoveAudio_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Audio); });
+        btnAddCamera_.ClickEvent.Register([this]() { addComponent(ComponentKind::Camera); });
+        btnRemoveCamera_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Camera); });
+        btnAddTilemap_.ClickEvent.Register([this]() { addComponent(ComponentKind::Tilemap); });
+        btnRemoveTilemap_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Tilemap); });
+        btnAddParticles_.ClickEvent.Register([this]() { addComponent(ComponentKind::Particles); });
+        btnRemoveParticles_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Particles); });
+    }
+
+    void InspectorPanel::addComponent(ComponentKind kind) {
+        Entity *entity = selectedEntity();
+        if(!entity)
+            return;
+
+        switch(kind) {
+            case ComponentKind::SpriteAnim:
+                if(!entity->spriteAnim)
+                    entity->spriteAnim = SpriteAnimComponent{};
+                break;
+            case ComponentKind::Text:
+                if(!entity->text)
+                    entity->text = TextComponent{};
+                break;
+            case ComponentKind::Audio:
+                if(!entity->audio)
+                    entity->audio = AudioComponent{};
+                break;
+            case ComponentKind::Camera:
+                if(!entity->camera)
+                    entity->camera = CameraComponent{};
+                break;
+            case ComponentKind::Tilemap:
+                if(!entity->tilemap) {
+                    TilemapComponent tilemap;
+                    tilemap.cols = 4;
+                    tilemap.rows = 4;
+                    tilemap.tiles.assign(16, 0);
+                    entity->tilemap = tilemap;
+                }
+                break;
+            case ComponentKind::Particles:
+                if(!entity->particles)
+                    entity->particles = ParticleComponent{};
+                break;
+        }
+
+        modified(true);
+    }
+
+    void InspectorPanel::removeComponent(ComponentKind kind) {
+        Entity *entity = selectedEntity();
+        if(!entity)
+            return;
+
+        switch(kind) {
+            case ComponentKind::SpriteAnim: entity->spriteAnim.reset(); break;
+            case ComponentKind::Text:       entity->text.reset();       break;
+            case ComponentKind::Audio:      entity->audio.reset();      break;
+            case ComponentKind::Camera:     entity->camera.reset();     break;
+            case ComponentKind::Tilemap:    entity->tilemap.reset();    break;
+            case ComponentKind::Particles:  entity->particles.reset();  break;
+        }
+
+        modified(true);
+    }
+
     void InspectorPanel::updateVisibility() {
         const bool multiMode = viewport_.GetSelectionCount() > 1;
         const Entity *entity = multiMode ? nullptr : selectedEntity();
@@ -497,6 +811,63 @@ namespace Gorgon :: Editor {
         btnPickScript_.SetVisible(hasScript);
         btnAddScript_.SetVisible(hasEntity && !hasScript);
         btnRemoveScript_.SetVisible(hasScript);
+
+        const bool hasAnim = hasEntity && entity->spriteAnim.has_value();
+        lblTags_.SetVisible(hasEntity);
+        tags_.SetVisible(hasEntity);
+
+        lblAnim_.SetVisible(hasEntity);
+        lblAnimAsset_.SetVisible(hasAnim);
+        animAsset_.SetVisible(hasAnim);
+        lblAnimFps_.SetVisible(hasAnim);
+        animFps_.SetVisible(hasAnim);
+        btnAddAnim_.SetVisible(hasEntity && !hasAnim);
+        btnRemoveAnim_.SetVisible(hasAnim);
+
+        const bool hasText = hasEntity && entity->text.has_value();
+        lblText_.SetVisible(hasEntity);
+        lblTextValue_.SetVisible(hasText);
+        textValue_.SetVisible(hasText);
+        lblTextSize_.SetVisible(hasText);
+        textSize_.SetVisible(hasText);
+        btnAddText_.SetVisible(hasEntity && !hasText);
+        btnRemoveText_.SetVisible(hasText);
+
+        const bool hasAudio = hasEntity && entity->audio.has_value();
+        lblAudio_.SetVisible(hasEntity);
+        lblAudioAsset_.SetVisible(hasAudio);
+        audioAsset_.SetVisible(hasAudio);
+        lblAudioVolume_.SetVisible(hasAudio);
+        audioVolume_.SetVisible(hasAudio);
+        btnAddAudio_.SetVisible(hasEntity && !hasAudio);
+        btnRemoveAudio_.SetVisible(hasAudio);
+
+        const bool hasCamera = hasEntity && entity->camera.has_value();
+        lblCameraC_.SetVisible(hasEntity);
+        lblCameraZoom_.SetVisible(hasCamera);
+        cameraZoom_.SetVisible(hasCamera);
+        lblCameraFollow_.SetVisible(hasCamera);
+        cameraFollow_.SetVisible(hasCamera);
+        btnAddCamera_.SetVisible(hasEntity && !hasCamera);
+        btnRemoveCamera_.SetVisible(hasCamera);
+
+        const bool hasTilemap = hasEntity && entity->tilemap.has_value();
+        lblTilemap_.SetVisible(hasEntity);
+        lblTilemapCols_.SetVisible(hasTilemap);
+        tilemapCols_.SetVisible(hasTilemap);
+        lblTilemapRows_.SetVisible(hasTilemap);
+        tilemapRows_.SetVisible(hasTilemap);
+        btnAddTilemap_.SetVisible(hasEntity && !hasTilemap);
+        btnRemoveTilemap_.SetVisible(hasTilemap);
+
+        const bool hasParticles = hasEntity && entity->particles.has_value();
+        lblParticles_.SetVisible(hasEntity);
+        lblParticlesRate_.SetVisible(hasParticles);
+        particlesRate_.SetVisible(hasParticles);
+        lblParticlesSize_.SetVisible(hasParticles);
+        particlesSize_.SetVisible(hasParticles);
+        btnAddParticles_.SetVisible(hasEntity && !hasParticles);
+        btnRemoveParticles_.SetVisible(hasParticles);
 
         const bool hasPrefab = hasEntity && !entity->prefabSource.empty();
         lblPrefab_.SetVisible(hasEntity);
@@ -572,6 +943,53 @@ namespace Gorgon :: Editor {
 
         if(entity->script && !scriptPath_.IsFocused())
             scriptPath_.Set(entity->script->path);
+
+        if(!tags_.IsFocused()) {
+            std::string joined;
+            for(std::size_t i = 0; i < entity->tags.size(); ++i) {
+                if(i)
+                    joined += ", ";
+                joined += entity->tags[i];
+            }
+            tags_.Set(joined);
+        }
+
+        if(entity->spriteAnim.has_value()) {
+            if(!animAsset_.IsFocused())
+                animAsset_.Set(entity->spriteAnim->asset);
+            if(!animFps_.IsFocused())
+                animFps_.Set(entity->spriteAnim->fps);
+        }
+        if(entity->text.has_value()) {
+            if(!textValue_.IsFocused())
+                textValue_.Set(entity->text->text);
+            if(!textSize_.IsFocused())
+                textSize_.Set(entity->text->fontSize);
+        }
+        if(entity->audio.has_value()) {
+            if(!audioAsset_.IsFocused())
+                audioAsset_.Set(entity->audio->asset);
+            if(!audioVolume_.IsFocused())
+                audioVolume_.Set(entity->audio->volume);
+        }
+        if(entity->camera.has_value()) {
+            if(!cameraZoom_.IsFocused())
+                cameraZoom_.Set(entity->camera->zoom);
+            if(!cameraFollow_.IsFocused())
+                cameraFollow_.Set(static_cast<int>(entity->camera->followTarget));
+        }
+        if(entity->tilemap.has_value()) {
+            if(!tilemapCols_.IsFocused())
+                tilemapCols_.Set(entity->tilemap->cols);
+            if(!tilemapRows_.IsFocused())
+                tilemapRows_.Set(entity->tilemap->rows);
+        }
+        if(entity->particles.has_value()) {
+            if(!particlesRate_.IsFocused())
+                particlesRate_.Set(entity->particles->emitRate);
+            if(!particlesSize_.IsFocused())
+                particlesSize_.Set(entity->particles->size);
+        }
 
         lblPrefabPath_.Text = entity->prefabSource;
 

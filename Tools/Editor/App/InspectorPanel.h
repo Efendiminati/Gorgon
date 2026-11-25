@@ -116,6 +116,20 @@ namespace Gorgon :: Editor {
         void removeCollider();
         void addScript();
         void removeScript();
+
+        /// One of the optional components the expanded inspector can add and remove.
+        enum class ComponentKind {
+            SpriteAnim,
+            Text,
+            Audio,
+            Camera,
+            Tilemap,
+            Particles
+        };
+
+        void registerComponentEvents();
+        void addComponent(ComponentKind kind);
+        void removeComponent(ComponentKind kind);
         void onColliderTypeChanged(long index);
 
         Scene &scene_;
@@ -194,6 +208,65 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button    btnApplyPrefab_{"Apply"};
         Gorgon::Widgets::Button    btnRevertPrefab_{"Revert"};
         Gorgon::Widgets::Button    btnSavePrefab_{"Save as Prefab"};
+
+
+        // ---- Tags (always available on an entity) ------------------------------
+        Gorgon::Widgets::Label     lblTags_{"Tags", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Textbox   tags_{""};
+
+        // ---- Sprite animation --------------------------------------------------
+        Gorgon::Widgets::Label     lblAnim_{"Sprite Animation", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblAnimAsset_{"Sheet"};
+        Gorgon::Widgets::Textbox   animAsset_{""};
+        Gorgon::Widgets::Label     lblAnimFps_{"FPS"};
+        Gorgon::Widgets::Numberbox animFps_{12.0f};
+        Gorgon::Widgets::Button    btnAddAnim_{"+ Add Animation"};
+        Gorgon::Widgets::Button    btnRemoveAnim_{"- Remove Animation"};
+
+        // ---- Text --------------------------------------------------------------
+        Gorgon::Widgets::Label     lblText_{"Text", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblTextValue_{"Value"};
+        Gorgon::Widgets::Textbox   textValue_{""};
+        Gorgon::Widgets::Label     lblTextSize_{"Size"};
+        Gorgon::Widgets::Numberbox textSize_{16.0f};
+        Gorgon::Widgets::Button    btnAddText_{"+ Add Text"};
+        Gorgon::Widgets::Button    btnRemoveText_{"- Remove Text"};
+
+        // ---- Audio -------------------------------------------------------------
+        Gorgon::Widgets::Label     lblAudio_{"Audio", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblAudioAsset_{"Asset"};
+        Gorgon::Widgets::Textbox   audioAsset_{""};
+        Gorgon::Widgets::Label     lblAudioVolume_{"Volume"};
+        Gorgon::Widgets::Numberbox audioVolume_{1.0f};
+        Gorgon::Widgets::Button    btnAddAudio_{"+ Add Audio"};
+        Gorgon::Widgets::Button    btnRemoveAudio_{"- Remove Audio"};
+
+        // ---- Camera ------------------------------------------------------------
+        Gorgon::Widgets::Label     lblCameraC_{"Camera", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblCameraZoom_{"Zoom"};
+        Gorgon::Widgets::Numberbox cameraZoom_{1.0f};
+        Gorgon::Widgets::Label     lblCameraFollow_{"Follow Id"};
+        Gorgon::Widgets::Integerbox cameraFollow_{0};
+        Gorgon::Widgets::Button    btnAddCamera_{"+ Add Camera"};
+        Gorgon::Widgets::Button    btnRemoveCamera_{"- Remove Camera"};
+
+        // ---- Tilemap -----------------------------------------------------------
+        Gorgon::Widgets::Label     lblTilemap_{"Tilemap", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblTilemapCols_{"Columns"};
+        Gorgon::Widgets::Integerbox tilemapCols_{0};
+        Gorgon::Widgets::Label     lblTilemapRows_{"Rows"};
+        Gorgon::Widgets::Integerbox tilemapRows_{0};
+        Gorgon::Widgets::Button    btnAddTilemap_{"+ Add Tilemap"};
+        Gorgon::Widgets::Button    btnRemoveTilemap_{"- Remove Tilemap"};
+
+        // ---- Particles ---------------------------------------------------------
+        Gorgon::Widgets::Label     lblParticles_{"Particles", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblParticlesRate_{"Emit / s"};
+        Gorgon::Widgets::Numberbox particlesRate_{20.0f};
+        Gorgon::Widgets::Label     lblParticlesSize_{"Size"};
+        Gorgon::Widgets::Numberbox particlesSize_{4.0f};
+        Gorgon::Widgets::Button    btnAddParticles_{"+ Add Particles"};
+        Gorgon::Widgets::Button    btnRemoveParticles_{"- Remove Particles"};
 
         std::vector<Row> rows_;
         bool updating_ = false;

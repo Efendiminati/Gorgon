@@ -1,3 +1,4 @@
+#include "Core/ComponentSimulation.h"
 #include "Core/Scene.h"
 #include "Core/SceneRuntime.h"
 #include "Core/SceneSerializer.h"
@@ -52,6 +53,7 @@ namespace {
     int RunCopyPasteSelfTest();
     int RunPrefabSelfTest();
     int RunInputSelfTest();
+    int RunComponentsSelfTest();
 
     int RunSelfTest() {
         using namespace Gorgon::Editor;
@@ -237,7 +239,11 @@ namespace {
             return inputResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, round-trip, asset browser)\n";
+        if(const int componentResult = RunComponentsSelfTest()) {
+            return componentResult;
+        }
+
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, round-trip, asset browser)\n";
         return 0;
     }
 
@@ -1715,6 +1721,149 @@ namespace {
             frames(1);
         }
         return result;
+    }
+
+
+    /// Expanded components: tags/properties, JSON round-trip of every new component, the
+    /// simulation that steps them and the runtime camera component. Runs headless.
+    int RunComponentsSelfTest() {
+        using namespace Gorgon::Editor;
+
+        Scene scene;
+        Entity &hero = scene.CreateEntity("Hero");
+        hero.tags = {"hero", "player"};
+        hero.properties["hp"] = "100";
+
+        SpriteAnimComponent anim;
+        anim.asset = "sheet.png";
+        anim.frameW = 16;
+        anim.frameH = 16;
+        anim.frameCount = 4;
+        anim.fps = 4.0f;
+        hero.spriteAnim = anim;
+
+        TextComponent text;
+        text.text = "Hello";
+        text.align = TextAlign::Center;
+        hero.text = text;
+
+        AudioComponent audio;
+        audio.asset = "hit.wav";
+        hero.audio = audio;
+
+        ParticleComponent particles;
+        particles.emitRate = 8.0f;
+        particles.lifetime = 1.0f;
+        hero.particles = particles;
+        const EntityId heroId = hero.id;
+
+        Entity &map = scene.CreateEntity("Map");
+        TilemapComponent tilemap;
+        tilemap.cols = 2;
+        tilemap.rows = 2;
+        tilemap.tiles = {0, 1, -1, 2};
+        map.tilemap = tilemap;
+        const EntityId mapId = map.id;
+
+        Entity &camera = scene.CreateEntity("MainCamera");
+        CameraComponent cameraComp;
+        cameraComp.active = true;
+        cameraComp.zoom = 2.0f;
+        cameraComp.followTarget = heroId;
+        camera.camera = cameraComp;
+        const EntityId cameraId = camera.id;
+        scene.FindEntity(heroId)->transform.x = 100.0f;
+        scene.FindEntity(heroId)->transform.y = 50.0f;
+
+        // Tag and property helpers (the GScript Scene library calls these).
+        if(scene.FindEntityByTag("hero") != heroId ||
+           scene.FindEntitiesByTag("player").size() != 1 ||
+           !scene.HasTag(heroId, "hero") ||
+           scene.GetProperty(heroId, "hp") != "100") {
+            std::cerr << "FAIL: tag/property helpers\n";
+            return 1;
+        }
+
+        // Every expanded component survives a JSON round-trip.
+        std::string error;
+        Scene reloaded;
+        if(!SceneSerializer::FromJsonString(SceneSerializer::ToJsonString(scene), reloaded, &error)) {
+            std::cerr << "FAIL: expanded component scene did not parse: " << error << "\n";
+            return 1;
+        }
+        if(reloaded != scene) {
+            std::cerr << "FAIL: expanded component scene did not survive the round-trip\n";
+            return 1;
+        }
+        if(!reloaded.FindEntity(heroId)->spriteAnim ||
+           !reloaded.FindEntity(heroId)->text ||
+           !reloaded.FindEntity(heroId)->audio ||
+           !reloaded.FindEntity(mapId)->tilemap ||
+           !reloaded.FindEntity(cameraId)->camera) {
+            std::cerr << "FAIL: a component was lost in the round-trip\n";
+            return 1;
+        }
+
+        // The simulation steps animation + particles and fires play-on-start audio exactly once.
+        ComponentSimulation simulation;
+        std::vector<std::string> triggered;
+        simulation.SetSoundSink([&triggered](const std::string &asset) { triggered.push_back(asset); });
+        simulation.Step(scene, 0.25f);
+        if(scene.FindEntity(heroId)->spriteAnim->currentFrame != 1) {
+            std::cerr << "FAIL: sprite animation did not advance\n";
+            return 1;
+        }
+        if(simulation.GetParticleCount(heroId) != 2) {
+            std::cerr << "FAIL: particle emitter produced " << simulation.GetParticleCount(heroId)
+                      << " particles instead of 2\n";
+            return 1;
+        }
+        if(triggered.size() != 1 || triggered[0] != "hit.wav") {
+            std::cerr << "FAIL: audio component did not fire exactly once\n";
+            return 1;
+        }
+        simulation.Step(scene, 0.25f);
+        if(triggered.size() != 1) {
+            std::cerr << "FAIL: audio component fired more than once\n";
+            return 1;
+        }
+
+        // The runtime steps the same components without any script and follows the camera. Reset
+        // the animation so its first step is measurable from a known frame.
+        scene.FindEntity(heroId)->spriteAnim->currentFrame = 0;
+        scene.FindEntity(heroId)->spriteAnim->frameTime = 0.0f;
+
+        SceneRuntime runtime;
+        if(!runtime.LoadFromScene(scene, std::string(), &error)) {
+            std::cerr << "FAIL: SceneRuntime did not load the component scene: " << error << "\n";
+            return 1;
+        }
+        if(runtime.GetActiveCameraEntity() != cameraId) {
+            std::cerr << "FAIL: SceneRuntime did not pick the active CameraComponent\n";
+            return 1;
+        }
+        runtime.Update(0.25f);
+        if(runtime.GetScene().FindEntity(heroId)->spriteAnim->currentFrame != 1) {
+            std::cerr << "FAIL: SceneRuntime did not step the sprite animation\n";
+            return 1;
+        }
+        if(runtime.GetParticles(heroId) == nullptr || runtime.GetParticles(heroId)->size() != 2) {
+            std::cerr << "FAIL: SceneRuntime particle emitter did not step\n";
+            return 1;
+        }
+        if(!Approx(runtime.GetCamera().panX, 100.0f) || !Approx(runtime.GetCamera().panY, 50.0f) ||
+           !Approx(runtime.GetCamera().zoom, 2.0f)) {
+            std::cerr << "FAIL: SceneRuntime camera component got ("
+                      << runtime.GetCamera().panX << ", " << runtime.GetCamera().panY
+                      << ") zoom " << runtime.GetCamera().zoom << "\n";
+            return 1;
+        }
+        if(runtime.GetPlayedSounds().empty()) {
+            std::cerr << "FAIL: SceneRuntime did not record the component sound\n";
+            return 1;
+        }
+
+        return 0;
     }
 
 } // namespace
