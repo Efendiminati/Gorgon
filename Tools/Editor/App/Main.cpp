@@ -138,6 +138,51 @@ namespace {
             return 1;
         }
 
+        // 2b. Rotation gizmo hit-test, 15-deg snapped drag, and free drag
+        {
+            int interactionStarts = 0;
+            int interactionEnds = 0;
+            vp.OnInteractionChanged = [&](bool active) {
+                if(active) ++interactionStarts;
+                else ++interactionEnds;
+            };
+
+            const auto rotHandle = vp.ComputeRotateHandleScreenPos(*frontAfter, W, H);
+            if(vp.HitTestGizmo(rotHandle.X, rotHandle.Y) != GizmoHandle::Rotate) {
+                std::cerr << "FAIL: HitTestGizmo did not detect Rotate handle\n";
+                return 1;
+            }
+            // Drag from top (12 o'clock) to right (3 o'clock) -> +90 deg clockwise
+            vp.HandleMouseDown({static_cast<int>(std::round(rotHandle.X)), static_cast<int>(std::round(rotHandle.Y))},
+                               Gorgon::Input::Mouse::Button::Left);
+            vp.HandleMouseMove({492, 332});
+            vp.HandleMouseUp({492, 332}, Gorgon::Input::Mouse::Button::Left);
+            if(!Approx(frontAfter->transform.rotation, 90.0f) || interactionStarts != 1 || interactionEnds != 1) {
+                std::cerr << "FAIL: snapped rotate gizmo got " << frontAfter->transform.rotation
+                          << " deg (starts=" << interactionStarts << ", ends=" << interactionEnds << ")\n";
+                return 1;
+            }
+
+            // Free rotation without 15-deg snapping
+            vp.SetGridSnap(false);
+            const auto rotHandle90 = vp.ComputeRotateHandleScreenPos(*frontAfter, W, H);
+            if(vp.HitTestGizmo(rotHandle90.X, rotHandle90.Y) != GizmoHandle::Rotate) {
+                std::cerr << "FAIL: rotated Rotate handle not hit-tested at 90 deg\n";
+                return 1;
+            }
+            vp.HandleMouseDown({static_cast<int>(std::round(rotHandle90.X)), static_cast<int>(std::round(rotHandle90.Y))},
+                               Gorgon::Input::Mouse::Button::Left);
+            // Center is (432, 332); (472, 362) is atan2(30, 40) ~= 36.87 deg -> 90 + 36.87 = 126.87 deg
+            vp.HandleMouseMove({472, 362});
+            vp.HandleMouseUp({472, 362}, Gorgon::Input::Mouse::Button::Left);
+            if(std::abs(frontAfter->transform.rotation - 126.87f) > 0.2f) {
+                std::cerr << "FAIL: free rotate gizmo got " << frontAfter->transform.rotation << " deg\n";
+                return 1;
+            }
+            vp.SetGridSnap(true);
+            vp.OnInteractionChanged = nullptr;
+        }
+
         // 3. Space+left-drag pan
         vp.SetSpaceHeld(true);
         vp.HandleMouseDown({100, 100}, Gorgon::Input::Mouse::Button::Left);
