@@ -1,8 +1,11 @@
 #include "Viewport.h"
 
+#include <Gorgon/Input/Keyboard.h>
+
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <limits>
 
 namespace Gorgon :: Editor {
 
@@ -157,15 +160,152 @@ namespace Gorgon :: Editor {
         }
     }
 
+    bool EditorViewport::IsEntitySelected(EntityId id) const {
+        if(id == InvalidEntityId) return false;
+        return std::find(selectedEntities_.begin(), selectedEntities_.end(), id) != selectedEntities_.end();
+    }
+
     void EditorViewport::SetSelectedEntity(EntityId id, bool notify) {
         if(id != InvalidEntityId && !scene_.HasEntity(id)) {
             id = InvalidEntityId;
         }
-        if(selectedEntity_ == id) return;
-        selectedEntity_ = id;
+        std::vector<EntityId> next;
+        if(id != InvalidEntityId) {
+            next.push_back(id);
+        }
+        SetSelectedEntities(next, notify);
+    }
+
+    void EditorViewport::SetSelectedEntities(const std::vector<EntityId> &ids, bool notify) {
+        std::vector<EntityId> cleaned;
+        cleaned.reserve(ids.size());
+        for(EntityId id : ids) {
+            if(id == InvalidEntityId || !scene_.HasEntity(id)) continue;
+            if(std::find(cleaned.begin(), cleaned.end(), id) == cleaned.end()) {
+                cleaned.push_back(id);
+            }
+        }
+        const EntityId nextPrimary = cleaned.empty() ? InvalidEntityId : cleaned.back();
+        if(cleaned == selectedEntities_ && selectedEntity_ == nextPrimary) return;
+        selectedEntities_ = std::move(cleaned);
+        selectedEntity_ = nextPrimary;
         Redraw();
         if(notify && OnSelectionChanged) {
             OnSelectionChanged(selectedEntity_);
+        }
+    }
+
+    void EditorViewport::ToggleEntitySelection(EntityId id, bool notify) {
+        if(id == InvalidEntityId || !scene_.HasEntity(id)) return;
+        auto it = std::find(selectedEntities_.begin(), selectedEntities_.end(), id);
+        if(it != selectedEntities_.end()) {
+            selectedEntities_.erase(it);
+        } else {
+            selectedEntities_.push_back(id);
+        }
+        selectedEntity_ = selectedEntities_.empty() ? InvalidEntityId : selectedEntities_.back();
+        Redraw();
+        if(notify && OnSelectionChanged) {
+            OnSelectionChanged(selectedEntity_);
+        }
+    }
+
+    void EditorViewport::ClearSelection(bool notify) {
+        SetSelectedEntities({}, notify);
+    }
+
+    void EditorViewport::PruneSelection(bool notify) {
+        std::vector<EntityId> kept;
+        kept.reserve(selectedEntities_.size());
+        for(EntityId id : selectedEntities_) {
+            if(scene_.HasEntity(id)) {
+                kept.push_back(id);
+            }
+        }
+        SetSelectedEntities(kept, notify);
+    }
+
+    std::vector<EntityId> EditorViewport::DuplicateSelectedEntities(bool notify) {
+        if(selectedEntities_.empty()) return {};
+        std::vector<EntityId> roots;
+        roots.reserve(selectedEntities_.size());
+        for(EntityId id : selectedEntities_) {
+            if(!scene_.HasEntity(id)) continue;
+            bool ancestorSelected = false;
+            for(EntityId other : selectedEntities_) {
+                if(other != id && scene_.IsAncestorOf(other, id)) {
+                    ancestorSelected = true;
+                    break;
+                }
+            }
+            if(!ancestorSelected) {
+                roots.push_back(id);
+            }
+        }
+
+        std::vector<EntityId> created;
+        created.reserve(roots.size());
+        for(EntityId id : roots) {
+            const EntityId copyId = scene_.DuplicateEntity(id, true);
+            if(copyId != InvalidEntityId) {
+                created.push_back(copyId);
+            }
+        }
+        if(!created.empty()) {
+            SetSelectedEntities(created, notify);
+        }
+        return created;
+    }
+
+    bool EditorViewport::DeleteSelectedEntities(bool notify) {
+        if(selectedEntities_.empty()) return false;
+
+        if(selectedEntities_.size() == 1) {
+            const EntityId id = selectedEntities_.front();
+            const Entity *entity = scene_.FindEntity(id);
+            const EntityId parentId = entity ? entity->parentId : InvalidEntityId;
+            if(!scene_.RemoveEntity(id, true)) return false;
+            const EntityId nextSelection = scene_.HasEntity(parentId) ? parentId : InvalidEntityId;
+            SetSelectedEntity(nextSelection, notify);
+            return true;
+        }
+
+        const std::vector<EntityId> toRemove = selectedEntities_;
+        bool removedAny = false;
+        for(EntityId id : toRemove) {
+            if(scene_.HasEntity(id)) {
+                removedAny = scene_.RemoveEntity(id, true) || removedAny;
+            }
+        }
+        if(removedAny) {
+            ClearSelection(notify);
+        }
+        return removedAny;
+    }
+
+    bool EditorViewport::isShiftDown() const {
+        using Mod = Gorgon::Input::Keyboard::Modifier;
+        return shiftHeld_ || static_cast<bool>(Gorgon::Input::Keyboard::CurrentModifier & Mod(Mod::Shift));
+    }
+
+    void EditorViewport::captureGroupMoveTargets() {
+        dragStartTransforms_.clear();
+        dragStartTransforms_.reserve(selectedEntities_.size());
+        for(EntityId id : selectedEntities_) {
+            const Entity *e = scene_.FindEntity(id);
+            if(!e || e->locked) continue;
+            bool unlockedAncestorSelected = false;
+            for(EntityId other : selectedEntities_) {
+                if(other == id) continue;
+                const Entity *anc = scene_.FindEntity(other);
+                if(anc && !anc->locked && scene_.IsAncestorOf(other, id)) {
+                    unlockedAncestorSelected = true;
+                    break;
+                }
+            }
+            if(!unlockedAncestorSelected) {
+                dragStartTransforms_.push_back({id, e->transform});
+            }
         }
     }
 
@@ -322,8 +462,41 @@ namespace Gorgon :: Editor {
         return InvalidEntityId;
     }
 
+    std::vector<EntityId> EditorViewport::HitTestMarquee(float sx1, float sy1, float sx2, float sy2) const {
+        const auto sz = GetViewportSize();
+        const float viewW = static_cast<float>(sz.Width);
+        const float viewH = static_cast<float>(sz.Height);
+        const auto w1 = camera_.ScreenToWorld(std::min(sx1, sx2), std::min(sy1, sy2), viewW, viewH);
+        const auto w2 = camera_.ScreenToWorld(std::max(sx1, sx2), std::max(sy1, sy2), viewW, viewH);
+        const float mMinX = std::min(w1.X, w2.X);
+        const float mMaxX = std::max(w1.X, w2.X);
+        const float mMinY = std::min(w1.Y, w2.Y);
+        const float mMaxY = std::max(w1.Y, w2.Y);
+
+        std::vector<EntityId> hits;
+        for(EntityId id : scene_.GetRenderOrder()) {
+            const Entity *e = scene_.FindEntity(id);
+            if(!e || !e->visible || e->locked) continue;
+            const auto corners = ComputeEntityWorldCorners(*e);
+            float eMinX = std::numeric_limits<float>::max();
+            float eMaxX = std::numeric_limits<float>::lowest();
+            float eMinY = std::numeric_limits<float>::max();
+            float eMaxY = std::numeric_limits<float>::lowest();
+            for(const auto &c : corners) {
+                eMinX = std::min(eMinX, c.X);
+                eMaxX = std::max(eMaxX, c.X);
+                eMinY = std::min(eMinY, c.Y);
+                eMaxY = std::max(eMaxY, c.Y);
+            }
+            if(eMaxX >= mMinX && eMinX <= mMaxX && eMaxY >= mMinY && eMinY <= mMaxY) {
+                hits.push_back(e->id);
+            }
+        }
+        return hits;
+    }
+
     GizmoHandle EditorViewport::HitTestGizmo(float sx, float sy) const {
-        if(selectedEntity_ == InvalidEntityId) return GizmoHandle::None;
+        if(selectedEntities_.size() != 1 || selectedEntity_ == InvalidEntityId) return GizmoHandle::None;
         const Entity *e = scene_.FindEntity(selectedEntity_);
         if(!e || !e->visible || e->locked) return GizmoHandle::None;
 
@@ -393,13 +566,17 @@ namespace Gorgon :: Editor {
         const float sy = static_cast<float>(pt.Y);
         dragStartWorld_ = camera_.ScreenToWorld(sx, sy, viewW, viewH);
 
-        // Check gizmo handles on current selection first
+        // Check gizmo handles on single selection first
         const GizmoHandle handle = HitTestGizmo(sx, sy);
         if(handle != GizmoHandle::None) {
             if(const Entity *e = scene_.FindEntity(selectedEntity_)) {
                 activeHandle_ = handle;
                 dragStartLocalTransform_ = e->transform;
                 dragStartWorldTransform_ = scene_.GetWorldTransform(e->id);
+                dragStartTransforms_.clear();
+                dragStartTransforms_.push_back({e->id, e->transform});
+                pendingSingleSelect_ = InvalidEntityId;
+                dragMoved_ = false;
                 if(handle == GizmoHandle::TranslateX) {
                     dragMode_ = DragMode::MoveEntityX;
                 } else if(handle == GizmoHandle::TranslateY) {
@@ -419,17 +596,47 @@ namespace Gorgon :: Editor {
         }
 
         // Otherwise pick entity under cursor
+        const bool shift = isShiftDown();
         const EntityId hit = HitTestEntity(sx, sy);
-        SetSelectedEntity(hit, true);
         if(hit != InvalidEntityId) {
+            if(shift) {
+                ToggleEntitySelection(hit, true);
+                dragMode_ = DragMode::None;
+                pendingSingleSelect_ = InvalidEntityId;
+                dragMoved_ = false;
+                return;
+            }
+
+            if(!IsEntitySelected(hit)) {
+                SetSelectedEntity(hit, true);
+                pendingSingleSelect_ = InvalidEntityId;
+            } else {
+                pendingSingleSelect_ = (selectedEntities_.size() > 1) ? hit : InvalidEntityId;
+            }
+
             if(const Entity *e = scene_.FindEntity(hit)) {
                 dragStartLocalTransform_ = e->transform;
                 dragStartWorldTransform_ = scene_.GetWorldTransform(e->id);
-                dragMode_ = DragMode::MoveEntity;
-                if(OnInteractionChanged) OnInteractionChanged(true);
+                dragMoved_ = false;
+                captureGroupMoveTargets();
+                if(!dragStartTransforms_.empty()) {
+                    dragMode_ = DragMode::MoveEntity;
+                    if(OnInteractionChanged) OnInteractionChanged(true);
+                }
             }
         } else {
-            dragMode_ = DragMode::None;
+            // Empty space: begin marquee box selection (or clear on plain click)
+            dragMode_ = DragMode::MarqueeSelect;
+            marqueeStartScreen_ = {sx, sy};
+            marqueeEndScreen_ = {sx, sy};
+            marqueeAdditive_ = shift;
+            marqueeBaseSelection_ = selectedEntities_;
+            marqueeDragged_ = false;
+            pendingSingleSelect_ = InvalidEntityId;
+            dragMoved_ = false;
+            if(!marqueeAdditive_) {
+                ClearSelection(true);
+            }
         }
     }
 
@@ -455,39 +662,106 @@ namespace Gorgon :: Editor {
 
         lastMouse_ = pt;
 
+        if(dragMode_ == DragMode::MarqueeSelect) {
+            marqueeEndScreen_ = {sx, sy};
+            if(!marqueeDragged_ && DistSq(marqueeStartScreen_.X, marqueeStartScreen_.Y, sx, sy) > 4.0f) {
+                marqueeDragged_ = true;
+            }
+            if(marqueeDragged_) {
+                const auto hits = HitTestMarquee(marqueeStartScreen_.X, marqueeStartScreen_.Y, sx, sy);
+                std::vector<EntityId> nextSel;
+                if(marqueeAdditive_) {
+                    nextSel = marqueeBaseSelection_;
+                    for(EntityId id : hits) {
+                        if(std::find(nextSel.begin(), nextSel.end(), id) == nextSel.end()) {
+                            nextSel.push_back(id);
+                        }
+                    }
+                } else {
+                    nextSel = hits;
+                }
+                SetSelectedEntities(nextSel, true);
+                Redraw();
+            }
+            if(OnStatusChanged) {
+                OnStatusChanged(worldNow.X, worldNow.Y, camera_.zoom);
+            }
+            return;
+        }
+
         if(dragMode_ == DragMode::MoveEntity || dragMode_ == DragMode::MoveEntityX || dragMode_ == DragMode::MoveEntityY) {
-            Entity *e = scene_.FindEntity(selectedEntity_);
-            if(e && !e->locked) {
-                float dwx = worldNow.X - dragStartWorld_.X;
-                float dwy = worldNow.Y - dragStartWorld_.Y;
-                if(dragMode_ == DragMode::MoveEntityX) dwy = 0.0f;
-                if(dragMode_ == DragMode::MoveEntityY) dwx = 0.0f;
+            float dwx = worldNow.X - dragStartWorld_.X;
+            float dwy = worldNow.Y - dragStartWorld_.Y;
+            if(dragMode_ == DragMode::MoveEntityX) dwy = 0.0f;
+            if(dragMode_ == DragMode::MoveEntityY) dwx = 0.0f;
 
-                // Convert world delta to parent's local space if parented
-                float dlx = dwx;
-                float dly = dwy;
-                if(e->parentId != InvalidEntityId) {
-                    const Transform pwt = scene_.GetWorldTransform(e->parentId);
-                    const float rad = -pwt.rotation * kDegToRad;
-                    const float c = std::cos(rad);
-                    const float s = std::sin(rad);
-                    const float rx = dwx * c - dwy * s;
-                    const float ry = dwx * s + dwy * c;
-                    dlx = (std::abs(pwt.scaleX) > 1e-4f) ? (rx / pwt.scaleX) : rx;
-                    dly = (std::abs(pwt.scaleY) > 1e-4f) ? (ry / pwt.scaleY) : ry;
+            bool anyMoved = false;
+            if(dragStartTransforms_.size() == 1) {
+                const auto &entry = dragStartTransforms_[0];
+                Entity *e = scene_.FindEntity(entry.id);
+                if(e && !e->locked) {
+                    float dlx = dwx;
+                    float dly = dwy;
+                    if(e->parentId != InvalidEntityId) {
+                        const Transform pwt = scene_.GetWorldTransform(e->parentId);
+                        const float rad = -pwt.rotation * kDegToRad;
+                        const float c = std::cos(rad);
+                        const float s = std::sin(rad);
+                        const float rx = dwx * c - dwy * s;
+                        const float ry = dwx * s + dwy * c;
+                        dlx = (std::abs(pwt.scaleX) > 1e-4f) ? (rx / pwt.scaleX) : rx;
+                        dly = (std::abs(pwt.scaleY) > 1e-4f) ? (ry / pwt.scaleY) : ry;
+                    }
+
+                    float newX = entry.startLocal.x + dlx;
+                    float newY = entry.startLocal.y + dly;
+                    if(dragMode_ != DragMode::MoveEntityY) newX = snapValue(newX);
+                    if(dragMode_ != DragMode::MoveEntityX) newY = snapValue(newY);
+
+                    if(e->transform.x != newX || e->transform.y != newY) {
+                        e->transform.x = newX;
+                        e->transform.y = newY;
+                        anyMoved = true;
+                    }
                 }
+            } else if(dragStartTransforms_.size() > 1) {
+                // Snap the anchor entity's target world position and apply the resulting delta to all selected entities.
+                float targetWx = dragStartWorldTransform_.x + dwx;
+                float targetWy = dragStartWorldTransform_.y + dwy;
+                if(dragMode_ != DragMode::MoveEntityY) targetWx = snapValue(targetWx);
+                if(dragMode_ != DragMode::MoveEntityX) targetWy = snapValue(targetWy);
+                const float effDwx = targetWx - dragStartWorldTransform_.x;
+                const float effDwy = targetWy - dragStartWorldTransform_.y;
 
-                float newX = dragStartLocalTransform_.x + dlx;
-                float newY = dragStartLocalTransform_.y + dly;
-                if(dragMode_ != DragMode::MoveEntityY) newX = snapValue(newX);
-                if(dragMode_ != DragMode::MoveEntityX) newY = snapValue(newY);
-
-                if(e->transform.x != newX || e->transform.y != newY) {
-                    e->transform.x = newX;
-                    e->transform.y = newY;
-                    Redraw();
-                    if(OnSceneModified) OnSceneModified();
+                for(const auto &entry : dragStartTransforms_) {
+                    Entity *e = scene_.FindEntity(entry.id);
+                    if(!e || e->locked) continue;
+                    float dlx = effDwx;
+                    float dly = effDwy;
+                    if(e->parentId != InvalidEntityId) {
+                        const Transform pwt = scene_.GetWorldTransform(e->parentId);
+                        const float rad = -pwt.rotation * kDegToRad;
+                        const float c = std::cos(rad);
+                        const float s = std::sin(rad);
+                        const float rx = effDwx * c - effDwy * s;
+                        const float ry = effDwx * s + effDwy * c;
+                        dlx = (std::abs(pwt.scaleX) > 1e-4f) ? (rx / pwt.scaleX) : rx;
+                        dly = (std::abs(pwt.scaleY) > 1e-4f) ? (ry / pwt.scaleY) : ry;
+                    }
+                    const float newX = entry.startLocal.x + dlx;
+                    const float newY = entry.startLocal.y + dly;
+                    if(e->transform.x != newX || e->transform.y != newY) {
+                        e->transform.x = newX;
+                        e->transform.y = newY;
+                        anyMoved = true;
+                    }
                 }
+            }
+
+            if(anyMoved) {
+                dragMoved_ = true;
+                Redraw();
+                if(OnSceneModified) OnSceneModified();
             }
         } else if(dragMode_ == DragMode::ScaleEntity) {
             Entity *e = scene_.FindEntity(selectedEntity_);
@@ -560,14 +834,35 @@ namespace Gorgon :: Editor {
     }
 
     void EditorViewport::HandleMouseUp(Gorgon::Geometry::Point /*pt*/, Gorgon::Input::Mouse::Button /*btn*/) {
+        if(dragMode_ == DragMode::MarqueeSelect) {
+            const bool wasDragged = marqueeDragged_;
+            const bool wasAdditive = marqueeAdditive_;
+            dragMode_ = DragMode::None;
+            marqueeDragged_ = false;
+            marqueeBaseSelection_.clear();
+            if(!wasDragged && !wasAdditive) {
+                ClearSelection(true);
+            }
+            Redraw();
+            return;
+        }
+
         const bool wasEditing = dragMode_ == DragMode::MoveEntity ||
                                 dragMode_ == DragMode::MoveEntityX ||
                                 dragMode_ == DragMode::MoveEntityY ||
                                 dragMode_ == DragMode::ScaleEntity ||
                                 dragMode_ == DragMode::RotateEntity;
+        const EntityId pendingSingle = pendingSingleSelect_;
+        const bool moved = dragMoved_;
         dragMode_ = DragMode::None;
         activeHandle_ = GizmoHandle::None;
+        pendingSingleSelect_ = InvalidEntityId;
+        dragMoved_ = false;
+        dragStartTransforms_.clear();
         if(wasEditing && OnInteractionChanged) OnInteractionChanged(false);
+        if(pendingSingle != InvalidEntityId && !moved) {
+            SetSelectedEntity(pendingSingle, true);
+        }
     }
 
     bool EditorViewport::HandleMouseScroll(Gorgon::Geometry::Point pt, float amount) {
@@ -739,23 +1034,36 @@ namespace Gorgon :: Editor {
 
     void EditorViewport::drawSelectionGizmo(float viewW, float viewH) {
         if(!editEnabled_) return;
-        if(selectedEntity_ == InvalidEntityId) return;
+        if(selectedEntities_.empty()) return;
+
+        // Draw selection outlines for all selected entities
+        for(EntityId id : selectedEntities_) {
+            const Entity *sel = scene_.FindEntity(id);
+            if(!sel || !sel->visible) continue;
+            const auto wcSel = ComputeEntityWorldCorners(*sel);
+            std::array<Gorgon::Geometry::Pointf, 4> scSel;
+            for(int i = 0; i < 4; ++i) {
+                scSel[i] = camera_.WorldToScreen(wcSel[i].X, wcSel[i].Y, viewW, viewH);
+            }
+            const bool isPrimary = (id == selectedEntity_);
+            const Gorgon::Graphics::RGBAf outlineCol = sel->locked
+                ? Gorgon::Graphics::RGBAf(0.95f, 0.55f, 0.25f, 0.95f)
+                : (isPrimary ? Gorgon::Graphics::RGBAf(0.22f, 0.74f, 0.97f, 1.0f)
+                             : Gorgon::Graphics::RGBAf(0.22f, 0.74f, 0.97f, 0.75f));
+            drawRectOutline(scSel, isPrimary ? 2.0f : 1.5f, outlineCol);
+        }
+
+        // Transform handles (scale/rotate/axis arrows) are shown for single unlocked selection
+        if(selectedEntities_.size() != 1) return;
         const Entity *e = scene_.FindEntity(selectedEntity_);
-        if(!e || !e->visible) return;
+        if(!e || !e->visible || e->locked) return;
 
         const auto wc = ComputeEntityWorldCorners(*e);
         std::array<Gorgon::Geometry::Pointf, 4> sc;
         for(int i = 0; i < 4; ++i) {
             sc[i] = camera_.WorldToScreen(wc[i].X, wc[i].Y, viewW, viewH);
         }
-
-        // Selection bounding box
-        const Gorgon::Graphics::RGBAf selColor = e->locked
-            ? Gorgon::Graphics::RGBAf(0.95f, 0.55f, 0.25f, 0.95f)
-            : Gorgon::Graphics::RGBAf(0.22f, 0.74f, 0.97f, 1.0f);
-        drawRectOutline(sc, 2.0f, selColor);
-
-        if(e->locked) return;
+        const Gorgon::Graphics::RGBAf selColor(0.22f, 0.74f, 0.97f, 1.0f);
 
         // Corner scale handles
         const float hs = kHandleSizePx;
@@ -805,6 +1113,26 @@ namespace Gorgon :: Editor {
         gfxLayer_.Draw(center.X - 4.0f, center.Y - 4.0f, 8.0f, 8.0f, Gorgon::Graphics::RGBAf(1.0f, 0.85f, 0.25f, 1.0f));
     }
 
+    void EditorViewport::drawMarquee() {
+        if(dragMode_ != DragMode::MarqueeSelect || !marqueeDragged_) return;
+        const float minX = std::min(marqueeStartScreen_.X, marqueeEndScreen_.X);
+        const float maxX = std::max(marqueeStartScreen_.X, marqueeEndScreen_.X);
+        const float minY = std::min(marqueeStartScreen_.Y, marqueeEndScreen_.Y);
+        const float maxY = std::max(marqueeStartScreen_.Y, marqueeEndScreen_.Y);
+        const float w = maxX - minX;
+        const float h = maxY - minY;
+        if(w < 1.0f && h < 1.0f) return;
+
+        gfxLayer_.Draw(minX, minY, w, h, Gorgon::Graphics::RGBAf(0.22f, 0.74f, 0.97f, 0.18f));
+        const std::array<Gorgon::Geometry::Pointf, 4> corners = {
+            Gorgon::Geometry::Pointf{minX, minY},
+            Gorgon::Geometry::Pointf{maxX, minY},
+            Gorgon::Geometry::Pointf{maxX, maxY},
+            Gorgon::Geometry::Pointf{minX, maxY}
+        };
+        drawRectOutline(corners, 1.5f, Gorgon::Graphics::RGBAf(0.32f, 0.80f, 1.0f, 0.90f));
+    }
+
     void EditorViewport::Redraw() {
         if(!attached_) return;
 
@@ -829,6 +1157,9 @@ namespace Gorgon :: Editor {
 
         // 5. Selection bounding box & translate/scale gizmo
         drawSelectionGizmo(viewW, viewH);
+
+        // 6. Marquee selection box (translucent overlay)
+        drawMarquee();
     }
 
 } // namespace Gorgon::Editor

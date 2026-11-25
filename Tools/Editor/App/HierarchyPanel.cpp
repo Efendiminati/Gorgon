@@ -1,5 +1,6 @@
 #include "HierarchyPanel.h"
 
+#include <Gorgon/Input/Keyboard.h>
 #include <Gorgon/UI/Dialog.h>
 
 #include <algorithm>
@@ -11,8 +12,12 @@
 namespace Gorgon :: Editor {
 
     namespace {
-        std::string ComposeRowText(const Entity &entity, int depth, bool hasChildren) {
+        std::string ComposeRowText(const Entity &entity, int depth, bool hasChildren,
+                                   bool showMultiMarker, bool isSelected) {
             std::string text;
+            if(showMultiMarker) {
+                text += isSelected ? "[x] " : "[ ] ";
+            }
             text.append(std::size_t(std::max(0, depth)) * 3, ' ');
 
             // visibility marker, lock marker, then the entity name and its id
@@ -76,17 +81,10 @@ namespace Gorgon :: Editor {
             if(suppressSelection_)
                 return;
 
-            EntityId id = InvalidEntityId;
-            if(index >= 0 && std::size_t(index) < rows_.size())
-                id = rows_[std::size_t(index)].id;
-
-            if(viewport_.GetSelectedEntity() == id)
-                return;
-
-            viewport_.SetSelectedEntity(id, false);
-
-            if(OnSelectionChanged)
-                OnSelectionChanged(id);
+            using Mod = Gorgon::Input::Keyboard::Modifier;
+            const bool shift = viewport_.IsShiftHeld() ||
+                static_cast<bool>(Gorgon::Input::Keyboard::CurrentModifier & Mod(Mod::Shift));
+            HandleRowClick(index, shift);
         });
     }
 
@@ -114,8 +112,36 @@ namespace Gorgon :: Editor {
         onAddEntity();
     }
 
+    void HierarchyPanel::HandleRowClick(long index, bool shiftHeld) {
+        EntityId id = InvalidEntityId;
+        if(index >= 0 && std::size_t(index) < rows_.size())
+            id = rows_[std::size_t(index)].id;
+
+        if(shiftHeld) {
+            if(id != InvalidEntityId) {
+                viewport_.ToggleEntitySelection(id, false);
+            }
+        } else {
+            if(id == InvalidEntityId) {
+                if(viewport_.GetSelectionCount() == 0)
+                    return;
+                viewport_.ClearSelection(false);
+            } else {
+                if(viewport_.GetSelectionCount() == 1 && viewport_.GetSelectedEntity() == id)
+                    return;
+                viewport_.SetSelectedEntity(id, false);
+            }
+        }
+
+        SyncSelection();
+        if(OnSelectionChanged)
+            OnSelectionChanged(viewport_.GetSelectedEntity());
+    }
+
     void HierarchyPanel::rebuildRows() {
         rows_.clear();
+        const bool showMulti = viewport_.GetSelectionCount() > 1;
+        multiSelectMarkers_ = showMulti;
 
         // Depth-first walk so every child follows its parent.
         std::function<void(EntityId, int)> walk = [&](EntityId parentId, int depth) {
@@ -131,7 +157,7 @@ namespace Gorgon :: Editor {
                 row.visible = entity->visible;
                 row.locked = entity->locked;
                 row.name = entity->name;
-                row.text = ComposeRowText(*entity, depth, row.hasChildren);
+                row.text = ComposeRowText(*entity, depth, row.hasChildren, showMulti, viewport_.IsEntitySelected(childId));
 
                 rows_.push_back(std::move(row));
                 walk(childId, depth + 1);
@@ -185,17 +211,19 @@ namespace Gorgon :: Editor {
     }
 
     void HierarchyPanel::updateActionState() {
+        const std::size_t selCount = viewport_.GetSelectionCount();
         const Entity *entity = selectedEntity();
-        const bool hasSelection = entity != nullptr;
+        const bool hasSelection = selCount > 0;
+        const bool singleSelection = selCount == 1 && entity != nullptr;
 
-        btnAddChild_.SetEnabled(hasSelection);
+        btnAddChild_.SetEnabled(singleSelection);
         btnDuplicate_.SetEnabled(hasSelection);
         btnDelete_.SetEnabled(hasSelection);
-        btnRename_.SetEnabled(hasSelection);
+        btnRename_.SetEnabled(singleSelection);
         btnVisible_.SetEnabled(hasSelection);
         btnLocked_.SetEnabled(hasSelection);
-        lblParent_.SetEnabled(hasSelection);
-        parentBox_.SetEnabled(hasSelection);
+        lblParent_.SetEnabled(singleSelection);
+        parentBox_.SetEnabled(singleSelection);
 
         btnVisible_.Text = (entity && entity->visible) ? "Hide" : "Show";
         btnLocked_.Text  = (entity && entity->locked)  ? "Unlock" : "Lock";
@@ -217,6 +245,16 @@ namespace Gorgon :: Editor {
     }
 
     void HierarchyPanel::SyncSelection() {
+        const bool showMulti = viewport_.GetSelectionCount() > 1;
+        if(showMulti || multiSelectMarkers_) {
+            rebuildRows();
+            suppressSelection_ = true;
+            list_.Clear();
+            for(const HierarchyRow &row : rows_)
+                list_.Add(row);
+            suppressSelection_ = false;
+        }
+
         const EntityId selectedId = viewport_.GetSelectedEntity();
 
         long index = -1;
@@ -231,6 +269,7 @@ namespace Gorgon :: Editor {
         list_.SetSelectedIndex(index);
         suppressSelection_ = false;
 
+        rebuildParentChoices();
         updateActionState();
     }
 
@@ -346,31 +385,16 @@ namespace Gorgon :: Editor {
     }
 
     void HierarchyPanel::onDuplicate() {
-        const EntityId sourceId = viewport_.GetSelectedEntity();
-        if(sourceId == InvalidEntityId)
+        if(viewport_.DuplicateSelectedEntities(false).empty())
             return;
 
-        const EntityId copyId = scene_.DuplicateEntity(sourceId, true);
-        if(copyId == InvalidEntityId)
-            return;
-
-        viewport_.SetSelectedEntity(copyId, false);
         notifyModified(true);
     }
 
     void HierarchyPanel::onDelete() {
-        const EntityId id = viewport_.GetSelectedEntity();
-        if(id == InvalidEntityId)
+        if(!viewport_.DeleteSelectedEntities(false))
             return;
 
-        const Entity *entity = scene_.FindEntity(id);
-        const EntityId parentId = entity ? entity->parentId : InvalidEntityId;
-
-        if(!scene_.RemoveEntity(id, true))
-            return;
-
-        const EntityId nextSelection = scene_.HasEntity(parentId) ? parentId : InvalidEntityId;
-        viewport_.SetSelectedEntity(nextSelection, false);
         notifyModified(true);
     }
 
@@ -407,7 +431,11 @@ namespace Gorgon :: Editor {
         if(!entity)
             return;
 
-        entity->visible = !entity->visible;
+        const bool target = !entity->visible;
+        for(EntityId id : viewport_.GetSelectedEntities()) {
+            if(Entity *e = scene_.FindEntity(id))
+                e->visible = target;
+        }
         notifyModified(false);
     }
 
@@ -416,7 +444,11 @@ namespace Gorgon :: Editor {
         if(!entity)
             return;
 
-        entity->locked = !entity->locked;
+        const bool target = !entity->locked;
+        for(EntityId id : viewport_.GetSelectedEntities()) {
+            if(Entity *e = scene_.FindEntity(id))
+                e->locked = target;
+        }
         notifyModified(false);
     }
 

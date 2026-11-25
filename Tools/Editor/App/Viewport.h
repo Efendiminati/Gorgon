@@ -10,10 +10,12 @@
 #include <Gorgon/Widgets/Layerbox.h>
 
 #include <array>
+#include <cstddef>
 #include <functional>
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace Gorgon :: Editor {
 
@@ -72,9 +74,23 @@ namespace Gorgon :: Editor {
         const ViewportCamera &GetCamera() const { return camera_; }
         void ResetCamera();
 
-        /// Selection
+        /// Selection (primary + multi-select set)
         EntityId GetSelectedEntity() const { return selectedEntity_; }
+        const std::vector<EntityId> &GetSelectedEntities() const { return selectedEntities_; }
+        std::size_t GetSelectionCount() const { return selectedEntities_.size(); }
+        bool IsEntitySelected(EntityId id) const;
         void SetSelectedEntity(EntityId id, bool notify = true);
+        void SetSelectedEntities(const std::vector<EntityId> &ids, bool notify = true);
+        void ToggleEntitySelection(EntityId id, bool notify = true);
+        void ClearSelection(bool notify = true);
+        /// Drops any selected entity IDs that no longer exist in the scene.
+        void PruneSelection(bool notify = false);
+
+        /// Group operations on the current selection set.
+        /// DuplicateSelectedEntities duplicates all top-level selected entities and selects the copies.
+        std::vector<EntityId> DuplicateSelectedEntities(bool notify = false);
+        /// DeleteSelectedEntities removes all selected entities and updates selection.
+        bool DeleteSelectedEntities(bool notify = false);
 
         /// Grid snap toggle
         void SetGridSnap(bool enabled) { gridSnap_ = enabled; }
@@ -85,9 +101,11 @@ namespace Gorgon :: Editor {
         void SetEditEnabled(bool enabled) { editEnabled_ = enabled; }
         bool IsEditEnabled() const { return editEnabled_; }
 
-        /// Space-bar state (fed from window KeyPreviewEvent for Space+left-drag panning)
+        /// Modifier key states (fed from window KeyPreviewEvent and testable directly)
         void SetSpaceHeld(bool held) { spaceHeld_ = held; }
         bool IsSpaceHeld() const { return spaceHeld_; }
+        void SetShiftHeld(bool held) { shiftHeld_ = held; }
+        bool IsShiftHeld() const { return shiftHeld_; }
 
         /// Explicit viewport size override (used when running headless / in selftests without a Layerbox).
         void SetViewportSizeOverride(Gorgon::Geometry::Size sz) { sizeOverride_ = sz; }
@@ -95,6 +113,7 @@ namespace Gorgon :: Editor {
 
         /// Hit-testing & interaction helpers (also directly testable in --selftest)
         EntityId HitTestEntity(float sx, float sy) const;
+        std::vector<EntityId> HitTestMarquee(float sx1, float sy1, float sx2, float sy2) const;
         GizmoHandle HitTestGizmo(float sx, float sy) const;
         Gorgon::Geometry::Pointf ComputeEntityBaseSize(const Entity &entity) const;
         std::array<Gorgon::Geometry::Pointf, 4> ComputeEntityWorldCorners(const Entity &entity) const;
@@ -129,12 +148,20 @@ namespace Gorgon :: Editor {
             MoveEntityX,
             MoveEntityY,
             ScaleEntity,
-            RotateEntity
+            RotateEntity,
+            MarqueeSelect
+        };
+
+        struct DragEntityEntry {
+            EntityId id = InvalidEntityId;
+            Transform startLocal;
         };
 
         const CachedSprite *getOrLoadSprite(const std::string &assetPath) const;
         std::string resolveAssetPath(const std::string &assetPath) const;
         float snapValue(float value) const;
+        bool isShiftDown() const;
+        void captureGroupMoveTargets();
 
         void drawLine(float x1, float y1, float x2, float y2, float thickness, Gorgon::Graphics::RGBAf color);
         void drawFilledCircle(float cx, float cy, float radius, Gorgon::Graphics::RGBAf color);
@@ -143,6 +170,7 @@ namespace Gorgon :: Editor {
         void drawEntities(float viewW, float viewH);
         void drawColliders(float viewW, float viewH);
         void drawSelectionGizmo(float viewW, float viewH);
+        void drawMarquee();
 
         Scene &scene_;
         Gorgon::Widgets::Layerbox *layerbox_ = nullptr;
@@ -152,9 +180,11 @@ namespace Gorgon :: Editor {
 
         ViewportCamera camera_;
         EntityId selectedEntity_ = InvalidEntityId;
+        std::vector<EntityId> selectedEntities_;
         bool gridSnap_ = true;
         bool editEnabled_ = true;
         bool spaceHeld_ = false;
+        bool shiftHeld_ = false;
         Gorgon::Geometry::Size sizeOverride_{0, 0};
 
         std::string assetBaseDir_;
@@ -168,6 +198,16 @@ namespace Gorgon :: Editor {
         Transform dragStartLocalTransform_;
         Transform dragStartWorldTransform_;
         float dragStartAngleDeg_ = 0.0f;
+        std::vector<DragEntityEntry> dragStartTransforms_;
+        EntityId pendingSingleSelect_ = InvalidEntityId;
+        bool dragMoved_ = false;
+
+        // Active marquee selection state
+        Gorgon::Geometry::Pointf marqueeStartScreen_{0.0f, 0.0f};
+        Gorgon::Geometry::Pointf marqueeEndScreen_{0.0f, 0.0f};
+        bool marqueeAdditive_ = false;
+        bool marqueeDragged_ = false;
+        std::vector<EntityId> marqueeBaseSelection_;
     };
 
 } // namespace Gorgon::Editor

@@ -81,6 +81,12 @@ namespace Gorgon :: Editor {
         /// creating the component when it is missing. Used by the asset-browser picker.
         void SetPickedAsset(const std::string &path, bool isScript);
 
+        /// True when >1 entity is selected and the multi-selection summary is displayed.
+        bool IsMultiSelection() const { return viewport_.GetSelectionCount() > 1; }
+
+        /// Current multi-selection summary text (empty unless >1 entity is selected).
+        std::string GetMultiSelectionSummary() const { return lblMultiSummary_.Text; }
+
     private:
         using Widget = Gorgon::UI::Widget;
 
@@ -109,6 +115,11 @@ namespace Gorgon :: Editor {
         Scene &scene_;
         EditorViewport &viewport_;
         Gorgon::Widgets::Panel &panel_;
+
+        // ---- Multi-selection summary (shown when >1 entity is selected) --------
+        Gorgon::Widgets::Label     lblMultiSelection_{"Selection", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblMultiSummary_{""};
+        Gorgon::Widgets::Label     lblMultiHint_{"Drag to move together; Ctrl+D duplicate, Delete remove."};
 
         // ---- Scene settings (shown when nothing is selected) -------------------
         Gorgon::Widgets::Label     lblScene_{"Scene", Gorgon::Widgets::Registry::Label_Subtitle};

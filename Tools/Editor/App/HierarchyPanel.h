@@ -68,10 +68,11 @@ namespace Gorgon :: Editor {
         /// Number of rows currently shown (used by the smoke test).
         long GetRowCount() const;
 
-        /// Public entry points for editor-wide shortcuts (Ctrl+D / Delete).
+        /// Public entry points for editor-wide shortcuts (Ctrl+D / Delete) and row clicks.
         void DuplicateSelected();
         void DeleteSelected();
         void AddEntity();
+        void HandleRowClick(long index, bool shiftHeld);
 
         /// Fired after any structural change (add / child / duplicate / delete / reparent / rename).
         std::function<void()> OnStructureChanged;
@@ -126,6 +127,7 @@ namespace Gorgon :: Editor {
 
         bool suppressSelection_ = false;
         bool suppressParent_ = false;
+        bool multiSelectMarkers_ = false;
     };
 
 } // namespace Gorgon::Editor

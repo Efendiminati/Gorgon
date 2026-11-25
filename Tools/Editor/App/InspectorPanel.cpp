@@ -44,6 +44,11 @@ namespace Gorgon :: Editor {
     void InspectorPanel::build() {
         panel_.EnableScroll(true, false);
 
+        // ---- multi-selection -----------------------------------------------
+        panel_.Add(lblMultiSelection_);
+        panel_.Add(lblMultiSummary_);
+        panel_.Add(lblMultiHint_);
+
         // ---- scene ---------------------------------------------------------
         panel_.Add(lblScene_);
         panel_.Add(lblSceneName_);
@@ -140,6 +145,10 @@ namespace Gorgon :: Editor {
             rows_.push_back(Row{{&label, &field, &button}, {0.34f, 0.46f, 0.20f}});
         };
 
+        sectionRow(lblMultiSelection_);
+        fullRow(lblMultiSummary_);
+        fullRow(lblMultiHint_);
+
         sectionRow(lblScene_);
         fieldRow(lblSceneName_, sceneName_);
         fieldRow(lblGridSize_, gridSize_);
@@ -176,6 +185,8 @@ namespace Gorgon :: Editor {
     }
 
     Entity *InspectorPanel::selectedEntity() {
+        if(viewport_.GetSelectionCount() != 1)
+            return nullptr;
         return scene_.FindEntity(viewport_.GetSelectedEntity());
     }
 
@@ -369,10 +380,15 @@ namespace Gorgon :: Editor {
     }
 
     void InspectorPanel::updateVisibility() {
-        const Entity *entity = selectedEntity();
+        const bool multiMode = viewport_.GetSelectionCount() > 1;
+        const Entity *entity = multiMode ? nullptr : selectedEntity();
         const bool hasEntity = entity != nullptr;
 
-        const bool sceneMode = !hasEntity;
+        const bool sceneMode = !multiMode && !hasEntity;
+
+        lblMultiSelection_.SetVisible(multiMode);
+        lblMultiSummary_.SetVisible(multiMode);
+        lblMultiHint_.SetVisible(multiMode);
 
         lblScene_.SetVisible(sceneMode);
         lblSceneName_.SetVisible(sceneMode);
@@ -436,6 +452,14 @@ namespace Gorgon :: Editor {
     void InspectorPanel::pushValues() {
         updating_ = true;
 
+        const std::size_t selCount = viewport_.GetSelectionCount();
+        if(selCount > 1) {
+            lblMultiSummary_.Text = std::to_string(selCount) + " entities selected";
+            updating_ = false;
+            return;
+        }
+
+        lblMultiSummary_.Text = "";
         const Entity *entity = selectedEntity();
 
         if(!entity) {

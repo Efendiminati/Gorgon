@@ -132,11 +132,14 @@ namespace Gorgon :: Editor {
                     });
             };
 
-        // Keyboard preview for Space+left-drag pan and R to reset view
+        // Keyboard preview for Space+left-drag pan and Shift multi-select
         {
             window_.KeyPreviewEvent.Register([this](Gorgon::Input::Key key, float amount) {
-                if(key == Gorgon::Input::Keyboard::Keycodes::Space) {
+                namespace Keys = Gorgon::Input::Keyboard::Keycodes;
+                if(key == Keys::Space) {
                     viewport_.SetSpaceHeld(amount > 0.0f);
+                } else if(key == Keys::Shift || key == Keys::RShift) {
+                    viewport_.SetShiftHeld(amount > 0.0f);
                 }
             });
 
@@ -229,8 +232,7 @@ namespace Gorgon :: Editor {
         // The restored scene *is* the new committed baseline: undoing must not record an edit.
         lastCommittedScene_ = scene_;
 
-        if(!scene_.HasEntity(viewport_.GetSelectedEntity()))
-            viewport_.SetSelectedEntity(InvalidEntityId, false);
+        viewport_.PruneSelection(false);
 
         viewport_.ClearSpriteCache();
         refreshPanels();
@@ -524,7 +526,10 @@ namespace Gorgon :: Editor {
         std::ostringstream oss;
         oss << std::fixed << std::setprecision(0)
             << "Zoom: " << (zoom * 100.0f) << "%  Pos: (" << worldX << ", " << worldY << ")";
-        if(const Entity *e = scene_.FindEntity(viewport_.GetSelectedEntity())) {
+        const std::size_t selCount = viewport_.GetSelectionCount();
+        if(selCount > 1) {
+            oss << "  Sel: " << selCount << " entities";
+        } else if(const Entity *e = scene_.FindEntity(viewport_.GetSelectedEntity())) {
             oss << "  Sel: " << e->name << " (#" << e->id << ")";
         }
         if(playMode_ == PlayMode::Playing) {

@@ -47,6 +47,7 @@ namespace {
     }
 
     int RunAssetBrowserSelfTest();
+    int RunMultiSelectSelfTest();
 
     int RunSelfTest() {
         using namespace Gorgon::Editor;
@@ -212,11 +213,234 @@ namespace {
             return 1;
         }
 
+        if(const int multiResult = RunMultiSelectSelfTest()) {
+            return multiResult;
+        }
+
         if(const int assetResult = RunAssetBrowserSelfTest()) {
             return assetResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, round-trip, asset browser)\n";
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, round-trip, asset browser)\n";
+        return 0;
+    }
+
+    /// Multi-select: Shift-click, marquee box select, group drag + single undo,
+    /// group duplicate + single undo, and group delete + single undo.
+    int RunMultiSelectSelfTest() {
+        using namespace Gorgon::Editor;
+        using Btn = Gorgon::Input::Mouse::Button;
+
+        Scene scene;
+        scene.settings.gridSize = 32;
+
+        const EntityId idA = [&]() {
+            Entity &e = scene.CreateEntity("A");
+            e.zOrder = 1;
+            e.transform.x = -128.0f;
+            e.transform.y = 0.0f;
+            return e.id;
+        }();
+        const EntityId idB = [&]() {
+            Entity &e = scene.CreateEntity("B");
+            e.zOrder = 2;
+            e.transform.x = 0.0f;
+            e.transform.y = 0.0f;
+            return e.id;
+        }();
+        const EntityId idC = [&]() {
+            Entity &e = scene.CreateEntity("C");
+            e.zOrder = 3;
+            e.transform.x = 128.0f;
+            e.transform.y = 0.0f;
+            return e.id;
+        }();
+        const EntityId idLocked = [&]() {
+            Entity &e = scene.CreateEntity("Locked");
+            e.zOrder = 10;
+            e.locked = true;
+            e.transform.x = -128.0f;
+            e.transform.y = 0.0f;
+            return e.id;
+        }();
+        const EntityId idHidden = [&]() {
+            Entity &e = scene.CreateEntity("Hidden");
+            e.zOrder = 20;
+            e.visible = false;
+            e.transform.x = 0.0f;
+            e.transform.y = 0.0f;
+            return e.id;
+        }();
+
+        EditorViewport vp(scene);
+        vp.SetViewportSizeOverride({800, 600});
+        vp.SetGridSnap(true);
+
+        CommandStack commands;
+        Scene lastCommitted = scene;
+        bool gestureActive = false;
+        bool gesturePushed = false;
+        auto recordEdit = [&](const std::string &name, bool merge = false) {
+            if(scene == lastCommitted) return;
+            commands.Push(std::unique_ptr<Command>(
+                new SceneSnapshotCommand(name, lastCommitted, scene)), merge);
+            lastCommitted = scene;
+        };
+        vp.OnInteractionChanged = [&](bool active) {
+            gestureActive = active;
+            if(active) gesturePushed = false;
+        };
+        vp.OnSceneModified = [&]() {
+            recordEdit(gestureActive ? "Move Entity" : "Viewport Edit", gestureActive && gesturePushed);
+            if(gestureActive) gesturePushed = true;
+        };
+
+        const float W = 800.0f, H = 600.0f;
+        auto toScreen = [&](float wx, float wy) {
+            const auto p = vp.GetCamera().WorldToScreen(wx, wy, W, H);
+            return Gorgon::Geometry::Point{static_cast<int>(std::round(p.X)), static_cast<int>(std::round(p.Y))};
+        };
+
+        // 1. Shift-click toggles selection; plain click replaces; empty click clears
+        const auto ptA = toScreen(-128.0f, 0.0f);
+        const auto ptB = toScreen(0.0f, 0.0f);
+        const auto ptC = toScreen(128.0f, 0.0f);
+
+        vp.HandleMouseDown(ptA, Btn::Left);
+        vp.HandleMouseUp(ptA, Btn::Left);
+        if(vp.GetSelectionCount() != 1 || vp.GetSelectedEntity() != idA) {
+            std::cerr << "FAIL: plain click did not select A\n";
+            return 1;
+        }
+
+        vp.SetShiftHeld(true);
+        vp.HandleMouseDown(ptB, Btn::Left);
+        vp.HandleMouseUp(ptB, Btn::Left);
+        if(vp.GetSelectionCount() != 2 || !vp.IsEntitySelected(idA) || !vp.IsEntitySelected(idB)) {
+            std::cerr << "FAIL: Shift-click did not add B to selection\n";
+            return 1;
+        }
+
+        vp.HandleMouseDown(ptA, Btn::Left);
+        vp.HandleMouseUp(ptA, Btn::Left);
+        vp.SetShiftHeld(false);
+        if(vp.GetSelectionCount() != 1 || vp.IsEntitySelected(idA) || !vp.IsEntitySelected(idB)) {
+            std::cerr << "FAIL: Shift-click did not toggle A out of selection\n";
+            return 1;
+        }
+
+        // Plain click on empty space clears selection
+        vp.HandleMouseDown({20, 20}, Btn::Left);
+        vp.HandleMouseUp({20, 20}, Btn::Left);
+        if(vp.GetSelectionCount() != 0 || vp.GetSelectedEntity() != InvalidEntityId) {
+            std::cerr << "FAIL: empty space click did not clear selection\n";
+            return 1;
+        }
+
+        // 2. Marquee box select covers A & B (ignoring Locked & Hidden, excluding C)
+        const auto mStart = toScreen(-180.0f, -60.0f);
+        const auto mEnd   = toScreen(50.0f, 60.0f);
+        vp.HandleMouseDown(mStart, Btn::Left);
+        vp.HandleMouseMove(mEnd);
+        vp.HandleMouseUp(mEnd, Btn::Left);
+        if(vp.GetSelectionCount() != 2 || !vp.IsEntitySelected(idA) || !vp.IsEntitySelected(idB) ||
+           vp.IsEntitySelected(idC) || vp.IsEntitySelected(idLocked) || vp.IsEntitySelected(idHidden)) {
+            std::cerr << "FAIL: marquee select expected {A, B}, got count=" << vp.GetSelectionCount() << "\n";
+            return 1;
+        }
+
+        // 2b. Shift+marquee adds C to existing selection
+        vp.SetShiftHeld(true);
+        const auto mcStart = toScreen(80.0f, -60.0f);
+        const auto mcEnd   = toScreen(180.0f, 60.0f);
+        vp.HandleMouseDown(mcStart, Btn::Left);
+        vp.HandleMouseMove(mcEnd);
+        vp.HandleMouseUp(mcEnd, Btn::Left);
+        vp.SetShiftHeld(false);
+        if(vp.GetSelectionCount() != 3 || !vp.IsEntitySelected(idA) || !vp.IsEntitySelected(idB) || !vp.IsEntitySelected(idC)) {
+            std::cerr << "FAIL: Shift+marquee did not add C to selection\n";
+            return 1;
+        }
+
+        // 3. Group drag moves all selected entities together (with grid snap) in 1 undo step
+        vp.HandleMouseDown(ptA, Btn::Left);
+        vp.HandleMouseMove({ptA.X + 30, ptA.Y + 14});
+        vp.HandleMouseMove({ptA.X + 62, ptA.Y + 34});
+        vp.HandleMouseUp({ptA.X + 62, ptA.Y + 34}, Btn::Left);
+        const Entity *eA = scene.FindEntity(idA);
+        const Entity *eB = scene.FindEntity(idB);
+        const Entity *eC = scene.FindEntity(idC);
+        if(!eA || !eB || !eC ||
+           !Approx(eA->transform.x, -64.0f) || !Approx(eA->transform.y, 32.0f) ||
+           !Approx(eB->transform.x,  64.0f) || !Approx(eB->transform.y, 32.0f) ||
+           !Approx(eC->transform.x, 192.0f) || !Approx(eC->transform.y, 32.0f)) {
+            std::cerr << "FAIL: group drag positions mismatch\n";
+            return 1;
+        }
+        if(commands.GetUndoCount() != 1) {
+            std::cerr << "FAIL: group drag should collapse to 1 undo step, got " << commands.GetUndoCount() << "\n";
+            return 1;
+        }
+        if(!commands.Undo(scene)) {
+            std::cerr << "FAIL: group drag undo failed\n";
+            return 1;
+        }
+        lastCommitted = scene;
+        eA = scene.FindEntity(idA);
+        eB = scene.FindEntity(idB);
+        eC = scene.FindEntity(idC);
+        if(!eA || !eB || !eC ||
+           !Approx(eA->transform.x, -128.0f) || !Approx(eA->transform.y, 0.0f) ||
+           !Approx(eB->transform.x,    0.0f) || !Approx(eB->transform.y, 0.0f) ||
+           !Approx(eC->transform.x,  128.0f) || !Approx(eC->transform.y, 0.0f)) {
+            std::cerr << "FAIL: group drag undo did not restore all entities\n";
+            return 1;
+        }
+
+        // 4. Group duplicate creates copies for all selected entities in 1 undo step
+        vp.SetSelectedEntities({idA, idB}, false);
+        const std::size_t countBeforeDup = scene.GetEntityCount();
+        const auto dupIds = vp.DuplicateSelectedEntities(false);
+        recordEdit("Duplicate Entities");
+        if(dupIds.size() != 2 || scene.GetEntityCount() != countBeforeDup + 2 ||
+           vp.GetSelectionCount() != 2 || vp.GetSelectedEntities() != dupIds) {
+            std::cerr << "FAIL: group duplicate mismatch\n";
+            return 1;
+        }
+        if(commands.GetUndoCount() != 1) {
+            std::cerr << "FAIL: group duplicate expected 1 undo step, got " << commands.GetUndoCount() << "\n";
+            return 1;
+        }
+        if(!commands.Undo(scene) || scene.GetEntityCount() != countBeforeDup) {
+            std::cerr << "FAIL: group duplicate undo did not remove copies\n";
+            return 1;
+        }
+        if(!commands.Redo(scene) || scene.GetEntityCount() != countBeforeDup + 2) {
+            std::cerr << "FAIL: group duplicate redo did not restore copies\n";
+            return 1;
+        }
+        lastCommitted = scene;
+
+        // 5. Group delete removes all selected entities in 1 undo step
+        vp.SetSelectedEntities(dupIds, false);
+        if(!vp.DeleteSelectedEntities(false)) {
+            std::cerr << "FAIL: group delete returned false\n";
+            return 1;
+        }
+        recordEdit("Delete Entities");
+        if(scene.GetEntityCount() != countBeforeDup || vp.GetSelectionCount() != 0) {
+            std::cerr << "FAIL: group delete did not remove selected entities and clear selection\n";
+            return 1;
+        }
+        if(commands.GetUndoCount() != 2) {
+            std::cerr << "FAIL: group delete expected 2 total undo steps, got " << commands.GetUndoCount() << "\n";
+            return 1;
+        }
+        if(!commands.Undo(scene) || scene.GetEntityCount() != countBeforeDup + 2) {
+            std::cerr << "FAIL: group delete undo did not restore deleted entities\n";
+            return 1;
+        }
+
         return 0;
     }
 
