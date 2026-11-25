@@ -261,6 +261,12 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Integerbox tilemapCols_{0};
         Gorgon::Widgets::Label     lblTilemapRows_{"Rows"};
         Gorgon::Widgets::Integerbox tilemapRows_{0};
+        Gorgon::Widgets::Label     lblTilesetAsset_{"Tileset"};
+        Gorgon::Widgets::Textbox   tilesetAsset_{""};
+        Gorgon::Widgets::Label     lblTileTool_{"Paint Tool"};
+        Gorgon::Widgets::DropdownList<std::string> tileTool_;
+        Gorgon::Widgets::Label     lblPaintTile_{"Tile Index"};
+        Gorgon::Widgets::Integerbox paintTile_{1};
         Gorgon::Widgets::Button    btnAddTilemap_{"+ Add Tilemap"};
         Gorgon::Widgets::Button    btnRemoveTilemap_{"- Remove Tilemap"};
 

@@ -164,6 +164,12 @@ namespace Gorgon :: Editor {
         panel_.Add(tilemapCols_);
         panel_.Add(lblTilemapRows_);
         panel_.Add(tilemapRows_);
+        panel_.Add(lblTilesetAsset_);
+        panel_.Add(tilesetAsset_);
+        panel_.Add(lblTileTool_);
+        panel_.Add(tileTool_);
+        panel_.Add(lblPaintTile_);
+        panel_.Add(paintTile_);
         panel_.Add(btnAddTilemap_);
         panel_.Add(btnRemoveTilemap_);
 
@@ -184,6 +190,11 @@ namespace Gorgon :: Editor {
         colliderType_.List.Add(std::string(ColliderTypeNames[1]));
         colliderType_.List.Add(std::string(ColliderTypeNames[2]));
         colliderType_.List.SetSelectedIndex(0);
+
+        tileTool_.List.Add(std::string("Brush"));
+        tileTool_.List.Add(std::string("Fill"));
+        tileTool_.List.Add(std::string("Eraser"));
+        tileTool_.List.SetSelectedIndex(0);
 
         registerComponentEvents();
 
@@ -287,6 +298,9 @@ namespace Gorgon :: Editor {
         sectionRow(lblTilemap_);
         fieldRow(lblTilemapCols_, tilemapCols_);
         fieldRow(lblTilemapRows_, tilemapRows_);
+        fieldRow(lblTilesetAsset_, tilesetAsset_);
+        fieldRow(lblTileTool_, tileTool_);
+        fieldRow(lblPaintTile_, paintTile_);
         pairRow(btnAddTilemap_, btnRemoveTilemap_);
 
         sectionRow(lblParticles_);
@@ -660,6 +674,35 @@ namespace Gorgon :: Editor {
             modified(false);
         });
 
+        tilesetAsset_.ChangedEvent.Register([this](const std::string &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->tilemap || entity->tilemap->tilesetAsset == value)
+                return;
+            entity->tilemap->tilesetAsset = value;
+            modified(false);
+        });
+
+        // The paint tool and the active tile live in the viewport (the palette strip shares
+        // them), so these two only mirror the viewport's state — they never edit the scene.
+        tileTool_.ChangedEvent.Register([this](long index) {
+            if(updating_)
+                return;
+            TilemapTool tool = TilemapTool::Brush;
+            switch(index) {
+                case 1: tool = TilemapTool::Fill; break;
+                case 2: tool = TilemapTool::Eraser; break;
+                default: tool = TilemapTool::Brush; break;
+            }
+            viewport_.SetTilemapTool(tool);
+        });
+        paintTile_.ChangedEvent.Register([this](const int &value) {
+            if(updating_)
+                return;
+            viewport_.SetPaintTile(value);
+        });
+
         particlesRate_.ChangedEvent.Register([this](const float &value) {
             if(updating_)
                 return;
@@ -867,6 +910,12 @@ namespace Gorgon :: Editor {
         tilemapCols_.SetVisible(hasTilemap);
         lblTilemapRows_.SetVisible(hasTilemap);
         tilemapRows_.SetVisible(hasTilemap);
+        lblTilesetAsset_.SetVisible(hasTilemap);
+        tilesetAsset_.SetVisible(hasTilemap);
+        lblTileTool_.SetVisible(hasTilemap);
+        tileTool_.SetVisible(hasTilemap);
+        lblPaintTile_.SetVisible(hasTilemap);
+        paintTile_.SetVisible(hasTilemap);
         btnAddTilemap_.SetVisible(hasEntity && !hasTilemap);
         btnRemoveTilemap_.SetVisible(hasTilemap);
 
@@ -993,6 +1042,17 @@ namespace Gorgon :: Editor {
                 tilemapCols_.Set(entity->tilemap->cols);
             if(!tilemapRows_.IsFocused())
                 tilemapRows_.Set(entity->tilemap->rows);
+            if(!tilesetAsset_.IsFocused())
+                tilesetAsset_.Set(entity->tilemap->tilesetAsset);
+            if(!paintTile_.IsFocused())
+                paintTile_.Set(viewport_.GetPaintTile());
+            if(!tileTool_.IsFocused()) {
+                const auto tool = viewport_.GetTilemapTool();
+                const long index = tool == TilemapTool::Fill ? 1
+                                 : tool == TilemapTool::Eraser ? 2 : 0;
+                if(tileTool_.List.GetSelectedIndex() != index)
+                    tileTool_.List.SetSelectedIndex(index);
+            }
         }
         if(entity->particles.has_value()) {
             if(!particlesRate_.IsFocused())

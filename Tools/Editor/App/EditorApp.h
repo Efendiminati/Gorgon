@@ -188,6 +188,10 @@ namespace Gorgon :: Editor {
         void syncDirtyFromScene();
         void updateUndoButtons();
         void onFrame();
+        /// Toggles the viewport's tile-painting tool (toolbar button and the `T` shortcut path).
+        void toggleTileTool();
+        /// Keeps the toolbar button's label/enabled state in sync with the viewport tool.
+        void updateTileToolButton();
         bool confirmDiscardChanges(const std::string &action, std::function<void()> proceed);
         void showPlayError(const std::string &message);
         /// Copies the editor's input snapshot into the play session before it steps.
@@ -255,6 +259,7 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button btnUndo_{"Undo"};
         Gorgon::Widgets::Button btnRedo_{"Redo"};
         Gorgon::Widgets::Button btnResetView_{"Reset View"};
+        Gorgon::Widgets::Button btnTiles_{"Tiles (T)"};
         Gorgon::Widgets::Button btnAssetsTab_{"Assets"};
         Gorgon::Widgets::Button btnConsoleTab_{"Console"};
         Gorgon::Widgets::Checkbox chkGridSnap_{"Grid Snap", true};

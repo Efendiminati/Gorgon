@@ -40,7 +40,12 @@ Outputs:
 - `Examples/EditorDemo/Bin/EditorDemo.exe` (the `Scene/` folder is copied next to it on every build)
 
 Because MSVC needs its environment, build from a Developer Command Prompt (or run
-`"...\VsDevCmd.bat" -arch=amd64` first).
+`"…\VsDevCmd.bat" -arch=amd64` first). From Git Bash, `scripts/build-editor.bat <targets…>` sets the
+MSVC environment up and builds the `WindowsTesting` tree, which avoids the `cmd /c` quoting dance:
+
+```bat
+scripts\build-editor.bat GorgonEditor UnitTest-EditorCore EditorDemo
+```
 
 ## Using the editor
 
@@ -71,13 +76,14 @@ scene path and a `*` while there are unsaved changes.
 | `Ctrl+D` | Duplicate the selected entity (with its subtree) |
 | `Delete` | Delete the selected entity (with its subtree) |
 | `F` | Focus the selected entity (centres the camera on it) |
+| `T` | Arm / disarm the tile brush for the selected tilemap |
 
 `Ctrl+D`, `Delete` and `F` are ignored while a text field has focus, so typing in the inspector
 cannot delete or move anything.
 
 Toolbar buttons: **New**, **Open**, **Save**, **Save As**, **Export**, **Play**, **Pause**, **Stop**,
-**Undo**, **Redo**, **Reset View**, plus the **Grid Snap** toggle and a status line showing the world
-position under the cursor and the current zoom.
+**Undo**, **Redo**, **Reset View**, **Tiles**, plus the **Grid Snap** toggle and a status line showing
+the world position under the cursor and the current zoom.
 
 Panels:
 
@@ -95,6 +101,35 @@ Panels:
   Shows every GScript `Log()`/`Print()` line, every compile failure and every runtime error with a
   timestamp, a severity (Info / Warn / Error) and the entity/script it came from, colour coded, with
   an *Errors only* filter and a *Clear* button. See [Script console](#script-console).
+
+### Tilemap painting
+
+Select an entity with a **Tilemap** component, then press `T` or click **Tiles** in the toolbar. The
+tool only arms when the selection actually has a paintable grid (positive tile size, at least one
+cell, entity visible and unlocked), so `T` never hijacks the viewport with nothing to paint.
+
+While armed, the left mouse button paints instead of selecting:
+
+| Input | Action |
+| --- | --- |
+| Left drag over the map | Brush: paints the current tile into every cell the drag crosses (a straight line between mouse samples, so a fast drag leaves no gaps) |
+| **Fill** tool drag | Rectangle fill from the cell where the press started to the cell under the cursor; corners may come in any order and a drag that starts off the grid is clamped to it |
+| **Eraser** tool | Writes the empty tile (`-1`) into the cells the drag crosses |
+| Click a palette swatch | Picks that tile index (shows in the Inspector as *Tile Index*) |
+| `T` again | Leaves paint mode |
+
+The palette strip is drawn along the bottom of the viewport: real tileset crops when the component
+has a `tilesetAsset`, otherwise the same stable per-index colours the map itself falls back to. The
+active swatch has a bright border, the cell under the cursor is highlighted, and a Fill drag
+previews the whole rectangle before the release. Painting honours camera pan/zoom and the entity's
+own rotation/scale, so a click always lands on the tile the user sees.
+
+The **Details** panel gained *Tileset*, *Paint Tool* (Brush / Fill / Eraser) and *Tile Index* next to
+*Columns* / *Rows*; the tool and index only mirror the viewport state, they never edit the scene.
+
+A whole stroke — press, every paint, release — is **one undo step** named `Paint Tiles`, so `Ctrl+Z`
+restores the cells exactly as they were before the press. A stroke that changes nothing records
+nothing.
 
 ### Script editor
 
@@ -734,10 +769,19 @@ writes the manifest, scene and assets and warns about the missing executable.
 ctest --test-dir build/WindowsTesting -C Release -R EditorCore --output-on-failure
 
 GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, console, syntax check, round-trip
-GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor
+GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor, tile painting
 EditorDemo.exe --selftest        rem SceneRuntime: load, path resolution, script ticking
 GorgonPlayer.exe --selftest      rem exported bundle: game.json, scene load, 30 scripted frames
 ```
+
+`[Tilemap]` covers the paint tools headlessly: painting, over-painting and erasing single cells,
+`Bresenham` line strokes, rectangle fill bounds including a rectangle that starts outside the grid
+and must clamp, cell picking under a panned / zoomed camera and under a rotated / scaled entity,
+one-undo-step strokes that restore the exact pre-stroke cells, the palette layout's swatch
+hit-testing, and a JSON round-trip of a painted map. The `--smoke` paint phase drives the same code
+through the real window: it arms the tool, paints the cell under a computed pixel, checks the
+`Paint Tiles` undo step, undoes it and confirms the cell went back, picks a tile from the palette,
+and fills a rectangle as a single undo step.
 
 The Catch2 suite covers the script runtime too: `[Lifecycle]` (Start → Update → OnDestroy order,
 including a destroyed entity's hook and the Play-stop hooks), `[Scene]` (name lookup, spawn, deferred
@@ -767,7 +811,8 @@ Tools/Editor/
   PLAN.md                architecture and phase plan
   CMakeLists.txt         GorgonEditorCore + app + player + tests
   Core/                  Scene, Entity, Components, SceneSerializer, GameExporter,
-                         CommandStack, PlaySession, SceneRuntime, FileWatcher
+                         CommandStack, PlaySession, SceneRuntime, FileWatcher,
+                         TilemapPainter (grid geometry, stroke math, palette layout)
   App/                   EditorApp (window shell), Viewport, HierarchyPanel,
                          InspectorPanel, AssetBrowserPanel, EditorTheme, Main
   Player/                GorgonPlayer entry point (exported game runtime)

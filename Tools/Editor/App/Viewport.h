@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Scene.h"
+#include "Core/TilemapPainter.h"
 
 #include <Gorgon/Geometry/Point.h>
 #include <Gorgon/Geometry/Size.h>
@@ -115,6 +116,68 @@ namespace Gorgon :: Editor {
         /// Convert viewport-local screen coordinates to world coordinates, applying grid snap if enabled.
         Gorgon::Geometry::Pointf ScreenToWorldSnapped(float sx, float sy) const;
 
+        // ---- Tilemap painting --------------------------------------------------
+        /// The selected entity's tilemap when the brush can paint into it: the entity is selected,
+        /// unlocked and the component has a positive tile size and at least one cell.
+        TilemapComponent *GetEditableTilemap();
+        const TilemapComponent *GetEditableTilemap() const;
+        bool CanPaintTilemap() const { return GetEditableTilemap() != nullptr; }
+
+        /// Arms or disarms the tile-editing tool. Arming returns false (and leaves the tool
+        /// disarmed) when the selection has no paintable tilemap, so a plain `T` press cannot
+        /// hijack the viewport when there is nothing to paint.
+        bool SetTilemapToolActive(bool active);
+        bool IsTilemapToolActive() const { return tileToolActive_; }
+        void ToggleTilemapTool() { SetTilemapToolActive(!tileToolActive_); }
+
+        /// Brush / rectangle fill / eraser.
+        void SetTilemapTool(TilemapTool tool);
+        TilemapTool GetTilemapTool() const { return tileTool_; }
+
+        /// Tile index the brush and fill paint. A negative index means "empty", which is what the
+        /// eraser writes: picking the empty swatch turns the brush into an eraser too.
+        void SetPaintTile(int tile);
+        int GetPaintTile() const { return paintTile_; }
+
+        /// Number of tiles the palette strip offers: the tileset packing when the map has a usable
+        /// tileset image, otherwise the per-index colour fallback.
+        int GetTilePaletteCount() const;
+
+        /// Palette strip geometry. Recomputed on demand and used for both drawing and picking, so
+        /// a click always lands on the swatch the user sees.
+        const TilePaletteLayout &GetTilePaletteLayout() const;
+        /// Tile index under a viewport pixel, -1 when the point misses every swatch.
+        int HitTestTilePalette(float sx, float sy) const;
+
+        /// Cell under a viewport pixel, honouring camera pan/zoom and the entity's world transform.
+        TilemapHit ScreenToTilemapCell(float sx, float sy) const;
+        /// Cell of the given map under a viewport pixel (same camera conventions).
+        TilemapHit ScreenToTilemapCell(const TilemapComponent &map, float sx, float sy) const;
+
+        /// Tile stroke API. Begin captures the whole cell array; Drag paints from the previous
+        /// cell to the new one (a straight line, so a fast drag leaves no gaps; Fill re-covers the
+        /// rectangle from the anchor); End reports whether anything changed. The editor turns each
+        /// changed stroke into exactly one undo step. Also driven directly by --smoke.
+        bool BeginTileStroke(float sx, float sy);
+        bool DragTileStroke(float sx, float sy);
+        bool EndTileStroke();
+        bool CancelTileStroke();
+        bool IsTileStrokeActive() const { return strokeActive_; }
+        /// Cells as they were when the current (or last) stroke began.
+        const std::vector<int> &GetTileStrokeBaseline() const { return strokeBaseline_; }
+        /// Cell the cursor last painted into.
+        TilemapCell GetTileStrokeCell() const { return strokeCell_; }
+        /// Number of cells whose value changed during the current (or last) stroke.
+        int GetTileStrokeChangedCells() const { return strokeChanged_; }
+
+        /// Fired once per finished stroke that changed something, so the editor records a single
+        /// undoable "Paint Tiles" edit for the whole drag.
+        std::function<void()> OnTileStrokeCommitted;
+        /// Fired when the palette or the API changes the active tile index.
+        std::function<void(int)> OnPaintTileChanged;
+        /// Fired when the tool (brush/fill/eraser) or its armed state changes.
+        std::function<void()> OnTilemapToolChanged;
+
         /// Visual preview shown while dragging an asset from the Asset Browser over the viewport.
         struct DropPreview {
             bool active = false;
@@ -189,7 +252,8 @@ namespace Gorgon :: Editor {
             MoveEntityY,
             ScaleEntity,
             RotateEntity,
-            MarqueeSelect
+            MarqueeSelect,
+            PaintTiles
         };
 
         struct DragEntityEntry {
@@ -214,6 +278,14 @@ namespace Gorgon :: Editor {
         void drawSelectionGizmo(float viewW, float viewH);
         void drawMarquee();
         void drawDropPreview(float viewW, float viewH);
+        /// Grid overlay, hover cell highlight and the palette strip drawn while the tile tool is armed.
+        void drawTileTool(float viewW, float viewH);
+        /// Recomputes paletteLayout_ for the current viewport size and tileset.
+        void updatePaletteLayout(float viewW, float viewH) const;
+        /// Paints the current stroke from the previous cell to (col, row). Returns cells changed.
+        int paintTileStrokeTo(int col, int row);
+        /// Disarms the tool when the selection stops being paintable.
+        void clampTileToolToSelection();
 
         Scene &scene_;
         Gorgon::Widgets::Layerbox *layerbox_ = nullptr;
@@ -259,6 +331,22 @@ namespace Gorgon :: Editor {
 
         // Active asset drag-and-drop preview
         DropPreview dropPreview_;
+
+        // ---- Tilemap painting state -------------------------------------------
+        bool tileToolActive_ = false;
+        TilemapTool tileTool_ = TilemapTool::Brush;
+        int paintTile_ = 1;
+        bool strokeActive_ = false;
+        EntityId strokeTargetId_ = InvalidEntityId;
+        // Cell the stroke started on: brush lines run from the previous cell, Fill re-covers the
+        // rectangle from here on every drag step.
+        TilemapCell strokeAnchor_;
+        TilemapCell strokeCell_;
+        // Cells before the stroke, so a Fill drag can redraw its preview without accumulating.
+        std::vector<int> strokeBaseline_;
+        int strokeChanged_ = 0;
+        TilemapHit hoverCell_;
+        mutable TilePaletteLayout paletteLayout_;
     };
 
 } // namespace Gorgon::Editor

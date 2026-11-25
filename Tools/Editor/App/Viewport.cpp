@@ -268,6 +268,7 @@ namespace Gorgon :: Editor {
         if(cleaned == selectedEntities_ && selectedEntity_ == nextPrimary) return;
         selectedEntities_ = std::move(cleaned);
         selectedEntity_ = nextPrimary;
+        clampTileToolToSelection();
         Redraw();
         if(notify && OnSelectionChanged) {
             OnSelectionChanged(selectedEntity_);
@@ -302,6 +303,256 @@ namespace Gorgon :: Editor {
             }
         }
         SetSelectedEntities(kept, notify);
+    }
+
+    // ---- Tilemap painting ---------------------------------------------------
+
+    const TilemapComponent *EditorViewport::GetEditableTilemap() const {
+        if(selectedEntity_ == InvalidEntityId)
+            return nullptr;
+
+        const Entity *entity = scene_.FindEntity(selectedEntity_);
+        if(!entity || !entity->visible || entity->locked || !entity->tilemap)
+            return nullptr;
+
+        return TilemapPainter::Paintable(*entity->tilemap) ? &*entity->tilemap : nullptr;
+    }
+
+    TilemapComponent *EditorViewport::GetEditableTilemap() {
+        return const_cast<TilemapComponent *>(
+            static_cast<const EditorViewport *>(this)->GetEditableTilemap());
+    }
+
+    bool EditorViewport::SetTilemapToolActive(bool active) {
+        if(active && !CanPaintTilemap())
+            return false;
+
+        if(!active && dragMode_ == DragMode::PaintTiles)
+            CancelTileStroke();
+
+        if(tileToolActive_ == active)
+            return tileToolActive_;
+
+        tileToolActive_ = active;
+        hoverCell_ = {};
+        Redraw();
+        if(OnTilemapToolChanged) OnTilemapToolChanged();
+        return tileToolActive_;
+    }
+
+    void EditorViewport::SetTilemapTool(TilemapTool tool) {
+        if(tileTool_ == tool)
+            return;
+
+        tileTool_ = tool;
+        Redraw();
+        if(OnTilemapToolChanged) OnTilemapToolChanged();
+    }
+
+    void EditorViewport::SetPaintTile(int tile) {
+        const int count = GetTilePaletteCount();
+        const int clamped = (count > 0) ? std::max(-1, std::min(tile, count - 1))
+                                        : std::max(-1, tile);
+        if(paintTile_ == clamped)
+            return;
+
+        paintTile_ = clamped;
+        Redraw();
+        if(OnPaintTileChanged) OnPaintTileChanged(paintTile_);
+    }
+
+    int EditorViewport::GetTilePaletteCount() const {
+        const TilemapComponent *map = GetEditableTilemap();
+        if(!map)
+            return 16;
+
+        int imageW = 0;
+        int imageH = 0;
+        if(!map->tilesetAsset.empty()) {
+            if(const CachedSprite *cached = getOrLoadSprite(map->tilesetAsset); cached && cached->bitmap) {
+                const auto size = cached->bitmap->GetSize();
+                imageW = size.Width;
+                imageH = size.Height;
+            }
+        }
+
+        return TilemapPainter::TilesetTileCount(*map, imageW, imageH, 16);
+    }
+
+    void EditorViewport::updatePaletteLayout(float viewW, float viewH) const {
+        constexpr int kSwatch = 28;
+        constexpr int kGap = 6;
+        const float margin = 10.0f;
+        const float stripH = static_cast<float>(kSwatch + kGap * 2);
+        const float stripY = std::max(0.0f, viewH - stripH - margin);
+        const float maxWidth = std::max(0.0f, viewW - margin * 2.0f);
+
+        const int count = tileToolActive_ ? GetTilePaletteCount() : 0;
+        paletteLayout_ = TilePaletteLayout::Compute(margin, stripY, maxWidth, count, kSwatch, kGap, 1);
+    }
+
+    const TilePaletteLayout &EditorViewport::GetTilePaletteLayout() const {
+        const auto size = GetViewportSize();
+        updatePaletteLayout(static_cast<float>(size.Width), static_cast<float>(size.Height));
+        return paletteLayout_;
+    }
+
+    int EditorViewport::HitTestTilePalette(float sx, float sy) const {
+        if(!tileToolActive_)
+            return -1;
+        return GetTilePaletteLayout().HitTest(sx, sy);
+    }
+
+    TilemapHit EditorViewport::ScreenToTilemapCell(const TilemapComponent &map, float sx, float sy) const {
+        const auto size = GetViewportSize();
+        const Entity *entity = scene_.FindEntity(selectedEntity_);
+        const Transform world = entity ? scene_.GetWorldTransform(entity->id) : Transform{};
+
+        return TilemapPainter::ScreenToCell(map, world, camera_.panX, camera_.panY, camera_.zoom,
+                                            sx, sy,
+                                            static_cast<float>(size.Width),
+                                            static_cast<float>(size.Height));
+    }
+
+    TilemapHit EditorViewport::ScreenToTilemapCell(float sx, float sy) const {
+        const TilemapComponent *map = GetEditableTilemap();
+        if(!map)
+            return {};
+        return ScreenToTilemapCell(*map, sx, sy);
+    }
+
+    int EditorViewport::paintTileStrokeTo(int col, int row) {
+        Entity *entity = scene_.FindEntity(strokeTargetId_);
+        if(!entity || !entity->tilemap)
+            return 0;
+
+        TilemapComponent &map = *entity->tilemap;
+        const int tile = (tileTool_ == TilemapTool::Eraser) ? -1 : paintTile_;
+        int changed = 0;
+
+        if(tileTool_ == TilemapTool::Fill) {
+            // Redraw the rectangle from the pre-stroke cells on every step, so dragging the far
+            // corner moves the preview instead of accumulating coverage.
+            map.tiles = strokeBaseline_;
+            TilemapPainter::EnsureSize(map);
+            changed = TilemapPainter::FillRect(map, strokeAnchor_.col, strokeAnchor_.row,
+                                               col, row, tile);
+        }
+        else if(strokeCell_.col != col || strokeCell_.row != row) {
+            // A straight line between mouse samples: a fast drag must not leave gaps.
+            changed = TilemapPainter::PaintLine(map, strokeCell_.col, strokeCell_.row, col, row, tile);
+        }
+        else {
+            changed = TilemapPainter::PaintCell(map, col, row, tile) ? 1 : 0;
+        }
+
+        strokeCell_ = {col, row};
+        strokeChanged_ += changed;
+        return changed;
+    }
+
+    bool EditorViewport::BeginTileStroke(float sx, float sy) {
+        TilemapComponent *map = GetEditableTilemap();
+        if(!map)
+            return false;
+
+        if(strokeActive_)
+            CancelTileStroke();
+
+        strokeTargetId_ = selectedEntity_;
+        strokeBaseline_ = map->tiles;
+        strokeChanged_ = 0;
+        strokeActive_ = true;
+        dragMode_ = DragMode::PaintTiles;
+
+        // The press itself paints: a click is a one-cell stroke. Anchor and cursor start on the
+        // pressed cell even when it is off the grid (Fill clamps, brush paints nothing yet).
+        const TilemapHit hit = ScreenToTilemapCell(*map, sx, sy);
+        strokeAnchor_ = {hit.col, hit.row};
+        strokeCell_ = strokeAnchor_;
+        hoverCell_ = hit;
+
+        if(paintTileStrokeTo(hit.col, hit.row) > 0)
+            Redraw();
+        return true;
+    }
+
+    bool EditorViewport::DragTileStroke(float sx, float sy) {
+        if(!strokeActive_)
+            return false;
+
+        Entity *entity = scene_.FindEntity(strokeTargetId_);
+        if(!entity || !entity->tilemap)
+            return false;
+
+        const TilemapHit hit = ScreenToTilemapCell(*entity->tilemap, sx, sy);
+        hoverCell_ = hit;
+
+        // A brush drag that wanders off the grid stops painting but keeps its last cell, so it
+        // resumes the line when it comes back. Fill is clamped by the Core rectangle fill.
+        if(!hit.inside && tileTool_ != TilemapTool::Fill) {
+            Redraw();
+            return false;
+        }
+
+        const int changed = paintTileStrokeTo(hit.col, hit.row);
+        Redraw();
+        return changed > 0;
+    }
+
+    bool EditorViewport::EndTileStroke() {
+        if(!strokeActive_)
+            return false;
+
+        strokeActive_ = false;
+        if(dragMode_ == DragMode::PaintTiles)
+            dragMode_ = DragMode::None;
+
+        const int changed = strokeChanged_;
+        strokeChanged_ = 0;
+        strokeBaseline_.clear();
+        Redraw();
+
+        // One callback per stroke: the editor records exactly one undoable edit for the drag.
+        if(changed > 0 && OnTileStrokeCommitted)
+            OnTileStrokeCommitted();
+
+        return changed > 0;
+    }
+
+    bool EditorViewport::CancelTileStroke() {
+        if(!strokeActive_)
+            return false;
+
+        strokeActive_ = false;
+        if(dragMode_ == DragMode::PaintTiles)
+            dragMode_ = DragMode::None;
+
+        if(Entity *entity = scene_.FindEntity(strokeTargetId_)) {
+            if(entity->tilemap)
+                entity->tilemap->tiles = strokeBaseline_;
+        }
+
+        strokeBaseline_.clear();
+        strokeChanged_ = 0;
+        Redraw();
+        return true;
+    }
+
+    void EditorViewport::clampTileToolToSelection() {
+        if(!tileToolActive_)
+            return;
+
+        if(CanPaintTilemap())
+            return;
+
+        if(dragMode_ == DragMode::PaintTiles) {
+            CancelTileStroke();
+        }
+
+        tileToolActive_ = false;
+        hoverCell_ = {};
+        if(OnTilemapToolChanged) OnTilemapToolChanged();
     }
 
     std::vector<EntityId> EditorViewport::DuplicateSelectedEntities(bool notify) {
@@ -709,6 +960,19 @@ namespace Gorgon :: Editor {
 
         const float sx = static_cast<float>(pt.X);
         const float sy = static_cast<float>(pt.Y);
+
+        // Tile painting owns the left button while armed: a click on the palette strip picks a
+        // tile, anywhere else starts a stroke. Selection and gizmos stay out of the way.
+        if(tileToolActive_) {
+            const int swatch = HitTestTilePalette(sx, sy);
+            if(swatch >= 0) {
+                SetPaintTile(swatch);
+                return;
+            }
+            BeginTileStroke(sx, sy);
+            return;
+        }
+
         dragStartWorld_ = camera_.ScreenToWorld(sx, sy, viewW, viewH);
 
         // Check gizmo handles on single selection first
@@ -806,6 +1070,23 @@ namespace Gorgon :: Editor {
         }
 
         lastMouse_ = pt;
+
+        if(dragMode_ == DragMode::PaintTiles) {
+            DragTileStroke(sx, sy);
+            if(OnStatusChanged) {
+                OnStatusChanged(worldNow.X, worldNow.Y, camera_.zoom);
+            }
+            return;
+        }
+
+        // Track the cell under the cursor while the tool is armed so the highlight follows it.
+        if(tileToolActive_ && editEnabled_) {
+            const TilemapHit hover = ScreenToTilemapCell(sx, sy);
+            if(hover != hoverCell_) {
+                hoverCell_ = hover;
+                Redraw();
+            }
+        }
 
         if(dragMode_ == DragMode::MarqueeSelect) {
             marqueeEndScreen_ = {sx, sy};
@@ -987,6 +1268,11 @@ namespace Gorgon :: Editor {
         if(bits & static_cast<int>(Btn::Left))   mouseDown_[0] = false;
         if(bits & static_cast<int>(Btn::Right))  mouseDown_[1] = false;
         if(bits & static_cast<int>(Btn::Middle)) mouseDown_[2] = false;
+
+        if(dragMode_ == DragMode::PaintTiles || strokeActive_) {
+            EndTileStroke();
+            return;
+        }
 
         if(dragMode_ == DragMode::MarqueeSelect) {
             const bool wasDragged = marqueeDragged_;
@@ -1531,6 +1817,147 @@ namespace Gorgon :: Editor {
 
         // 9. Asset drag-and-drop preview indicator
         drawDropPreview(viewW, viewH);
+
+        // 10. Tile painting overlay: cell grid, hover highlight and the palette strip
+        drawTileTool(viewW, viewH);
+    }
+
+    void EditorViewport::drawTileTool(float viewW, float viewH) {
+        if(!tileToolActive_)
+            return;
+
+        Entity *entity = scene_.FindEntity(selectedEntity_);
+        if(!entity || !entity->visible || !entity->tilemap)
+            return;
+
+        const TilemapComponent &map = *entity->tilemap;
+        if(!TilemapPainter::Paintable(map))
+            return;
+
+        // Same local -> world -> screen mapping the map itself is drawn with, so the overlay lands
+        // exactly on the cells (pan, zoom, rotation and scale included).
+        const Transform world = scene_.GetWorldTransform(entity->id);
+        const float rad = world.rotation * kDegToRad;
+        const float c = std::cos(rad);
+        const float s = std::sin(rad);
+        auto tileToScreen = [&](float lx, float ly) -> Gorgon::Geometry::Pointf {
+            const float wx = world.x + (lx * world.scaleX) * c - (ly * world.scaleY) * s;
+            const float wy = world.y + (lx * world.scaleX) * s + (ly * world.scaleY) * c;
+            return camera_.WorldToScreen(wx, wy, viewW, viewH);
+        };
+
+        const int cols = std::max(0, map.cols);
+        const int rows = std::max(0, map.rows);
+        const float originX = -static_cast<float>(cols) * map.tileW * 0.5f;
+        const float originY = -static_cast<float>(rows) * map.tileH * 0.5f;
+        const float mapW = static_cast<float>(cols) * map.tileW;
+        const float mapH = static_cast<float>(rows) * map.tileH;
+
+        // 1. Cell grid: thin lines over the map only, so the rest of the scene stays readable.
+        const Gorgon::Graphics::RGBAf gridColor(1.0f, 1.0f, 1.0f, 0.20f);
+        for(int col = 0; col <= cols; ++col) {
+            const float lx = originX + static_cast<float>(col) * map.tileW;
+            const auto a = tileToScreen(lx, originY);
+            const auto b = tileToScreen(lx, originY + mapH);
+            drawLine(a.X, a.Y, b.X, b.Y, 1.0f, gridColor);
+        }
+        for(int row = 0; row <= rows; ++row) {
+            const float ly = originY + static_cast<float>(row) * map.tileH;
+            const auto a = tileToScreen(originX, ly);
+            const auto b = tileToScreen(originX + mapW, ly);
+            drawLine(a.X, a.Y, b.X, b.Y, 1.0f, gridColor);
+        }
+
+        // 2. Highlight the cell under the cursor, or the rectangle a Fill drag will cover.
+        if(hoverCell_.inside || dragMode_ == DragMode::PaintTiles) {
+            int c0 = hoverCell_.col;
+            int c1 = hoverCell_.col;
+            int r0 = hoverCell_.row;
+            int r1 = hoverCell_.row;
+
+            if(tileTool_ == TilemapTool::Fill && strokeActive_) {
+                c0 = std::min(strokeAnchor_.col, strokeCell_.col);
+                c1 = std::max(strokeAnchor_.col, strokeCell_.col);
+                r0 = std::min(strokeAnchor_.row, strokeCell_.row);
+                r1 = std::max(strokeAnchor_.row, strokeCell_.row);
+            }
+
+            c0 = std::max(c0, 0);
+            r0 = std::max(r0, 0);
+            c1 = std::min(c1, cols - 1);
+            r1 = std::min(r1, rows - 1);
+
+            if(c0 <= c1 && r0 <= r1) {
+                const float lx0 = originX + static_cast<float>(c0) * map.tileW;
+                const float ly0 = originY + static_cast<float>(r0) * map.tileH;
+                const float lx1 = originX + static_cast<float>(c1 + 1) * map.tileW;
+                const float ly1 = originY + static_cast<float>(r1 + 1) * map.tileH;
+
+                const auto q0 = tileToScreen(lx0, ly0);
+                const auto q1 = tileToScreen(lx1, ly0);
+                const auto q2 = tileToScreen(lx1, ly1);
+                const auto q3 = tileToScreen(lx0, ly1);
+                const std::array<Gorgon::Geometry::Pointf, 4> quad{q0, q1, q2, q3};
+
+                gfxLayer_.Draw(q0, q1, q2, q3, Gorgon::Graphics::RGBAf(1.0f, 0.85f, 0.30f, 0.20f));
+                drawRectOutline(quad, 2.0f, Gorgon::Graphics::RGBAf(1.0f, 0.88f, 0.36f, 0.95f));
+            }
+        }
+
+        // 3. Palette strip: real tileset crops when the map has one, stable per-index colours
+        //    otherwise, with a bright border on the active tile.
+        const TilePaletteLayout &layout = GetTilePaletteLayout();
+        if(layout.count <= 0 || layout.width <= 0.0f || layout.height <= 0.0f)
+            return;
+
+        gfxLayer_.Draw(layout.x, layout.y, layout.width, layout.height,
+                       Gorgon::Graphics::RGBAf(0.06f, 0.07f, 0.09f, 0.90f));
+
+        const auto *tileset = map.tilesetAsset.empty() ? nullptr : getOrLoadSprite(map.tilesetAsset);
+        const int perRow = std::max(1, map.tilesetCols);
+        const float tileW = std::max(1.0f, map.tileW);
+        const float tileH = std::max(1.0f, map.tileH);
+
+        for(int index = 0; index < layout.count; ++index) {
+            float cx = 0.0f, cy = 0.0f, cw = 0.0f, ch = 0.0f;
+            if(!layout.SwatchRect(index, cx, cy, cw, ch))
+                continue;
+
+            if(tileset && tileset->bitmap) {
+                const auto size = tileset->bitmap->GetSize();
+                const float imageW = static_cast<float>(std::max(1, size.Width));
+                const float imageH = static_cast<float>(std::max(1, size.Height));
+                const float tx = static_cast<float>(index % perRow) * tileW;
+                const float ty = static_cast<float>(index / perRow) * tileH;
+                const float tx2 = std::min(imageW, tx + tileW);
+                const float ty2 = std::min(imageH, ty + tileH);
+
+                const Gorgon::Geometry::Pointf t1{tx / imageW, ty / imageH};
+                const Gorgon::Geometry::Pointf t2{tx2 / imageW, ty / imageH};
+                const Gorgon::Geometry::Pointf t3{tx2 / imageW, ty2 / imageH};
+                const Gorgon::Geometry::Pointf t4{tx / imageW, ty2 / imageH};
+
+                const Gorgon::Geometry::Pointf d0{cx, cy};
+                const Gorgon::Geometry::Pointf d1{cx + cw, cy};
+                const Gorgon::Geometry::Pointf d2{cx + cw, cy + ch};
+                const Gorgon::Geometry::Pointf d3{cx, cy + ch};
+                gfxLayer_.Draw(*tileset->bitmap, d0, d1, d2, d3,
+                               t1, t2, t3, t4, Gorgon::Graphics::RGBAf(1.0f));
+            }
+            else {
+                gfxLayer_.Draw(cx, cy, cw, ch, TilePreviewColor(index));
+            }
+
+            const Gorgon::Geometry::Pointf p0{cx, cy};
+            const Gorgon::Geometry::Pointf p1{cx + cw, cy};
+            const Gorgon::Geometry::Pointf p2{cx + cw, cy + ch};
+            const Gorgon::Geometry::Pointf p3{cx, cy + ch};
+            const std::array<Gorgon::Geometry::Pointf, 4> box{p0, p1, p2, p3};
+            const bool active = (index == paintTile_);
+            drawRectOutline(box, active ? 3.0f : 1.0f,
+                            active ? Gorgon::Graphics::RGBAf(1.0f, 0.90f, 0.35f, 1.0f)
+                                   : Gorgon::Graphics::RGBAf(1.0f, 1.0f, 1.0f, 0.22f));
+        }
     }
 
     void EditorViewport::drawDropPreview(float viewW, float viewH) {

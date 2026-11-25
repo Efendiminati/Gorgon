@@ -72,6 +72,8 @@ namespace Gorgon :: Editor {
                 hierarchy_->SyncSelection();
             if(inspector_)
                 inspector_->Rebuild();
+            // The tile brush follows the selection: it only arms on a paintable tilemap.
+            updateTileToolButton();
             updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
         };
         viewport_.OnSceneModified = [this]() {
@@ -89,6 +91,22 @@ namespace Gorgon :: Editor {
             if(active)
                 gesturePushed_ = false;
         };
+        // Tile painting reports once per finished stroke, so one drag is exactly one undo step
+        // and Ctrl+Z restores the cells as they were before the stroke.
+        viewport_.OnTileStrokeCommitted = [this]() {
+            recordEdit("Paint Tiles");
+            if(inspector_)
+                inspector_->Refresh();
+            viewport_.Redraw();
+            updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY,
+                             viewport_.GetCamera().zoom);
+        };
+        viewport_.OnPaintTileChanged = [this](int) {
+            if(inspector_)
+                inspector_->Refresh();
+            updateTileToolButton();
+        };
+        viewport_.OnTilemapToolChanged = [this]() { updateTileToolButton(); };
         viewport_.OnStatusChanged = [this](float wx, float wy, float zoom) {
             updateStatusText(wx, wy, zoom);
         };
@@ -120,6 +138,8 @@ namespace Gorgon :: Editor {
             inspector_->OnSceneModified = [this]() {
                 viewport_.Redraw();
                 recordEdit("Edit Property");
+                // Adding/removing a tilemap in the inspector decides whether the brush can arm.
+                updateTileToolButton();
                 updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
             };
         if(inspector_)
@@ -218,6 +238,7 @@ namespace Gorgon :: Editor {
 
         updateUndoButtons();
         updatePlayButtons();
+        updateTileToolButton();
         updateWindowTitle();
         updateStatusText(0.0f, 0.0f, 1.0f);
         viewport_.Redraw();
@@ -307,6 +328,28 @@ namespace Gorgon :: Editor {
         btnRedo_.SetEnabled(commands_.CanRedo() && playMode_ == PlayMode::Stopped);
     }
 
+    void EditorApp::toggleTileTool() {
+        // The tile tool edits the scene, which the play session owns while it runs.
+        if(playMode_ != PlayMode::Stopped)
+            return;
+
+        if(!viewport_.SetTilemapToolActive(!viewport_.IsTilemapToolActive())) {
+            LogMessage(LogSeverity::Info,
+                       "Select an entity with a tilemap component to paint tiles");
+        }
+
+        updateTileToolButton();
+        viewport_.Redraw();
+    }
+
+    void EditorApp::updateTileToolButton() {
+        const bool armed = viewport_.IsTilemapToolActive();
+        btnTiles_.SetEnabled(playMode_ == PlayMode::Stopped &&
+                             (armed || viewport_.CanPaintTilemap()));
+        btnTiles_.Text = armed ? ("Tiles: " + TilemapToolToString(viewport_.GetTilemapTool()))
+                               : std::string("Tiles (T)");
+    }
+
     bool EditorApp::confirmDiscardChanges(const std::string &action, std::function<void()> proceed) {
         if(!dirty_) {
             proceed();
@@ -375,6 +418,12 @@ namespace Gorgon :: Editor {
                 return;
             FocusSelectedEntity();
         });
+        // T arms the tile brush for the selected tilemap; pressing it again leaves paint mode.
+        shortcuts_.Set(Keys::T, [this]() {
+            if(window_.HasFocusedWidget())
+                return;
+            toggleTileTool();
+        });
     }
 
     void EditorApp::markDirty() {
@@ -403,6 +452,7 @@ namespace Gorgon :: Editor {
         btnUndo_.SetWidth(Units(2.5));
         btnRedo_.SetWidth(Units(2.5));
         btnResetView_.SetWidth(Units(3.8));
+        btnTiles_.SetWidth(Units(4.4));
         chkGridSnap_.SetWidth(Units(4.0));
         btnAssetsTab_.SetWidth(Units(2.7));
         btnConsoleTab_.SetWidth(Units(3.0));
@@ -421,6 +471,7 @@ namespace Gorgon :: Editor {
         btnResetView_.ClickEvent.Register([this]() {
             viewport_.ResetCamera();
         });
+        btnTiles_.ClickEvent.Register([this]() { toggleTileTool(); });
         chkGridSnap_.ChangedEvent.Register([this]() {
             viewport_.SetGridSnap(chkGridSnap_.GetState());
         });
@@ -431,7 +482,7 @@ namespace Gorgon :: Editor {
             << btnNew_ << btnOpen_ << btnSave_ << btnSaveAs_ << btnExport_
             << btnPlay_ << btnPause_ << btnStop_
             << btnUndo_ << btnRedo_
-            << btnResetView_ << chkGridSnap_
+            << btnResetView_ << btnTiles_ << chkGridSnap_
             // Bottom dock tabs: the asset browser and the script console share one dock row.
             << btnAssetsTab_ << btnConsoleTab_ << lblStatus_;
     }
@@ -642,6 +693,8 @@ namespace Gorgon :: Editor {
         btnPlay_.SetEnabled(playMode_ != PlayMode::Playing);
         btnPause_.SetEnabled(playMode_ == PlayMode::Playing);
         btnStop_.SetEnabled(playMode_ != PlayMode::Stopped);
+        // Painting edits the scene, so the tile tool is only offered outside play.
+        updateTileToolButton();
     }
 
     void EditorApp::onNewClicked() {

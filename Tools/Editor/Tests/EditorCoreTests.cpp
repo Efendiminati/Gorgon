@@ -9,9 +9,11 @@
 #include "Core/Scene.h"
 #include "Core/SceneRuntime.h"
 #include "Core/SceneSerializer.h"
+#include "Core/TilemapPainter.h"
 
 #include <chrono>
 #include <cmath>
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -3186,4 +3188,306 @@ TEST_CASE("GameExporter writes a runnable bundle for the demo scene", "[EditorCo
 
     std::error_code ec;
     export_fs::remove_all(outputDir, ec);
+}
+
+// ---- Tilemap painting ------------------------------------------------------
+
+namespace {
+    /// A 4x3, 16px-tile map with every cell empty, attached to a fresh "Ground" entity.
+    EntityId makeEmptyTilemapEntity(Scene &scene, int cols = 4, int rows = 3, float tile = 16.0f) {
+        Entity &entity = scene.CreateEntity("Ground");
+        TilemapComponent map;
+        map.tileW = tile;
+        map.tileH = tile;
+        map.cols = cols;
+        map.rows = rows;
+        map.tilesetCols = 4;
+        map.tiles.assign(static_cast<std::size_t>(std::max(0, cols)) *
+                             static_cast<std::size_t>(std::max(0, rows)), -1);
+        entity.tilemap = map;
+        return entity.id;
+    }
+
+    int cellIndex(int cols, int col, int row) { return row * cols + col; }
+} // namespace
+
+TEST_CASE("Tilemap brush paints, overpaints and erases single cells", "[EditorCore][Tilemap]") {
+    Scene scene;
+    const EntityId id = makeEmptyTilemapEntity(scene);
+    TilemapComponent &map = *scene.FindEntity(id)->tilemap;
+
+    REQUIRE(TilemapPainter::Paintable(map));
+    REQUIRE(TilemapPainter::GetCellCount(map) == 12);
+    REQUIRE_FALSE(TilemapPainter::EnsureSize(map)); // already exactly cols * rows
+
+    // Paint a cell.
+    REQUIRE(TilemapPainter::PaintCell(map, 1, 1, 3));
+    REQUIRE(map.tiles[cellIndex(4, 1, 1)] == 3);
+
+    // Painting the same value again changes nothing, so the editor records no extra undo step.
+    REQUIRE_FALSE(TilemapPainter::PaintCell(map, 1, 1, 3));
+    REQUIRE_FALSE(TilemapPainter::EraseCell(map, 3, 2)); // already empty
+
+    // Paint over the cell with another tile.
+    REQUIRE(TilemapPainter::PaintCell(map, 1, 1, 7));
+    REQUIRE(map.tiles[cellIndex(4, 1, 1)] == 7);
+
+    // Erase writes the empty tile back.
+    REQUIRE(TilemapPainter::EraseCell(map, 1, 1));
+    REQUIRE(map.tiles[cellIndex(4, 1, 1)] == -1);
+
+    // Out-of-bounds writes are ignored instead of growing the grid.
+    REQUIRE_FALSE(TilemapPainter::PaintCell(map, -1, 0, 2));
+    REQUIRE_FALSE(TilemapPainter::PaintCell(map, 0, 3, 2));
+    REQUIRE_FALSE(TilemapPainter::PaintCell(map, 4, 0, 2));
+    REQUIRE(map.tiles.size() == 12);
+
+    // A fast drag paints a connected line between two samples, including both ends.
+    REQUIRE(TilemapPainter::PaintLine(map, 0, 0, 3, 2, 5) >= 4);
+    REQUIRE(map.tiles[cellIndex(4, 0, 0)] == 5);
+    REQUIRE(map.tiles[cellIndex(4, 3, 2)] == 5);
+
+    // A grid that was created without its cell array is grown to fit, then painted.
+    TilemapComponent fresh;
+    fresh.cols = 2;
+    fresh.rows = 2;
+    REQUIRE(fresh.tiles.empty());
+    REQUIRE(TilemapPainter::PaintCell(fresh, 1, 1, 9));
+    REQUIRE(fresh.tiles.size() == 4);
+    REQUIRE(fresh.tiles[3] == 9);
+
+    // A component with no grid at all is not paintable and ignores writes.
+    TilemapComponent empty;
+    REQUIRE_FALSE(TilemapPainter::Paintable(empty));
+    REQUIRE_FALSE(TilemapPainter::PaintCell(empty, 0, 0, 1));
+}
+
+TEST_CASE("Tilemap rectangle fill clamps to the grid", "[EditorCore][Tilemap]") {
+    Scene scene;
+    const EntityId id = makeEmptyTilemapEntity(scene, 5, 4);
+    TilemapComponent &map = *scene.FindEntity(id)->tilemap;
+
+    // 4 cells inside the map.
+    REQUIRE(TilemapPainter::FillRect(map, 1, 1, 2, 2, 4) == 4);
+    REQUIRE(map.tiles[cellIndex(5, 1, 1)] == 4);
+    REQUIRE(map.tiles[cellIndex(5, 2, 2)] == 4);
+    REQUIRE(map.tiles[cellIndex(5, 0, 0)] == -1);
+
+    // Corners may be given in any order.
+    REQUIRE(TilemapPainter::FillRect(map, 4, 3, 3, 2, 6) == 4);
+    REQUIRE(map.tiles[cellIndex(5, 3, 2)] == 6);
+    REQUIRE(map.tiles[cellIndex(5, 4, 3)] == 6);
+
+    // A rectangle that starts outside the map is clamped: (-3,-2)..(1,2) covers cols 0-1,
+    // rows 0-2, i.e. six cells, all of which change.
+    REQUIRE(TilemapPainter::FillRect(map, -3, -2, 1, 2, 9) == 6);
+    REQUIRE(map.tiles[cellIndex(5, 0, 0)] == 9);
+    REQUIRE(map.tiles[cellIndex(5, 1, 1)] == 9);
+    REQUIRE(map.tiles[cellIndex(5, 1, 2)] == 9);
+    // ...and nothing outside the clamped rect was touched.
+    REQUIRE(map.tiles[cellIndex(5, 2, 0)] == -1);
+    REQUIRE(map.tiles[cellIndex(5, 1, 3)] == -1);
+
+    // A rectangle entirely off the grid changes nothing.
+    REQUIRE(TilemapPainter::FillRect(map, 10, 10, 20, 20, 1) == 0);
+    REQUIRE(TilemapPainter::FillRect(map, -8, -8, -1, -1, 1) == 0);
+
+    // Dragging in from the far corner clamps the other way and reports only real changes.
+    REQUIRE(TilemapPainter::FillRect(map, 9, 9, 4, 3, 2) == 1);
+    REQUIRE(map.tiles[cellIndex(5, 4, 3)] == 2);
+}
+
+TEST_CASE("Tilemap picking respects the camera pan/zoom and the entity transform", "[EditorCore][Tilemap]") {
+    // 4x4 cells of 32px: the map is 128x128 and centred on the entity origin.
+    TilemapComponent map;
+    map.cols = 4;
+    map.rows = 4;
+    map.tileW = 32.0f;
+    map.tileH = 32.0f;
+    map.tiles.assign(16, -1);
+
+    Transform world;
+    world.x = 100.0f;
+    world.y = 50.0f;
+
+    const float viewW = 800.0f;
+    const float viewH = 600.0f;
+    const float panX = 100.0f; // the map centre sits in the middle of the view
+    const float panY = 50.0f;
+
+    // Cell (0,0) spans local (-64,-64)..(-32,-32); its centre lands 48px left/up of the view centre.
+    TilemapHit hit = TilemapPainter::ScreenToCell(map, world, panX, panY, 1.0f, 352.0f, 252.0f, viewW, viewH);
+    REQUIRE(hit.inside);
+    REQUIRE(hit.col == 0);
+    REQUIRE(hit.row == 0);
+
+    // The centre of the view is the boundary between cells (1,1) and (2,2) — well inside.
+    hit = TilemapPainter::ScreenToCell(map, world, panX, panY, 1.0f, 400.0f, 300.0f, viewW, viewH);
+    REQUIRE(hit.inside);
+    REQUIRE(hit.col == 2);
+    REQUIRE(hit.row == 2);
+
+    // Zoomed in 2x: cell (2,2)'s centre (local (16,16)) is 32px right/down of the view centre.
+    hit = TilemapPainter::ScreenToCell(map, world, panX, panY, 2.0f, 432.0f, 332.0f, viewW, viewH);
+    REQUIRE(hit.inside);
+    REQUIRE(hit.col == 2);
+    REQUIRE(hit.row == 2);
+
+    // The same pixel under a panned camera picks a different cell, so panning really is applied:
+    // with the camera 32px further left, screen (432,332) is already in row 3.
+    hit = TilemapPainter::ScreenToCell(map, world, panX - 32.0f, panY, 1.0f, 432.0f, 332.0f, viewW, viewH);
+    REQUIRE(hit.inside);
+    REQUIRE(hit.col == 2);
+    REQUIRE(hit.row == 3);
+
+    // A pixel outside the map reports the cell it would be in, with inside == false.
+    hit = TilemapPainter::ScreenToCell(map, world, panX, panY, 1.0f, 5.0f, 5.0f, viewW, viewH);
+    REQUIRE_FALSE(hit.inside);
+    REQUIRE(hit.col < 0);
+
+    // Rotating the entity 90 degrees turns local +X into world +Y; the same local cell must be found.
+    Transform rotated;
+    rotated.rotation = 90.0f;
+    // local (-48,-48) -> world (48,-48) under the viewport's rotation convention.
+    hit = TilemapPainter::ScreenToCell(map, rotated, 0.0f, 0.0f, 1.0f, 448.0f, 252.0f, viewW, viewH);
+    REQUIRE(hit.inside);
+    REQUIRE(hit.col == 0);
+    REQUIRE(hit.row == 0);
+
+    // Scaling the entity 2x moves the same local cell twice as far from the origin.
+    Transform scaled;
+    scaled.scaleX = 2.0f;
+    scaled.scaleY = 2.0f;
+    // local (-48,-48) -> world (-96,-96).
+    hit = TilemapPainter::ScreenToCell(map, scaled, 0.0f, 0.0f, 1.0f, 304.0f, 204.0f, viewW, viewH);
+    REQUIRE(hit.inside);
+    REQUIRE(hit.col == 0);
+    REQUIRE(hit.row == 0);
+
+    // A zero-sized tile grid cannot be picked at all.
+    TilemapComponent flat = map;
+    flat.tileW = 0.0f;
+    hit = TilemapPainter::ScreenToCell(flat, world, panX, panY, 1.0f, 400.0f, 300.0f, viewW, viewH);
+    REQUIRE_FALSE(hit.inside);
+}
+
+TEST_CASE("A tilemap stroke is one undo step that restores the pre-stroke cells", "[EditorCore][Tilemap]") {
+    Scene scene;
+    const EntityId id = makeEmptyTilemapEntity(scene, 3, 3);
+
+    // Seed the map with one tile so the undo has to restore a non-uniform state.
+    REQUIRE(TilemapPainter::PaintCell(*scene.FindEntity(id)->tilemap, 0, 0, 1));
+
+    const Scene before = scene;
+    const std::vector<int> baseline = scene.FindEntity(id)->tilemap->tiles;
+
+    // A whole drag: a brush line plus a rectangle fill, exactly what one mouse stroke produces.
+    {
+        TilemapComponent &map = *scene.FindEntity(id)->tilemap;
+        REQUIRE(TilemapPainter::PaintLine(map, 0, 0, 2, 2, 5) > 0);
+        REQUIRE(TilemapPainter::FillRect(map, 0, 1, 1, 2, 6) > 0);
+    }
+    const Scene after = scene;
+    const std::vector<int> painted = scene.FindEntity(id)->tilemap->tiles;
+    REQUIRE(painted != baseline);
+
+    CommandStack stack;
+    stack.Push(std::unique_ptr<Command>(new SceneSnapshotCommand("Paint Tiles", before, after)));
+    REQUIRE(stack.GetUndoCount() == 1); // the whole stroke is a single step
+    REQUIRE(stack.GetUndoName() == "Paint Tiles");
+
+    REQUIRE(stack.Undo(scene));
+    const TilemapComponent &restored = *scene.FindEntity(id)->tilemap;
+    REQUIRE(restored.tiles == baseline);
+
+    REQUIRE(stack.Redo(scene));
+    const TilemapComponent &redone = *scene.FindEntity(id)->tilemap;
+    REQUIRE(redone.tiles == painted);
+
+    REQUIRE(stack.Undo(scene));
+    REQUIRE(scene.FindEntity(id)->tilemap->tiles == baseline);
+
+    // An eraser stroke over a painted cell is undoable the same way.
+    const Scene beforeErase = scene;
+    REQUIRE(TilemapPainter::EraseCell(*scene.FindEntity(id)->tilemap, 0, 0));
+    const Scene afterErase = scene;
+    stack.Push(std::unique_ptr<Command>(new SceneSnapshotCommand("Erase Tiles", beforeErase, afterErase)));
+    REQUIRE(stack.Undo(scene));
+    REQUIRE(scene.FindEntity(id)->tilemap->tiles[cellIndex(3, 0, 0)] == 1);
+}
+
+TEST_CASE("A painted tilemap survives a JSON round-trip", "[EditorCore][Tilemap]") {
+    Scene scene;
+    scene.name = "Painted";
+    const EntityId id = makeEmptyTilemapEntity(scene, 4, 3);
+    Entity *entity = scene.FindEntity(id);
+    entity->tilemap->tilesetAsset = "assets/tiles.png";
+    entity->tilemap->tilesetCols = 4;
+
+    TilemapComponent &map = *entity->tilemap;
+    REQUIRE(TilemapPainter::PaintCell(map, 0, 0, 0));
+    REQUIRE(TilemapPainter::PaintCell(map, 3, 2, 11));
+    REQUIRE(TilemapPainter::FillRect(map, 1, 0, 2, 1, 7));
+
+    const std::string encoded = SceneSerializer::ToJsonString(scene, 2);
+    REQUIRE(encoded.find("\"tilemap\"") != std::string::npos);
+
+    Scene loaded;
+    std::string error;
+    REQUIRE(SceneSerializer::FromJsonString(encoded, loaded, &error));
+    INFO("decode error: " << error);
+
+    const Entity *copy = loaded.FindEntity(id);
+    REQUIRE(copy != nullptr);
+    REQUIRE(copy->tilemap.has_value());
+    REQUIRE(copy->tilemap->cols == 4);
+    REQUIRE(copy->tilemap->rows == 3);
+    REQUIRE(copy->tilemap->tileW == 16.0f);
+    REQUIRE(copy->tilemap->tilesetAsset == "assets/tiles.png");
+    REQUIRE(copy->tilemap->tiles == map.tiles);
+    REQUIRE(copy->tilemap->tiles[cellIndex(4, 3, 2)] == 11);
+    REQUIRE(copy->tilemap->tiles[cellIndex(4, 1, 0)] == 7);
+    REQUIRE(loaded == scene);
+}
+
+TEST_CASE("Tile palette layout hit-tests the swatch the user sees", "[EditorCore][Tilemap]") {
+    // 28px swatches with a 6px gap starting at (10, 500) inside a 400px strip.
+    const TilePaletteLayout layout = TilePaletteLayout::Compute(10.0f, 500.0f, 400.0f, 16, 28, 6, 1);
+
+    // (388 + 6) / 34 = 11 whole swatches fit in one row.
+    REQUIRE(layout.columns == 11);
+    REQUIRE(layout.count == 11);
+    REQUIRE(layout.height == Catch::Approx(40.0f));
+    REQUIRE(layout.Contains(10.0f, 500.0f));
+    REQUIRE_FALSE(layout.Contains(5.0f, 505.0f));
+
+    float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+    REQUIRE(layout.SwatchRect(0, x, y, w, h));
+    REQUIRE(x == Catch::Approx(16.0f));
+    REQUIRE(y == Catch::Approx(506.0f));
+    REQUIRE(w == Catch::Approx(28.0f));
+    REQUIRE(h == Catch::Approx(28.0f));
+
+    REQUIRE(layout.SwatchRect(1, x, y, w, h));
+    REQUIRE(x == Catch::Approx(50.0f)); // one 28 + 6 step to the right
+
+    // Picking inside a swatch, and missing in the gap between two swatches.
+    REQUIRE(layout.HitTest(16.0f, 506.0f) == 0);
+    REQUIRE(layout.HitTest(43.0f, 520.0f) == 0);
+    REQUIRE(layout.HitTest(50.0f, 506.0f) == 1);
+    REQUIRE(layout.HitTest(44.0f, 520.0f) == -1); // the 6px gap
+    REQUIRE(layout.HitTest(5.0f, 505.0f) == -1);  // off the strip entirely
+    REQUIRE_FALSE(layout.SwatchRect(11, x, y, w, h)); // only 11 are shown
+
+    // A tileset-less map still offers a usable palette.
+    TilemapComponent map;
+    map.cols = 2;
+    map.rows = 2;
+    map.tileW = 16.0f;
+    map.tileH = 16.0f;
+    map.tilesetCols = 4;
+    REQUIRE(TilemapPainter::TilesetTileCount(map, 0, 0, 16) == 16);
+
+    // A 64x32 tileset packed 4 tiles wide with 16px tiles holds 2 rows of 4.
+    REQUIRE(TilemapPainter::TilesetTileCount(map, 64, 32, 16) == 8);
 }

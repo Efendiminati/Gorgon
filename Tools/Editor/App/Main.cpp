@@ -3015,6 +3015,172 @@ int main(int argc, char *argv[]) {
             Gorgon::NextFrame();
         }
 
+        // ---- Phase 6: tilemap painting (tool mode, brush, palette, undo) ------
+        {
+            using namespace Gorgon::Editor;
+
+            auto fail = [&](const std::string &message) {
+                std::cerr << "FAIL: " << message << "\n";
+                window.Close();
+                return 1;
+            };
+
+            if(picked == InvalidEntityId)
+                return fail("the tilemap paint phase needs a selectable entity");
+
+            Entity *target = scene.FindEntity(picked);
+            if(!target)
+                return fail("the tilemap paint target disappeared");
+
+            const Transform savedTransform = target->transform;
+
+            // Give the entity a 4x4 grid centred on the world origin, then reopen the scene so the
+            // editor treats it as the committed baseline (undo must not un-attach the component).
+            TilemapComponent map;
+            map.cols = 4;
+            map.rows = 4;
+            map.tileW = 32.0f;
+            map.tileH = 32.0f;
+            map.tilesetCols = 4;
+            map.tiles.assign(16, -1);
+            target->tilemap = map;
+            target->transform = Transform{};
+
+            std::error_code pec;
+            const auto paintScenePath =
+                std::filesystem::temp_directory_path() / "gorgon_editor_smoke_tiles.gscene.json";
+            std::string paintError;
+            if(!app.SaveSceneFile(paintScenePath.string(), &paintError)) {
+                std::filesystem::remove(paintScenePath, pec);
+                return fail("could not save the tilemap smoke scene: " + paintError);
+            }
+            if(!app.OpenSceneFile(paintScenePath.string(), &paintError)) {
+                std::filesystem::remove(paintScenePath, pec);
+                return fail("could not reopen the tilemap smoke scene: " + paintError);
+            }
+            std::filesystem::remove(paintScenePath, pec);
+
+            app.GetViewport().SetSelectedEntity(picked, true);
+            Gorgon::NextFrame();
+
+            if(!app.GetViewport().CanPaintTilemap())
+                return fail("the reopened tilemap scene is not paintable");
+
+            // Arm through the same path the toolbar button and the `T` shortcut use.
+            if(!app.GetViewport().SetTilemapToolActive(true))
+                return fail("the tile tool refused to arm on a tilemap");
+            if(!app.GetViewport().IsTilemapToolActive())
+                return fail("the tile tool reported armed but is inactive");
+
+            const auto viewSize = app.GetViewport().GetViewportSize();
+            const float viewW = static_cast<float>(viewSize.Width);
+            const float viewH = static_cast<float>(viewSize.Height);
+
+            const TilemapComponent &mapRef = *scene.FindEntity(picked)->tilemap;
+            const TilemapHit cell = app.GetViewport().ScreenToTilemapCell(viewW * 0.5f, viewH * 0.5f);
+            if(!cell.inside)
+                return fail("the viewport centre did not map into the tilemap");
+
+            // Aim at the middle of that cell rather than the exact view centre: the exact centre
+            // of an 811px-wide view lands on a cell boundary, so which cell gets painted would be
+            // a coin flip. The entity sits at the origin with no rotation or scale.
+            float cellLocalX = 0.0f;
+            float cellLocalY = 0.0f;
+            TilemapPainter::CellOrigin(mapRef, cell.col, cell.row, cellLocalX, cellLocalY);
+            const auto aim = app.GetViewport().GetCamera().WorldToScreen(
+                cellLocalX + mapRef.tileW * 0.5f, cellLocalY + mapRef.tileH * 0.5f, viewW, viewH);
+            const float px = aim.X;
+            const float py = aim.Y;
+
+            if(app.GetViewport().ScreenToTilemapCell(px, py) != cell)
+                return fail("the aimed pixel does not belong to the picked cell");
+
+            // The palette strip must offer swatches without covering that pixel.
+            const auto &palette = app.GetViewport().GetTilePaletteLayout();
+            float swx = 0.0f, swy = 0.0f, sww = 0.0f, swh = 0.0f;
+            if(palette.count < 2 || !palette.SwatchRect(1, swx, swy, sww, swh))
+                return fail("the tile palette strip has no swatches");
+            if(app.GetViewport().HitTestTilePalette(px, py) >= 0)
+                return fail("the palette strip covers the paint pixel");
+
+            app.GetViewport().SetPaintTile(3);
+            if(app.GetViewport().GetPaintTile() != 3)
+                return fail("the paint tile did not stick");
+
+            const std::size_t cellIndex = std::size_t(cell.row) * std::size_t(mapRef.cols) +
+                                          std::size_t(cell.col);
+
+            // -- paint one cell with the brush ----------------------------------
+            const int undoBefore = int(app.GetCommandStack().GetUndoCount());
+            app.GetViewport().HandleMouseDown({int(px), int(py)}, Gorgon::Input::Mouse::Button::Left);
+            app.GetViewport().HandleMouseUp({int(px), int(py)}, Gorgon::Input::Mouse::Button::Left);
+
+            const Entity *painted = scene.FindEntity(picked);
+            if(!painted || !painted->tilemap)
+                return fail("the paint stroke dropped the tilemap component");
+            if(cellIndex >= painted->tilemap->tiles.size() || painted->tilemap->tiles[cellIndex] != 3)
+                return fail("the brush did not paint the cell under the cursor");
+            if(app.GetUndoName() != "Paint Tiles")
+                return fail("the paint stroke did not become a 'Paint Tiles' undo step");
+            if(int(app.GetCommandStack().GetUndoCount()) != undoBefore + 1)
+                return fail("the paint stroke was not exactly one undo step");
+
+            // -- Undo restores the pre-stroke cell -------------------------------
+            app.Undo();
+            const Entity *undone = scene.FindEntity(picked);
+            if(!undone || !undone->tilemap)
+                return fail("undo removed the tilemap component");
+            if(undone->tilemap->tiles[cellIndex] != -1)
+                return fail("undo did not restore the painted cell");
+
+            // -- clicking the palette picks a tile instead of painting -----------
+            app.GetViewport().HandleMouseDown({int(swx + sww * 0.5f), int(swy + swh * 0.5f)},
+                                              Gorgon::Input::Mouse::Button::Left);
+            app.GetViewport().HandleMouseUp({int(swx + sww * 0.5f), int(swy + swh * 0.5f)},
+                                            Gorgon::Input::Mouse::Button::Left);
+            if(app.GetViewport().GetPaintTile() != 1)
+                return fail("clicking the palette did not select tile 1");
+
+            // -- a rectangle fill drag is one undo step that restores every cell --
+            app.GetViewport().SetPaintTile(5);
+            app.GetViewport().SetTilemapTool(TilemapTool::Fill);
+            const int fillUndoBefore = int(app.GetCommandStack().GetUndoCount());
+            app.GetViewport().HandleMouseDown({int(px), int(py)}, Gorgon::Input::Mouse::Button::Left);
+            app.GetViewport().HandleMouseMove({int(px) + 32, int(py) + 32});
+            app.GetViewport().HandleMouseUp({int(px) + 32, int(py) + 32},
+                                            Gorgon::Input::Mouse::Button::Left);
+
+            const Entity *filled = scene.FindEntity(picked);
+            if(!filled || !filled->tilemap)
+                return fail("the fill drag dropped the tilemap component");
+
+            int filledCells = 0;
+            for(int tile : filled->tilemap->tiles) {
+                if(tile == 5)
+                    ++filledCells;
+            }
+            if(filledCells < 2)
+                return fail("the fill drag did not paint a rectangle");
+            if(int(app.GetCommandStack().GetUndoCount()) != fillUndoBefore + 1)
+                return fail("the fill drag was not exactly one undo step");
+
+            app.Undo();
+            const Entity *cleared = scene.FindEntity(picked);
+            if(!cleared || !cleared->tilemap)
+                return fail("undo removed the tilemap component after the fill");
+            for(int tile : cleared->tilemap->tiles) {
+                if(tile != -1)
+                    return fail("undo did not restore every filled cell");
+            }
+
+            // Leave the editor as the earlier phases left it.
+            app.GetViewport().SetTilemapToolActive(false);
+            app.GetCommandStack().Clear();
+            if(Entity *restored = scene.FindEntity(picked))
+                restored->transform = savedTransform;
+            Gorgon::NextFrame();
+        }
+
         // Verify save/open round-trip through EditorApp in live window mode
         const auto tmpPath = (std::filesystem::temp_directory_path() / "gorgon_editor_smoke.gscene.json").string();
         std::string err;
@@ -3032,7 +3198,7 @@ int main(int argc, char *argv[]) {
             std::cerr << "FAIL: inspector edit did not persist through save/open\n";
             return 1;
         }
-        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + round-trip)\n";
+        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + tilemap paint + round-trip)\n";
         return 0;
     }
 

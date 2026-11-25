@@ -15,6 +15,8 @@ add_library(GorgonEditorCore STATIC
     Core/CollisionSystem.cpp
     Core/ComponentSimulation.h
     Core/ComponentSimulation.cpp
+    Core/TilemapPainter.h
+    Core/TilemapPainter.cpp
     Core/InputState.h
     Core/ScriptLog.h
     Core/ScriptLog.cpp
