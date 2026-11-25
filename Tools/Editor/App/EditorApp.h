@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/CommandStack.h"
+#include "Core/FileWatcher.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "AssetBrowserPanel.h"
@@ -22,6 +23,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <unordered_set>
 
 namespace Gorgon :: Editor {
 
@@ -142,6 +144,15 @@ namespace Gorgon :: Editor {
         const std::string &GetUndoName() const { return commands_.GetUndoName(); }
         const std::string &GetRedoName() const { return commands_.GetRedoName(); }
 
+        /// Hot-reload: polls the project directory on a ~0.5s interval (or immediately when
+        /// force is true), invalidating changed sprites/thumbnails, refreshing the asset
+        /// browser on add/remove, and reloading/syntax-checking modified .gs scripts.
+        std::size_t PollHotReload(double dtSeconds, bool force = false);
+        FileWatcher &GetFileWatcher() { return fileWatcher_; }
+        const FileWatcher &GetFileWatcher() const { return fileWatcher_; }
+        bool HasDirtyScripts() const { return !dirtyScripts_.empty(); }
+        void ClearDirtyScripts() { dirtyScripts_.clear(); }
+
     private:
         void buildToolbar();
         void buildDockPlaceholders();
@@ -156,6 +167,8 @@ namespace Gorgon :: Editor {
         void syncConsole();
         /// Points the console at the play session's log and installs the script editor callbacks.
         void setupScriptEditor();
+        /// Processes a batch of disk changes reported by fileWatcher_.
+        void handleDiskChanges(const std::vector<FileChange> &changes);
 
         // Phase 5 helpers
         void setupShortcuts();
@@ -242,6 +255,9 @@ namespace Gorgon :: Editor {
         // Compile-only session behind the script editor's "Check Syntax". Never started, so it owns
         // no scene and its libraries are built and dropped inside CheckSyntax().
         PlaySession compiler_;
+        // Polls the project folder (~0.5s) to hot-reload changed images, assets and .gs scripts.
+        FileWatcher fileWatcher_;
+        std::unordered_set<std::string> dirtyScripts_;
         // Overlays the viewport while open.
         ScriptEditorPanel scriptEditor_;
         BottomTab bottomTab_ = BottomTab::Assets;

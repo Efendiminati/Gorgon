@@ -18,6 +18,8 @@ add_library(GorgonEditorCore STATIC
     Core/InputState.h
     Core/ScriptLog.h
     Core/ScriptLog.cpp
+    Core/FileWatcher.h
+    Core/FileWatcher.cpp
     Core/PlaySession.h
     Core/PlaySession.cpp
     Core/SceneRuntime.h

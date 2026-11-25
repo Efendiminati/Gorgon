@@ -1,4 +1,5 @@
-#include "PlaySession.h"
+#include "Core/PlaySession.h"
+#include "Core/FileWatcher.h"
 
 #include "SceneSerializer.h"
 
@@ -1976,6 +1977,64 @@ namespace Gorgon :: Editor {
 
     void PlaySession::Log(LogSeverity severity, const std::string &message, const std::string &source) {
         impl_->console.Add(severity, source, message);
+    }
+
+    bool PlaySession::ReloadScripts(Scene &scene, const std::string &changedPath,
+                                    std::string *outError) {
+        auto &impl = *impl_;
+        if(outError)
+            outError->clear();
+        if(!impl.running)
+            return false;
+
+        impl.scene = &scene;
+        impl.lastError.clear();
+
+        std::vector<EntityId> targets;
+        for(const auto &entity : scene.GetEntities()) {
+            if(!entity.script || entity.script->path.empty())
+                continue;
+            if(!changedPath.empty()) {
+                const std::string resolved = ResolveAsset(impl.baseDir, entity.script->path);
+                if(!FileWatcher::PathsEqual(resolved, changedPath))
+                    continue;
+            }
+            targets.push_back(entity.id);
+        }
+
+        if(targets.empty())
+            return true;
+
+        bool allOk = true;
+        std::size_t reloadedCount = 0;
+        for(EntityId id : targets) {
+            impl.scripts.erase(
+                std::remove_if(impl.scripts.begin(), impl.scripts.end(),
+                               [id](const std::unique_ptr<Impl::ScriptState> &state) {
+                                   return state && state->entityId == id;
+                               }),
+                impl.scripts.end()
+            );
+
+            if(impl.CompileEntity(id)) {
+                ++reloadedCount;
+            } else {
+                allOk = false;
+                if(outError && outError->empty()) {
+                    *outError = impl.lastError;
+                }
+            }
+        }
+
+        if(reloadedCount > 0) {
+            impl.RunStartHooks(scene);
+            impl.ProcessSpawnedScripts(scene);
+            impl.ProcessDestroyQueue(scene);
+            impl.console.Add(LogSeverity::Info, "PlaySession",
+                             "Hot-reloaded " + std::to_string(reloadedCount) + " script(s)");
+        }
+
+        return allOk;
     }
 
     bool PlaySession::CheckSyntax(const std::string &source, const std::string &displayPath,

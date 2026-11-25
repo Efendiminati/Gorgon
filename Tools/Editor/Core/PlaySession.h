@@ -168,6 +168,17 @@ namespace Gorgon :: Editor {
         bool CheckSyntax(const std::string &source, const std::string &displayPath = std::string(),
                          std::string *outError = nullptr);
 
+        /**
+         * Recompiles attached scripts from disk while a play session is active, preserving
+         * the live scene state and the pre-play snapshot. When `changedPath` is non-empty,
+         * only entities whose resolved script path matches it are reloaded; when empty, all
+         * scripted entities are reloaded. Compile errors are logged to the console and
+         * reported in `outError`. Returns false if the session is not running or any
+         * targeted script failed to compile.
+         */
+        bool ReloadScripts(Scene &scene, const std::string &changedPath = std::string(),
+                           std::string *outError = nullptr);
+
     private:
         /// Builds the EditorPlay/Input/Physics/Scene/Audio libraries once. Called by Start() and by
         /// CheckSyntax(), which needs the same symbol table to compile an unsaved script.

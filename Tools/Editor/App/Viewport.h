@@ -67,6 +67,16 @@ namespace Gorgon :: Editor {
         /// Clears cached sprite textures (e.g. when switching projects or reloading assets).
         void ClearSpriteCache();
 
+        /// Evicts a single image from the sprite cache so the next Redraw() reloads it from disk.
+        /// Matches both normalized absolute paths and paths relative to the asset base dir.
+        /// Returns true if a cached entry was evicted.
+        bool InvalidateSprite(const std::string &path);
+
+        /// Cache inspection helpers (used by tests and hot-reload verification).
+        bool HasCachedSpriteEntry(const std::string &assetPath) const;
+        Gorgon::Geometry::Size GetCachedSpriteSize(const std::string &assetPath) const;
+        std::size_t GetSpriteCacheCount() const { return spriteCache_.size(); }
+
         /// Live play session to read particle state from while playing. The viewport never owns it;
         /// passing nullptr (or stopping play) falls back to drawing the emitter marker only.
         void SetPlaySession(const PlaySession *session) { playSession_ = session; }

@@ -57,6 +57,7 @@ namespace {
     int RunInputSelfTest();
     int RunComponentsSelfTest();
     int RunConsoleSelfTest();
+    int RunHotReloadSelfTest();
 
     int RunSelfTest() {
         using namespace Gorgon::Editor;
@@ -250,7 +251,11 @@ namespace {
             return consoleResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, script console, syntax check, round-trip, asset browser)\n";
+        if(const int hotReloadResult = RunHotReloadSelfTest()) {
+            return hotReloadResult;
+        }
+
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, script console, syntax check, hot-reload, round-trip, asset browser)\n";
         return 0;
     }
 
@@ -2080,6 +2085,192 @@ namespace {
             }
         }
 
+        std::filesystem::remove_all(dir, ec);
+        return 0;
+    }
+
+    /// Hot-reload: FileWatcher polling on disk touch for PNG sprites (Viewport cache
+    /// invalidation + reload), added/removed files (AssetLibrary refresh), and .gs scripts
+    /// (PlaySession::ReloadScripts live reload + compile error logging).
+    int RunHotReloadSelfTest() {
+        using namespace Gorgon::Editor;
+
+        std::error_code ec;
+        const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_hotreload_selftest";
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+
+        const auto pngPath = dir / "hero.png";
+        const auto scriptPath = dir / "mover.gs";
+        if(!WriteTinyPng(pngPath)) {
+            std::cerr << "FAIL: hot-reload selftest could not write hero.png\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        {
+            std::ofstream out(scriptPath, std::ios::binary | std::ios::trunc);
+            out << "function Update(self, dt)\n"
+                << "    self.x = self.x + 10.0 * dt\n"
+                << "    return 0\n"
+                << "end function\n";
+        }
+
+        FileWatcher watcher;
+        watcher.SetIntervalSeconds(0.5);
+        watcher.SetRoot(dir.generic_string());
+        if(watcher.GetTrackedFileCount() != 2 || !watcher.Poll().empty()) {
+            std::cerr << "FAIL: hot-reload FileWatcher baseline snapshot mismatch\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // 1. Sprite texture invalidation on disk touch.
+        Scene scene;
+        Entity &hero = scene.CreateEntity("Hero");
+        hero.sprite = SpriteComponent{"hero.png"};
+        hero.script = ScriptComponent{"mover.gs"};
+        const EntityId heroId = hero.id;
+
+        EditorViewport viewport(scene);
+        viewport.SetAssetBaseDir(dir.generic_string());
+        // Populate the sprite cache entry via ComputeEntityBaseSize.
+        (void)viewport.ComputeEntityBaseSize(*scene.FindEntity(heroId));
+        if(!viewport.HasCachedSpriteEntry("hero.png")) {
+            std::cerr << "FAIL: hot-reload selftest did not populate Viewport sprite cache\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // Touch hero.png on disk and bump its write time.
+        if(!WriteTinyPng(pngPath)) {
+            std::cerr << "FAIL: hot-reload selftest could not rewrite hero.png\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        const auto bumpedPng = std::filesystem::last_write_time(pngPath, ec) + std::chrono::seconds(5);
+        std::filesystem::last_write_time(pngPath, bumpedPng, ec);
+
+        auto changes = watcher.Tick(0.5);
+        if(changes.size() != 1 || changes[0].kind != FileChangeKind::Modified || changes[0].extension != ".png") {
+            std::cerr << "FAIL: FileWatcher did not detect modified hero.png\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        if(!viewport.InvalidateSprite(changes[0].path) || viewport.HasCachedSpriteEntry("hero.png")) {
+            std::cerr << "FAIL: Viewport::InvalidateSprite did not evict modified hero.png\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        // Re-querying repopulates the cache from disk.
+        (void)viewport.ComputeEntityBaseSize(*scene.FindEntity(heroId));
+        if(!viewport.HasCachedSpriteEntry("hero.png")) {
+            std::cerr << "FAIL: Viewport did not reload evicted hero.png on next query\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // 2. Added & removed asset detection + AssetLibrary refresh.
+        AssetLibrary library;
+        library.SetRoot(dir.generic_string());
+        const int initialCount = library.GetVisibleCount();
+
+        const auto extraPng = dir / "extra.png";
+        WriteTinyPng(extraPng);
+        changes = watcher.Tick(0.5);
+        if(changes.size() != 1 || changes[0].kind != FileChangeKind::Added) {
+            std::cerr << "FAIL: FileWatcher did not detect added extra.png\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        library.Refresh();
+        if(library.GetVisibleCount() != initialCount + 1) {
+            std::cerr << "FAIL: AssetLibrary::Refresh did not pick up added extra.png\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        std::filesystem::remove(extraPng, ec);
+        changes = watcher.Tick(0.5);
+        if(changes.size() != 1 || changes[0].kind != FileChangeKind::Removed) {
+            std::cerr << "FAIL: FileWatcher did not detect removed extra.png\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        library.Refresh();
+        if(library.GetVisibleCount() != initialCount) {
+            std::cerr << "FAIL: AssetLibrary::Refresh did not drop removed extra.png\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // 3. Script hot-reload on disk touch (live reload + error logging).
+        PlaySession session;
+        std::string error;
+        if(!session.Start(scene, dir.generic_string(), &error)) {
+            std::cerr << "FAIL: hot-reload selftest could not start PlaySession: " << error << "\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        session.Tick(scene, 0.2f);
+        if(!Approx(scene.FindEntity(heroId)->transform.x, 2.0f, 1e-2f)) {
+            std::cerr << "FAIL: hot-reload selftest initial script tick mismatch\n";
+            session.Stop(scene);
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        {
+            std::ofstream out(scriptPath, std::ios::binary | std::ios::trunc);
+            out << "function Update(self, dt)\n"
+                << "    self.x = self.x + 50.0 * dt\n"
+                << "    return 0\n"
+                << "end function\n";
+        }
+        const auto bumpedScript = std::filesystem::last_write_time(scriptPath, ec) + std::chrono::seconds(5);
+        std::filesystem::last_write_time(scriptPath, bumpedScript, ec);
+
+        changes = watcher.Tick(0.5);
+        if(changes.size() != 1 || changes[0].kind != FileChangeKind::Modified || changes[0].extension != ".gs") {
+            std::cerr << "FAIL: FileWatcher did not detect modified mover.gs\n";
+            session.Stop(scene);
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        if(!session.ReloadScripts(scene, changes[0].path, &error)) {
+            std::cerr << "FAIL: PlaySession::ReloadScripts failed on valid script: " << error << "\n";
+            session.Stop(scene);
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        session.Tick(scene, 0.2f);
+        if(!Approx(scene.FindEntity(heroId)->transform.x, 12.0f, 1e-2f)) {
+            std::cerr << "FAIL: hot-reloaded script did not apply updated speed (got "
+                      << scene.FindEntity(heroId)->transform.x << ")\n";
+            session.Stop(scene);
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // Syntax error on disk logs an error to the console.
+        {
+            std::ofstream out(scriptPath, std::ios::binary | std::ios::trunc);
+            out << "function Update(self, dt)\n"
+                << "    if self.x == 1\n"
+                << "    end if\n"
+                << "end function\n";
+        }
+        const auto bumpedBad = std::filesystem::last_write_time(scriptPath, ec) + std::chrono::seconds(5);
+        std::filesystem::last_write_time(scriptPath, bumpedBad, ec);
+        changes = watcher.Tick(0.5);
+        if(changes.size() != 1 || session.ReloadScripts(scene, changes[0].path, &error) ||
+           session.GetLog().CountOf(LogSeverity::Error) == 0) {
+            std::cerr << "FAIL: hot-reload did not report compile error for broken script\n";
+            session.Stop(scene);
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        session.Stop(scene);
         std::filesystem::remove_all(dir, ec);
         return 0;
     }

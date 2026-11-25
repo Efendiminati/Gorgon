@@ -566,9 +566,12 @@ namespace Gorgon :: Editor {
         currentFilePath_ = path;
 
         std::filesystem::path p(path);
+        std::error_code ec;
         viewport_.SetAssetBaseDir(p.has_parent_path() ? p.parent_path().string() : std::string{});
-        if(p.has_parent_path() && std::filesystem::is_directory(p.parent_path())) {
-            assetBrowser_.SetRoot(p.parent_path().generic_string());
+        if(p.has_parent_path() && std::filesystem::is_directory(p.parent_path(), ec)) {
+            const std::string dir = p.parent_path().generic_string();
+            assetBrowser_.SetRoot(dir);
+            fileWatcher_.SetRoot(dir);
         }
         viewport_.SetSelectedEntity(InvalidEntityId, false);
         viewport_.ResetCamera();
@@ -709,8 +712,11 @@ namespace Gorgon :: Editor {
     // ---- Phase 5: play-in-editor -------------------------------------------
 
     void EditorApp::onFrame() {
+        const float dt = float(Gorgon::Time::DeltaTime()) / 1000.0f;
         if(playMode_ == PlayMode::Playing)
-            TickPlay(float(Gorgon::Time::DeltaTime()) / 1000.0f);
+            TickPlay(dt);
+
+        PollHotReload(static_cast<double>(dt));
 
         // Script Log()/Print() output, compile failures and runtime errors arrive from the play tick
         // and from panel actions; one version check per frame keeps the console current without
@@ -769,10 +775,11 @@ namespace Gorgon :: Editor {
 
         std::string error;
         if(!play_.Start(scene_, viewport_.GetAssetBaseDir(), &error)) {
-            if(outError)
-                *outError = error;
+            if(outError) *outError = error;
+            syncConsole();
             return false;
         }
+        dirtyScripts_.clear();
 
         // Keys pressed while editing must not read as freshly pressed on the first play frame.
         playInput_.ClearEdges();
@@ -1165,6 +1172,7 @@ namespace Gorgon :: Editor {
         }
         if(!root.empty()) {
             assetBrowser_.SetRoot(root);
+            fileWatcher_.SetRoot(root);
         }
         if(!assetBrowser_.GetRoot().empty()) {
             // Scenes without a path of their own resolve sprite paths against the browser root,
@@ -1358,6 +1366,85 @@ namespace Gorgon :: Editor {
 
     void EditorApp::LogMessage(LogSeverity severity, const std::string &message, const std::string &source) {
         play_.Log(severity, message, source);
+        syncConsole();
+    }
+
+    std::size_t EditorApp::PollHotReload(double dtSeconds, bool force) {
+        const std::string desiredRoot = !assetBrowser_.GetRoot().empty()
+            ? assetBrowser_.GetRoot()
+            : viewport_.GetAssetBaseDir();
+        if(!desiredRoot.empty() && !FileWatcher::PathsEqual(desiredRoot, fileWatcher_.GetRoot())) {
+            fileWatcher_.SetRoot(desiredRoot);
+        }
+
+        const std::vector<FileChange> changes = force
+            ? fileWatcher_.Poll()
+            : fileWatcher_.Tick(dtSeconds);
+        if(changes.empty())
+            return 0;
+
+        handleDiskChanges(changes);
+        return changes.size();
+    }
+
+    void EditorApp::handleDiskChanges(const std::vector<FileChange> &changes) {
+        bool needBrowserRefresh = false;
+        bool needViewportRedraw = false;
+
+        for(const auto &change : changes) {
+            const AssetType assetType = GetAssetTypeForExtension(change.extension);
+            const std::string displayName = !change.relativePath.empty()
+                ? change.relativePath
+                : change.path;
+
+            if(change.kind == FileChangeKind::Added || change.kind == FileChangeKind::Removed) {
+                needBrowserRefresh = true;
+                if(change.kind == FileChangeKind::Removed && assetType == AssetType::Images) {
+                    viewport_.InvalidateSprite(change.path);
+                    assetBrowser_.InvalidateThumbnail(change.path);
+                    needViewportRedraw = true;
+                }
+                continue;
+            }
+
+            // FileChangeKind::Modified
+            if(assetType == AssetType::Images) {
+                viewport_.InvalidateSprite(change.path);
+                assetBrowser_.InvalidateThumbnail(change.path);
+                needViewportRedraw = true;
+                LogMessage(LogSeverity::Info, "Reloaded image: " + displayName, "HotReload");
+            } else if(change.extension == ".gs") {
+                dirtyScripts_.insert(change.path);
+                if(playMode_ == PlayMode::Playing || playMode_ == PlayMode::Paused) {
+                    std::string error;
+                    if(play_.ReloadScripts(scene_, change.path, &error)) {
+                        dirtyScripts_.erase(change.path);
+                        LogMessage(LogSeverity::Info, "Hot-reloaded script: " + displayName, "HotReload");
+                    }
+                } else {
+                    std::ifstream in(change.path, std::ios::binary);
+                    if(in) {
+                        std::ostringstream ss;
+                        ss << in.rdbuf();
+                        std::string error;
+                        if(compiler_.CheckSyntax(ss.str(), change.path, &error)) {
+                            LogMessage(LogSeverity::Info, "Reloaded script: " + displayName, "HotReload");
+                        } else {
+                            LogMessage(LogSeverity::Error,
+                                       "Script error in " + displayName + ": " + error,
+                                       "HotReload");
+                        }
+                    }
+                }
+            }
+        }
+
+        if(needBrowserRefresh) {
+            assetBrowser_.Refresh();
+        }
+        if(needViewportRedraw) {
+            viewport_.Redraw();
+        }
         syncConsole();
     }
 

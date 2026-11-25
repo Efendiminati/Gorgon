@@ -110,6 +110,18 @@ from disk.
 real delta times; **Pause** freezes the scripts, **Stop** tears the scripts down and restores the
 exact pre-play scene. Editing is disabled while playing, so playing never dirties the scene.
 
+### Hot-reload
+
+`EditorApp` polls the project folder every ~0.5 s via `Core/FileWatcher` (`std::filesystem::last_write_time`
++ file size, zero external dependencies):
+
+- **Modified images** (`.png`, `.jpg`, `.bmp`, etc.) evict and reload the sprite texture in the
+  viewport, refresh the thumbnail in the asset browser, and log an Info line to the console.
+- **Added or removed files** automatically refresh the asset browser (and evict removed image caches).
+- **Modified `.gs` scripts** hot-reload live via `PlaySession::ReloadScripts()` while playing (or
+  run a syntax check while stopped so the next Play picks up the new source), logging any compile
+  error straight to the console.
+
 ## Scene format (`.gscene.json`)
 
 Scenes are plain JSON written by `Gorgon::Encoding::JSON`. Sprite and script paths are stored

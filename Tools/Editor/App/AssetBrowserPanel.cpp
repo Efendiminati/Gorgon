@@ -1,4 +1,5 @@
-#include "AssetBrowserPanel.h"
+#include "App/AssetBrowserPanel.h"
+#include "Core/FileWatcher.h"
 #include "Core/SceneSerializer.h"
 #include "Viewport.h"
 
@@ -107,7 +108,10 @@ namespace Gorgon :: Editor {
     }
 
     AssetType GetAssetTypeForExtension(const std::string &extension) {
-        const std::string ext = ToLowerCopy(extension);
+        std::string ext = ToLowerCopy(extension);
+        if(!ext.empty() && ext.front() == '.') {
+            ext.erase(0, 1);
+        }
 
         if(ext == "png" || ext == "jpg" || ext == "jpeg")               return AssetType::Images;
         if(ext == "wav" || ext == "ogg" || ext == "flac")               return AssetType::Audio;
@@ -762,6 +766,30 @@ namespace Gorgon :: Editor {
     std::size_t AssetBrowserPanel::GetThumbnailCount() const {
         return static_cast<std::size_t>(std::count_if(thumbnails_.begin(), thumbnails_.end(),
             [](const auto &pair) { return static_cast<bool>(pair.second.bitmap); }));
+    }
+
+    bool AssetBrowserPanel::InvalidateThumbnail(const std::string &fullPath) {
+        if(fullPath.empty() || thumbnails_.empty())
+            return false;
+
+        bool erased = false;
+        for(auto it = thumbnails_.begin(); it != thumbnails_.end(); ) {
+            if(FileWatcher::PathsEqual(it->first, fullPath)) {
+                it = thumbnails_.erase(it);
+                erased = true;
+            } else {
+                ++it;
+            }
+        }
+        if(erased) {
+            Redraw();
+        }
+        return erased;
+    }
+
+    void AssetBrowserPanel::ClearThumbnails() {
+        thumbnails_.clear();
+        Redraw();
     }
 
     void AssetBrowserPanel::HandleMouseDown(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn) {

@@ -3,11 +3,13 @@
 
 #include "Core/CollisionSystem.h"
 #include "Core/CommandStack.h"
+#include "Core/FileWatcher.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "Core/SceneRuntime.h"
 #include "Core/SceneSerializer.h"
 
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -2843,4 +2845,129 @@ TEST_CASE("Play session CheckSyntax compiles a buffer without executing it",
 
     session.Stop(scene);
     std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("PlaySession ReloadScripts hot-reloads modified script and reports errors", "[EditorCore][PlaySession][HotReload]") {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path(ec) / "gorgon_editor_reload_scripts_test";
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir, ec);
+
+    const fs::path scriptPath = dir / "move.gs";
+    {
+        std::ofstream out(scriptPath);
+        out << "function Update(self, dt)\n"
+            << "    self.x = self.x + 10.0 * dt\n"
+            << "    return 0\n"
+            << "end function\n";
+    }
+
+    Scene scene;
+    Entity &e = scene.CreateEntity("Runner");
+    const EntityId id = e.id;
+    e.script = ScriptComponent{"move.gs"};
+
+    PlaySession session;
+    std::string err;
+    REQUIRE(session.Start(scene, dir.generic_string(), &err));
+    session.Tick(scene, 0.2f);
+    REQUIRE(scene.FindEntity(id)->transform.x == Catch::Approx(2.0f));
+
+    // Rewrite script with a different velocity and hot-reload.
+    {
+        std::ofstream out(scriptPath);
+        out << "function Update(self, dt)\n"
+            << "    self.x = self.x + 50.0 * dt\n"
+            << "    return 0\n"
+            << "end function\n";
+    }
+    err.clear();
+    REQUIRE(session.ReloadScripts(scene, scriptPath.generic_string(), &err));
+    REQUIRE(err.empty());
+    session.Tick(scene, 0.2f);
+    REQUIRE(scene.FindEntity(id)->transform.x == Catch::Approx(12.0f));
+
+    // Rewrite script with a syntax error and verify ReloadScripts reports failure to log.
+    {
+        std::ofstream out(scriptPath);
+        out << "function Update(self, dt)\n"
+            << "    if self.x == 1\n"
+            << "    end if\n"
+            << "end function\n";
+    }
+    err.clear();
+    REQUIRE_FALSE(session.ReloadScripts(scene, scriptPath.generic_string(), &err));
+    REQUIRE_FALSE(err.empty());
+    REQUIRE(session.GetLog().CountOf(LogSeverity::Error) > 0);
+
+    session.Stop(scene);
+    fs::remove_all(dir, ec);
+}
+
+TEST_CASE("FileWatcher detects added, modified, and removed files", "[EditorCore][FileWatcher]") {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    const fs::path dir = fs::temp_directory_path(ec) / "gorgon_editor_filewatcher_test";
+    fs::remove_all(dir, ec);
+    fs::create_directories(dir / "sub", ec);
+    fs::create_directories(dir / ".hidden", ec);
+
+    const fs::path existing = dir / "hero.png";
+    {
+        std::ofstream out(existing, std::ios::binary);
+        out << "png-v1";
+    }
+    {
+        std::ofstream out(dir / ".hidden" / "ignore.png", std::ios::binary);
+        out << "ignored";
+    }
+
+    FileWatcher watcher;
+    watcher.SetIntervalSeconds(0.5);
+    watcher.SetRoot(dir.generic_string());
+
+    // Baseline snapshot should contain hero.png only (dot-directories skipped) and report no changes.
+    REQUIRE(watcher.GetTrackedFileCount() == 1);
+    REQUIRE(watcher.Poll().empty());
+
+    // Add a new script in a subdirectory.
+    const fs::path added = dir / "sub" / "Mover.GS";
+    {
+        std::ofstream out(added, std::ios::binary);
+        out << "function Update(self, dt)\nend function\n";
+    }
+
+    // Tick below interval does not poll yet.
+    REQUIRE(watcher.Tick(0.25).empty());
+    auto changes = watcher.Tick(0.30);
+    REQUIRE(changes.size() == 1);
+    REQUIRE(changes[0].kind == FileChangeKind::Added);
+    REQUIRE(changes[0].relativePath == "sub/Mover.GS");
+    REQUIRE(changes[0].extension == ".gs");
+    REQUIRE(FileWatcher::PathsEqual(changes[0].path, added.generic_string()));
+
+    // Modify the existing PNG (bump both size and mtime).
+    {
+        std::ofstream out(existing, std::ios::binary | std::ios::trunc);
+        out << "png-v2-longer";
+    }
+    const auto oldTime = fs::last_write_time(existing, ec);
+    fs::last_write_time(existing, oldTime + std::chrono::seconds(5), ec);
+
+    changes = watcher.Poll();
+    REQUIRE(changes.size() == 1);
+    REQUIRE(changes[0].kind == FileChangeKind::Modified);
+    REQUIRE(changes[0].extension == ".png");
+    REQUIRE(FileWatcher::PathsEqual(changes[0].path, existing.generic_string()));
+
+    // Remove the added script.
+    fs::remove(added, ec);
+    changes = watcher.Poll();
+    REQUIRE(changes.size() == 1);
+    REQUIRE(changes[0].kind == FileChangeKind::Removed);
+    REQUIRE(changes[0].relativePath == "sub/Mover.GS");
+    REQUIRE(watcher.GetTrackedFileCount() == 1);
+
+    fs::remove_all(dir, ec);
 }

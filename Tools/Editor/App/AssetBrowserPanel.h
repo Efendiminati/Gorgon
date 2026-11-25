@@ -209,6 +209,10 @@ namespace Gorgon :: Editor {
         const Gorgon::Graphics::Bitmap *GetThumbnail(const std::string &fullPath);
         /// Number of successfully generated thumbnails in the lazy cache.
         std::size_t GetThumbnailCount() const;
+        /// Evicts a single image from the thumbnail cache and redraws if it was present.
+        bool InvalidateThumbnail(const std::string &fullPath);
+        /// Clears all cached thumbnails and redraws.
+        void ClearThumbnails();
 
         /// Grid hit testing (also usable from tests).
         int HitTestTile(int x, int y) const;

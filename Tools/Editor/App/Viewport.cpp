@@ -1,4 +1,5 @@
-#include "Viewport.h"
+#include "App/Viewport.h"
+#include "Core/FileWatcher.h"
 
 #include "Core/PlaySession.h"
 
@@ -161,6 +162,66 @@ namespace Gorgon :: Editor {
     void EditorViewport::ClearSpriteCache() {
         gfxLayer_.Clear();
         spriteCache_.clear();
+    }
+
+    bool EditorViewport::InvalidateSprite(const std::string &path) {
+        if(path.empty() || spriteCache_.empty())
+            return false;
+
+        const std::string resolvedTarget = resolveAssetPath(path);
+        bool erased = false;
+        for(auto it = spriteCache_.begin(); it != spriteCache_.end(); ) {
+            const std::string resolvedKey = resolveAssetPath(it->first);
+            if(FileWatcher::PathsEqual(it->first, path) ||
+               FileWatcher::PathsEqual(it->first, resolvedTarget) ||
+               FileWatcher::PathsEqual(resolvedKey, path) ||
+               FileWatcher::PathsEqual(resolvedKey, resolvedTarget)) {
+                it = spriteCache_.erase(it);
+                erased = true;
+            } else {
+                ++it;
+            }
+        }
+        if(erased && attached_) {
+            gfxLayer_.Clear();
+        }
+        return erased;
+    }
+
+    bool EditorViewport::HasCachedSpriteEntry(const std::string &assetPath) const {
+        if(assetPath.empty())
+            return false;
+        if(spriteCache_.find(assetPath) != spriteCache_.end())
+            return true;
+        const std::string resolved = resolveAssetPath(assetPath);
+        if(spriteCache_.find(resolved) != spriteCache_.end())
+            return true;
+        for(const auto &kv : spriteCache_) {
+            if(FileWatcher::PathsEqual(resolveAssetPath(kv.first), resolved))
+                return true;
+        }
+        return false;
+    }
+
+    Gorgon::Geometry::Size EditorViewport::GetCachedSpriteSize(const std::string &assetPath) const {
+        if(assetPath.empty())
+            return {0, 0};
+        auto it = spriteCache_.find(assetPath);
+        if(it == spriteCache_.end()) {
+            const std::string resolved = resolveAssetPath(assetPath);
+            it = spriteCache_.find(resolved);
+            if(it == spriteCache_.end()) {
+                for(auto iter = spriteCache_.begin(); iter != spriteCache_.end(); ++iter) {
+                    if(FileWatcher::PathsEqual(resolveAssetPath(iter->first), resolved)) {
+                        it = iter;
+                        break;
+                    }
+                }
+            }
+        }
+        if(it == spriteCache_.end() || !it->second.valid || !it->second.bitmap)
+            return {0, 0};
+        return {it->second.bitmap->GetWidth(), it->second.bitmap->GetHeight()};
     }
 
     void EditorViewport::SetAssetBaseDir(const std::string &dir) {
