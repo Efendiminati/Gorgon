@@ -96,6 +96,23 @@ namespace Gorgon :: Editor {
         void SetGridSnap(bool enabled) { gridSnap_ = enabled; }
         bool IsGridSnapEnabled() const { return gridSnap_; }
 
+        /// Convert viewport-local screen coordinates to world coordinates, applying grid snap if enabled.
+        Gorgon::Geometry::Pointf ScreenToWorldSnapped(float sx, float sy) const;
+
+        /// Visual preview shown while dragging an asset from the Asset Browser over the viewport.
+        struct DropPreview {
+            bool active = false;
+            bool isScript = false;
+            std::string label;
+            float worldX = 0.0f;
+            float worldY = 0.0f;
+            EntityId targetEntityId = InvalidEntityId;
+        };
+
+        void SetDropPreview(float sx, float sy, const std::string &label, bool isScript);
+        void ClearDropPreview();
+        const DropPreview &GetDropPreview() const { return dropPreview_; }
+
         /// Edit interactions (click-select, translate/scale gizmos, drag-move). Pan and zoom stay
         /// available while editing is disabled, which is what play-in-editor needs.
         void SetEditEnabled(bool enabled) { editEnabled_ = enabled; }
@@ -171,6 +188,7 @@ namespace Gorgon :: Editor {
         void drawColliders(float viewW, float viewH);
         void drawSelectionGizmo(float viewW, float viewH);
         void drawMarquee();
+        void drawDropPreview(float viewW, float viewH);
 
         Scene &scene_;
         Gorgon::Widgets::Layerbox *layerbox_ = nullptr;
@@ -208,6 +226,9 @@ namespace Gorgon :: Editor {
         bool marqueeAdditive_ = false;
         bool marqueeDragged_ = false;
         std::vector<EntityId> marqueeBaseSelection_;
+
+        // Active asset drag-and-drop preview
+        DropPreview dropPreview_;
     };
 
 } // namespace Gorgon::Editor

@@ -3,12 +3,17 @@
 #include "Core/Scene.h"
 #include "Viewport.h"
 
+#include <Gorgon/Geometry/Point.h>
+#include <Gorgon/Geometry/Size.h>
+#include <Gorgon/Graphics/Layer.h>
+#include <Gorgon/Input/Layer.h>
+#include <Gorgon/Input/Mouse.h>
 #include <Gorgon/UI/Dimension.h>
 #include <Gorgon/UI/Widget.h>
 #include <Gorgon/Widgets/Button.h>
 #include <Gorgon/Widgets/Dropdown.h>
 #include <Gorgon/Widgets/Label.h>
-#include <Gorgon/Widgets/Listbox.h>
+#include <Gorgon/Widgets/Layerbox.h>
 #include <Gorgon/Widgets/Panel.h>
 
 #include <functional>
@@ -37,6 +42,34 @@ namespace Gorgon :: Editor {
             return id == other.id && text == other.text;
         }
     };
+
+    constexpr int kHierarchyRowHeight = 22;
+
+    /// Resolved drop target for a hierarchy drag-and-drop reparent gesture.
+    struct HierarchyDropTarget {
+        bool isRoot = false;
+        EntityId parentId = InvalidEntityId;
+        int rowIndex = -1;
+        bool valid = false;
+    };
+
+    /// Builds depth-first hierarchy rows for the given scene (pure, widget-free).
+    std::vector<HierarchyRow> BuildHierarchyRows(const Scene &scene, const EditorViewport *viewport = nullptr);
+
+    /// Returns the row index at tree-local Y coordinate, or -1 if above/below the populated rows.
+    int HitTestHierarchyRow(int rowCount, int rowHeight, int scrollOffset, int y);
+
+    /// Resolves what releasing `draggedId` at tree-local `dropY` targets.
+    /// Dropping above the list (panel header, dropY < 0) or on empty space below rows targets root.
+    HierarchyDropTarget ResolveHierarchyDropTarget(const Scene &scene,
+                                                   const std::vector<HierarchyRow> &rows,
+                                                   EntityId draggedId,
+                                                   int dropY,
+                                                   int rowHeight = kHierarchyRowHeight,
+                                                   int scrollOffset = 0);
+
+    /// Applies a drag-and-drop reparent (InvalidEntityId = root), rejecting no-ops and cycles.
+    bool ApplyHierarchyDragReparent(Scene &scene, EntityId draggedId, EntityId targetParentId);
 
     /**
      * Left dock: scene hierarchy tree plus entity CRUD / reparenting actions.
@@ -74,6 +107,16 @@ namespace Gorgon :: Editor {
         void AddEntity();
         void HandleRowClick(long index, bool shiftHeld);
 
+        /// Custom tree rendering & drag-and-drop reparenting.
+        void Redraw();
+        Gorgon::Geometry::Size GetTreeSize() const;
+        void HandleTreeMouseDown(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn);
+        void HandleTreeMouseMove(Gorgon::Geometry::Point pt);
+        void HandleTreeMouseUp(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn);
+        bool HandleTreeMouseScroll(Gorgon::Geometry::Point pt, float amount);
+        bool IsDraggingEntity() const { return dragging_; }
+        bool DragReparentEntity(EntityId draggedId, EntityId targetParentId);
+
         /// Fired after any structural change (add / child / duplicate / delete / reparent / rename).
         std::function<void()> OnStructureChanged;
 
@@ -92,6 +135,7 @@ namespace Gorgon :: Editor {
         void rebuildParentChoices();
         void updateActionState();
         void notifyModified(bool structural);
+        void clampScroll();
 
         Entity *selectedEntity();
 
@@ -118,7 +162,19 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button btnLocked_{"Lock"};
         Gorgon::Widgets::Label lblParent_{"Parent", Gorgon::Widgets::Registry::Label_Regular};
         Gorgon::Widgets::DropdownList<std::string> parentBox_;
-        Gorgon::Widgets::SimpleListbox<HierarchyRow> list_;
+        Gorgon::Widgets::Layerbox treeBox_{Gorgon::Widgets::Registry::Layerbox_Blank};
+        Gorgon::Graphics::Layer treeGfx_;
+        Gorgon::Input::Layer treeInput_;
+        bool treeAttached_ = false;
+        int scrollOffset_ = 0;
+        int hoverIndex_ = -1;
+
+        // Drag-and-drop reparenting state
+        int dragCandidateIndex_ = -1;
+        EntityId dragSourceId_ = InvalidEntityId;
+        bool dragging_ = false;
+        Gorgon::Geometry::Point dragStartPt_{0, 0};
+        HierarchyDropTarget dragTarget_;
 
         std::vector<HierarchyRow> rows_;
         std::vector<EntityId> parentChoices_;

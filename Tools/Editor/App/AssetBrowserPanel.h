@@ -153,8 +153,25 @@ namespace Gorgon :: Editor {
     /// position. Images receive a SpriteComponent, scripts a ScriptComponent, both
     /// referencing the asset path as stored in a scene file. Returns InvalidEntityId when
     /// the asset cannot be inserted (folders, audio, fonts, resources).
+    class EditorViewport;
+
     EntityId InsertAssetAsEntity(Scene &scene, const AssetEntry &entry, const std::string &assetBaseDir,
                                  float worldX, float worldY);
+
+    /// Outcome of dropping an asset onto the viewport at viewport-local screen coordinates.
+    struct AssetDropResult {
+        bool succeeded = false;
+        bool attachedScript = false;
+        EntityId entityId = InvalidEntityId;
+    };
+
+    /// Drops an image or script asset onto the viewport at viewport-local screen coordinates (sx, sy).
+    /// Converts (sx, sy) to world coordinates (respecting viewport grid snap). If the asset is a
+    /// script and (sx, sy) hits an unlocked entity, attaches the script to that entity; otherwise
+    /// spawns a new entity with the sprite or script at the snapped world coordinates.
+    AssetDropResult DropAssetOntoViewport(Scene &scene, EditorViewport &viewport,
+                                          const AssetEntry &entry, const std::string &assetBaseDir,
+                                          float sx, float sy);
 
     /// Bottom dock asset browser: folder navigation, type filters, text search and an
     /// image thumbnail grid with double-click insert-to-scene.
@@ -198,7 +215,10 @@ namespace Gorgon :: Editor {
         int GetScrollOffset() const { return scrollOffset_; }
 
         void HandleMouseDown(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn);
+        void HandleMouseMove(Gorgon::Geometry::Point pt);
+        void HandleMouseUp(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn);
         bool HandleMouseScroll(Gorgon::Geometry::Point pt, float amount);
+        bool IsDraggingAsset() const { return dragging_; }
 
         /// Selects an entry by visible index (used by tests and the picker).
         void SelectIndex(int index);
@@ -211,6 +231,12 @@ namespace Gorgon :: Editor {
 
         /// Fires on double click or the "Add to Scene" button.
         std::function<void(const AssetEntry &)> OnAssetActivated;
+
+        /// Fires while dragging a supported asset (image/script); point is in window coordinates.
+        std::function<void(const AssetEntry &, Gorgon::Geometry::Point)> OnAssetDragMove;
+
+        /// Fires when releasing a dragged asset; point is in window coordinates.
+        std::function<void(const AssetEntry &, Gorgon::Geometry::Point)> OnAssetDragEnd;
 
         /// Switches the browser into picker mode for the Inspector. While picking,
         /// activation hands the asset back to the callback instead of inserting it.
@@ -259,6 +285,13 @@ namespace Gorgon :: Editor {
         // Double click detection
         int lastClickIndex_ = -1;
         std::chrono::steady_clock::time_point lastClickTime_{};
+
+        // Asset drag-and-drop state
+        int dragCandidateIndex_ = -1;
+        bool dragging_ = false;
+        Gorgon::Geometry::Point dragStartPt_{0, 0};
+        AssetEntry dragEntry_;
+        Gorgon::Geometry::Point toWindowPoint(Gorgon::Geometry::Point gridPt) const;
 
         std::unordered_map<std::string, ThumbnailEntry> thumbnails_;
 

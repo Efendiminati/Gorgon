@@ -53,6 +53,7 @@ namespace Gorgon :: Editor {
 
         /// Inserts the asset selected in the browser into the scene at the viewport center.
         bool InsertSelectedAssetIntoScene(std::string *outError = nullptr);
+        bool DropAssetAtViewportPoint(const AssetEntry &entry, float sx, float sy, std::string *outError = nullptr);
         HierarchyPanel &GetHierarchy() { return *hierarchy_; }
         InspectorPanel &GetInspector() { return *inspector_; }
         const std::string &GetCurrentFilePath() const { return currentFilePath_; }

@@ -777,6 +777,196 @@ namespace {
             return 1;
         }
 
+        // ---- Drag-and-drop: Asset -> Viewport (grid snap, script attach, preview, single undo) ----
+        {
+            Scene dragScene;
+            dragScene.settings.gridSize = 32;
+            EditorViewport dragVp(dragScene);
+            dragVp.SetViewportSizeOverride({800, 600});
+            dragVp.SetGridSnap(true);
+            dragVp.SetAssetBaseDir(root.generic_string());
+            CommandStack dragCmds;
+
+            // 1. Image drop with grid snap enabled: screen (420, 315) -> world (20, 15) -> snapped (32, 0)
+            dragVp.SetDropPreview(420.0f, 315.0f, heroEntry.name, false);
+            if(!dragVp.GetDropPreview().active || dragVp.GetDropPreview().isScript ||
+               !Approx(dragVp.GetDropPreview().worldX, 32.0f) ||
+               !Approx(dragVp.GetDropPreview().worldY, 0.0f)) {
+                std::cerr << "FAIL: asset drop preview did not snap to grid\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+
+            const Scene beforeImgDrop = dragScene;
+            const AssetDropResult imgDrop = DropAssetOntoViewport(
+                dragScene, dragVp, heroEntry, root.generic_string(), 420.0f, 315.0f);
+            dragVp.ClearDropPreview();
+            if(dragVp.GetDropPreview().active) {
+                std::cerr << "FAIL: ClearDropPreview did not clear preview state\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            if(!imgDrop.succeeded || imgDrop.attachedScript || imgDrop.entityId == InvalidEntityId) {
+                std::cerr << "FAIL: image asset drop onto viewport failed\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            const Entity *droppedImg = dragScene.FindEntity(imgDrop.entityId);
+            if(!droppedImg || !droppedImg->sprite || droppedImg->sprite->asset != "images/hero.png" ||
+               !Approx(droppedImg->transform.x, 32.0f) || !Approx(droppedImg->transform.y, 0.0f)) {
+                std::cerr << "FAIL: dropped image entity sprite or snapped coordinates mismatch\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            dragCmds.Push(std::make_unique<SceneSnapshotCommand>("Drop Asset", beforeImgDrop, dragScene));
+            if(!dragCmds.Undo(dragScene) || dragScene.GetEntityCount() != 0) {
+                std::cerr << "FAIL: single undo did not revert asset drop\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            if(!dragCmds.Redo(dragScene) || dragScene.GetEntityCount() != 1) {
+                std::cerr << "FAIL: redo did not restore asset drop\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+
+            // 2. Script drop onto existing entity attaches ScriptComponent instead of spawning a new entity
+            const auto heroScreen = dragVp.GetCamera().WorldToScreen(32.0f, 0.0f, 800.0f, 600.0f);
+            dragVp.SetDropPreview(heroScreen.X, heroScreen.Y, scriptEntry.name, true);
+            if(!dragVp.GetDropPreview().active || !dragVp.GetDropPreview().isScript ||
+               dragVp.GetDropPreview().targetEntityId != imgDrop.entityId) {
+                std::cerr << "FAIL: script drop preview did not target hovered entity\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            const Scene beforeScriptDrop = dragScene;
+            const AssetDropResult scriptAttach = DropAssetOntoViewport(
+                dragScene, dragVp, scriptEntry, root.generic_string(), heroScreen.X, heroScreen.Y);
+            dragVp.ClearDropPreview();
+            if(!scriptAttach.succeeded || !scriptAttach.attachedScript ||
+               scriptAttach.entityId != imgDrop.entityId || dragScene.GetEntityCount() != 1) {
+                std::cerr << "FAIL: script drop onto entity did not attach in place\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            const Entity *withScript = dragScene.FindEntity(imgDrop.entityId);
+            if(!withScript || !withScript->script || withScript->script->path != "scripts/spin.gs") {
+                std::cerr << "FAIL: attached script path mismatch\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            dragCmds.Push(std::make_unique<SceneSnapshotCommand>("Attach Script", beforeScriptDrop, dragScene));
+            if(!dragCmds.Undo(dragScene) || dragScene.FindEntity(imgDrop.entityId)->script.has_value()) {
+                std::cerr << "FAIL: single undo did not revert script attach\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+
+            // 3. Unsnapped drop when grid snap is disabled
+            dragVp.SetGridSnap(false);
+            const AssetDropResult unsnappedDrop = DropAssetOntoViewport(
+                dragScene, dragVp, scriptEntry, root.generic_string(), 620.0f, 415.0f);
+            const Entity *unsnappedEnt = dragScene.FindEntity(unsnappedDrop.entityId);
+            if(!unsnappedDrop.succeeded || unsnappedDrop.attachedScript || !unsnappedEnt ||
+               !Approx(unsnappedEnt->transform.x, 220.0f) || !Approx(unsnappedEnt->transform.y, 115.0f)) {
+                std::cerr << "FAIL: unsnapped script drop onto empty viewport mismatch\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+        }
+
+        // ---- Drag-and-drop: HierarchyPanel reparenting + cycle guard + unparent to root + undo ----
+        {
+            Scene hierScene;
+            const EntityId idA = hierScene.CreateEntity("Alpha").id;
+            const EntityId idB = hierScene.CreateEntity("Beta").id;
+            const EntityId idC = hierScene.CreateEntity("Gamma").id;
+            CommandStack hierCmds;
+
+            auto rows = BuildHierarchyRows(hierScene);
+            if(rows.size() != 3 || rows[0].id != idA || rows[1].id != idB || rows[2].id != idC) {
+                std::cerr << "FAIL: initial hierarchy row order mismatch\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+
+            // Drag Beta onto Alpha (row 0)
+            const HierarchyDropTarget ontoA = ResolveHierarchyDropTarget(
+                hierScene, rows, idB, kHierarchyRowHeight / 2);
+            if(ontoA.isRoot || ontoA.parentId != idA || !ontoA.valid) {
+                std::cerr << "FAIL: dragging Beta onto Alpha should resolve as valid child drop\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            const Scene beforeReparentB = hierScene;
+            if(!ApplyHierarchyDragReparent(hierScene, idB, ontoA.parentId) ||
+               hierScene.FindEntity(idB)->parentId != idA) {
+                std::cerr << "FAIL: drag-reparent Beta -> Alpha failed\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            hierCmds.Push(std::make_unique<SceneSnapshotCommand>("Edit Hierarchy", beforeReparentB, hierScene));
+
+            // Drag Gamma onto Beta -> chain Alpha -> Beta -> Gamma
+            rows = BuildHierarchyRows(hierScene);
+            const HierarchyDropTarget ontoB = ResolveHierarchyDropTarget(
+                hierScene, rows, idC, kHierarchyRowHeight + kHierarchyRowHeight / 2);
+            if(ontoB.isRoot || ontoB.parentId != idB || !ontoB.valid ||
+               !ApplyHierarchyDragReparent(hierScene, idC, ontoB.parentId) ||
+               hierScene.FindEntity(idC)->parentId != idB) {
+                std::cerr << "FAIL: drag-reparent Gamma -> Beta failed\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+
+            // Cycle guard: dragging Alpha onto itself (row 0) or descendant Gamma (row 2) must be rejected
+            rows = BuildHierarchyRows(hierScene);
+            const HierarchyDropTarget selfDrop = ResolveHierarchyDropTarget(
+                hierScene, rows, idA, kHierarchyRowHeight / 2);
+            const HierarchyDropTarget descDrop = ResolveHierarchyDropTarget(
+                hierScene, rows, idA, kHierarchyRowHeight * 2 + kHierarchyRowHeight / 2);
+            if(selfDrop.valid || descDrop.valid ||
+               ApplyHierarchyDragReparent(hierScene, idA, idA) ||
+               ApplyHierarchyDragReparent(hierScene, idA, idC) ||
+               hierScene.FindEntity(idA)->parentId != InvalidEntityId) {
+                std::cerr << "FAIL: hierarchy drag cycle guard did not reject self/descendant reparent\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+
+            // Unparent to root via panel header (y < 0) and via empty area below rows
+            const HierarchyDropTarget headerDrop = ResolveHierarchyDropTarget(hierScene, rows, idC, -10);
+            const HierarchyDropTarget emptyDrop = ResolveHierarchyDropTarget(
+                hierScene, rows, idC, kHierarchyRowHeight * 5);
+            if(!headerDrop.isRoot || headerDrop.parentId != InvalidEntityId || !headerDrop.valid ||
+               !emptyDrop.isRoot || emptyDrop.parentId != InvalidEntityId || !emptyDrop.valid) {
+                std::cerr << "FAIL: dragging to header or empty area did not resolve to root unparent\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+
+            const Scene beforeUnparentC = hierScene;
+            if(!ApplyHierarchyDragReparent(hierScene, idC, headerDrop.parentId) ||
+               hierScene.FindEntity(idC)->parentId != InvalidEntityId) {
+                std::cerr << "FAIL: unparenting Gamma to root failed\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            hierCmds.Push(std::make_unique<SceneSnapshotCommand>("Edit Hierarchy", beforeUnparentC, hierScene));
+
+            // Single-step undo restores Gamma under Beta, redo unparents it again
+            if(!hierCmds.Undo(hierScene) || hierScene.FindEntity(idC)->parentId != idB) {
+                std::cerr << "FAIL: single undo did not revert hierarchy unparent\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+            if(!hierCmds.Redo(hierScene) || hierScene.FindEntity(idC)->parentId != InvalidEntityId) {
+                std::cerr << "FAIL: redo did not reapply hierarchy unparent\n";
+                std::filesystem::remove_all(root, ec);
+                return 1;
+            }
+        }
+
         std::filesystem::remove_all(root, ec);
         return 0;
     }

@@ -432,6 +432,29 @@ namespace Gorgon :: Editor {
         return std::round(value / static_cast<float>(gs)) * static_cast<float>(gs);
     }
 
+    Gorgon::Geometry::Pointf EditorViewport::ScreenToWorldSnapped(float sx, float sy) const {
+        const auto sz = GetViewportSize();
+        const auto wp = camera_.ScreenToWorld(sx, sy, static_cast<float>(sz.Width), static_cast<float>(sz.Height));
+        return {snapValue(wp.X), snapValue(wp.Y)};
+    }
+
+    void EditorViewport::SetDropPreview(float sx, float sy, const std::string &label, bool isScript) {
+        const auto wp = ScreenToWorldSnapped(sx, sy);
+        dropPreview_.active = true;
+        dropPreview_.isScript = isScript;
+        dropPreview_.label = label;
+        dropPreview_.worldX = wp.X;
+        dropPreview_.worldY = wp.Y;
+        dropPreview_.targetEntityId = isScript ? HitTestEntity(sx, sy) : InvalidEntityId;
+        Redraw();
+    }
+
+    void EditorViewport::ClearDropPreview() {
+        if(!dropPreview_.active) return;
+        dropPreview_ = DropPreview{};
+        Redraw();
+    }
+
     EntityId EditorViewport::HitTestEntity(float sx, float sy) const {
         const auto sz = GetViewportSize();
         const auto wp = camera_.ScreenToWorld(sx, sy, static_cast<float>(sz.Width), static_cast<float>(sz.Height));
@@ -1160,6 +1183,52 @@ namespace Gorgon :: Editor {
 
         // 6. Marquee selection box (translucent overlay)
         drawMarquee();
+
+        // 7. Asset drag-and-drop preview indicator
+        drawDropPreview(viewW, viewH);
+    }
+
+    void EditorViewport::drawDropPreview(float viewW, float viewH) {
+        if(!dropPreview_.active) return;
+
+        if(dropPreview_.isScript && dropPreview_.targetEntityId != InvalidEntityId) {
+            if(const Entity *target = scene_.FindEntity(dropPreview_.targetEntityId)) {
+                const auto wc = ComputeEntityWorldCorners(*target);
+                std::array<Gorgon::Geometry::Pointf, 4> sc;
+                for(int i = 0; i < 4; ++i) {
+                    sc[i] = camera_.WorldToScreen(wc[i].X, wc[i].Y, viewW, viewH);
+                }
+                gfxLayer_.Draw(sc[0], sc[1], sc[2], sc[3], Gorgon::Graphics::RGBAf(1.0f, 0.78f, 0.22f, 0.22f));
+                drawRectOutline(sc, 3.0f, Gorgon::Graphics::RGBAf(1.0f, 0.82f, 0.28f, 0.98f));
+
+                const Transform wt = scene_.GetWorldTransform(target->id);
+                const auto center = camera_.WorldToScreen(wt.x, wt.y, viewW, viewH);
+                const Gorgon::Graphics::RGBAf plusCol(1.0f, 0.92f, 0.55f, 1.0f);
+                drawLine(center.X - 8.0f, center.Y, center.X + 8.0f, center.Y, 2.5f, plusCol);
+                drawLine(center.X, center.Y - 8.0f, center.X, center.Y + 8.0f, 2.5f, plusCol);
+                return;
+            }
+        }
+
+        const auto center = camera_.WorldToScreen(dropPreview_.worldX, dropPreview_.worldY, viewW, viewH);
+        const float half = std::max(12.0f, kDefaultEntitySize * 0.5f * camera_.zoom);
+        const Gorgon::Graphics::RGBAf fillCol = dropPreview_.isScript
+            ? Gorgon::Graphics::RGBAf(0.95f, 0.72f, 0.25f, 0.20f)
+            : Gorgon::Graphics::RGBAf(0.22f, 0.74f, 0.97f, 0.20f);
+        const Gorgon::Graphics::RGBAf outlineCol = dropPreview_.isScript
+            ? Gorgon::Graphics::RGBAf(1.0f, 0.80f, 0.30f, 0.95f)
+            : Gorgon::Graphics::RGBAf(0.32f, 0.85f, 1.0f, 0.95f);
+
+        gfxLayer_.Draw(center.X - half, center.Y - half, half * 2.0f, half * 2.0f, fillCol);
+        const std::array<Gorgon::Geometry::Pointf, 4> corners = {
+            Gorgon::Geometry::Pointf{center.X - half, center.Y - half},
+            Gorgon::Geometry::Pointf{center.X + half, center.Y - half},
+            Gorgon::Geometry::Pointf{center.X + half, center.Y + half},
+            Gorgon::Geometry::Pointf{center.X - half, center.Y + half}
+        };
+        drawRectOutline(corners, 2.0f, outlineCol);
+        drawLine(center.X - 7.0f, center.Y, center.X + 7.0f, center.Y, 1.5f, outlineCol);
+        drawLine(center.X, center.Y - 7.0f, center.X, center.Y + 7.0f, 1.5f, outlineCol);
     }
 
 } // namespace Gorgon::Editor

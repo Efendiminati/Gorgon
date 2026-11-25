@@ -1,9 +1,12 @@
 #include "HierarchyPanel.h"
 
+#include <Gorgon/Graphics/Color.h>
 #include <Gorgon/Input/Keyboard.h>
 #include <Gorgon/UI/Dialog.h>
+#include <Gorgon/Widgets/Registry.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <iostream>
 #include <string>
@@ -12,6 +15,20 @@
 namespace Gorgon :: Editor {
 
     namespace {
+        constexpr int kDragThresholdPx = 5;
+
+        Gorgon::Graphics::RGBAf Col(float r, float g, float b, float a = 1.0f) {
+            return Gorgon::Graphics::RGBAf(r, g, b, a);
+        }
+
+        void DrawOutline(Gorgon::Graphics::Layer &layer, float x, float y, float w, float h,
+                         float thickness, Gorgon::Graphics::RGBAf color) {
+            layer.Draw(x, y, w, thickness, color);
+            layer.Draw(x, y + h - thickness, w, thickness, color);
+            layer.Draw(x, y, thickness, h, color);
+            layer.Draw(x + w - thickness, y, thickness, h, color);
+        }
+
         std::string ComposeRowText(const Entity &entity, int depth, bool hasChildren,
                                    bool showMultiMarker, bool isSelected) {
             std::string text;
@@ -30,6 +47,86 @@ namespace Gorgon :: Editor {
 
             return text;
         }
+    }
+
+    std::vector<HierarchyRow> BuildHierarchyRows(const Scene &scene, const EditorViewport *viewport) {
+        std::vector<HierarchyRow> rows;
+        const bool showMulti = viewport && viewport->GetSelectionCount() > 1;
+
+        std::function<void(EntityId, int)> walk = [&](EntityId parentId, int depth) {
+            for(EntityId childId : scene.GetChildIds(parentId)) {
+                const Entity *entity = scene.FindEntity(childId);
+                if(!entity)
+                    continue;
+
+                HierarchyRow row;
+                row.id = childId;
+                row.depth = depth;
+                row.hasChildren = !scene.GetChildIds(childId).empty();
+                row.visible = entity->visible;
+                row.locked = entity->locked;
+                row.name = entity->name;
+                const bool selected = viewport && viewport->IsEntitySelected(childId);
+                row.text = ComposeRowText(*entity, depth, row.hasChildren, showMulti, selected);
+
+                rows.push_back(std::move(row));
+                walk(childId, depth + 1);
+            }
+        };
+
+        walk(InvalidEntityId, 0);
+        return rows;
+    }
+
+    int HitTestHierarchyRow(int rowCount, int rowHeight, int scrollOffset, int y) {
+        if(rowCount <= 0 || rowHeight <= 0 || y < 0)
+            return -1;
+
+        const int adjustedY = y + std::max(0, scrollOffset);
+        const int index = adjustedY / rowHeight;
+        if(index < 0 || index >= rowCount)
+            return -1;
+
+        return index;
+    }
+
+    HierarchyDropTarget ResolveHierarchyDropTarget(const Scene &scene,
+                                                   const std::vector<HierarchyRow> &rows,
+                                                   EntityId draggedId,
+                                                   int dropY,
+                                                   int rowHeight,
+                                                   int scrollOffset) {
+        HierarchyDropTarget target;
+        const Entity *dragged = scene.FindEntity(draggedId);
+        if(!dragged)
+            return target;
+
+        const int hitRow = (dropY < 0)
+            ? -1
+            : HitTestHierarchyRow(static_cast<int>(rows.size()), rowHeight, scrollOffset, dropY);
+        if(hitRow < 0) {
+            target.isRoot = true;
+            target.parentId = InvalidEntityId;
+            target.rowIndex = -1;
+            target.valid = (dragged->parentId != InvalidEntityId);
+            return target;
+        }
+
+        const EntityId targetId = rows[static_cast<std::size_t>(hitRow)].id;
+        target.isRoot = false;
+        target.parentId = targetId;
+        target.rowIndex = hitRow;
+        target.valid = (dragged->parentId != targetId) && scene.CanReparent(draggedId, targetId);
+        return target;
+    }
+
+    bool ApplyHierarchyDragReparent(Scene &scene, EntityId draggedId, EntityId targetParentId) {
+        const Entity *dragged = scene.FindEntity(draggedId);
+        if(!dragged)
+            return false;
+        if(dragged->parentId == targetParentId)
+            return false;
+        return scene.Reparent(draggedId, targetParentId);
     }
 
     HierarchyPanel::HierarchyPanel(Scene &scene, EditorViewport &viewport, Gorgon::Widgets::Panel &panel) :
@@ -57,7 +154,27 @@ namespace Gorgon :: Editor {
         panel_.Add(btnLocked_);
         panel_.Add(lblParent_);
         panel_.Add(parentBox_);
-        panel_.Add(list_);
+        panel_.Add(treeBox_);
+
+        if(!treeAttached_) {
+            auto &root = treeBox_.GetLayer();
+            root.Add(treeGfx_);
+            root.Add(treeInput_);
+
+            treeInput_.SetDown([this](Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn) {
+                HandleTreeMouseDown(pt, btn);
+            });
+            treeInput_.SetMove([this](Gorgon::Geometry::Point pt) {
+                HandleTreeMouseMove(pt);
+            });
+            treeInput_.SetUp([this](Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn) {
+                HandleTreeMouseUp(pt, btn);
+            });
+            treeInput_.SetScroll([this](Gorgon::Geometry::Point pt, float amount) {
+                return HandleTreeMouseScroll(pt, amount);
+            });
+            treeAttached_ = true;
+        }
 
         boundsToken_ = panel_.BoundsChangedEvent.Register([this]() {
             Layout();
@@ -75,16 +192,6 @@ namespace Gorgon :: Editor {
 
         parentBox_.ChangedEvent.Register([this](long index) {
             onParentChosen(index);
-        });
-
-        list_.ChangedEvent.Register([this](long index) {
-            if(suppressSelection_)
-                return;
-
-            using Mod = Gorgon::Input::Keyboard::Modifier;
-            const bool shift = viewport_.IsShiftHeld() ||
-                static_cast<bool>(Gorgon::Input::Keyboard::CurrentModifier & Mod(Mod::Shift));
-            HandleRowClick(index, shift);
         });
     }
 
@@ -138,33 +245,121 @@ namespace Gorgon :: Editor {
             OnSelectionChanged(viewport_.GetSelectedEntity());
     }
 
-    void HierarchyPanel::rebuildRows() {
-        rows_.clear();
-        const bool showMulti = viewport_.GetSelectionCount() > 1;
-        multiSelectMarkers_ = showMulti;
+    Gorgon::Geometry::Size HierarchyPanel::GetTreeSize() const {
+        if(treeAttached_) {
+            const auto s = treeGfx_.GetCalculatedSize();
+            if(s.Width > 0 && s.Height > 0)
+                return s;
+        }
+        const auto bs = treeBox_.GetCurrentSize();
+        if(bs.Width > 0 && bs.Height > 0)
+            return bs;
+        return {200, 300};
+    }
 
-        // Depth-first walk so every child follows its parent.
-        std::function<void(EntityId, int)> walk = [&](EntityId parentId, int depth) {
-            for(EntityId childId : scene_.GetChildIds(parentId)) {
-                const Entity *entity = scene_.FindEntity(childId);
-                if(!entity)
-                    continue;
+    void HierarchyPanel::clampScroll() {
+        const auto sz = GetTreeSize();
+        const int contentH = static_cast<int>(rows_.size()) * kHierarchyRowHeight;
+        const int maxScroll = std::max(0, contentH - std::max(0, sz.Height));
+        scrollOffset_ = std::clamp(scrollOffset_, 0, maxScroll);
+    }
 
-                HierarchyRow row;
-                row.id = childId;
-                row.depth = depth;
-                row.hasChildren = !scene_.GetChildIds(childId).empty();
-                row.visible = entity->visible;
-                row.locked = entity->locked;
-                row.name = entity->name;
-                row.text = ComposeRowText(*entity, depth, row.hasChildren, showMulti, viewport_.IsEntitySelected(childId));
+    void HierarchyPanel::HandleTreeMouseDown(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn) {
+        if(((static_cast<int>(btn) & static_cast<int>(Gorgon::Input::Mouse::Button::Left)) & 0x1FF) == 0) {
+            return;
+        }
 
-                rows_.push_back(std::move(row));
-                walk(childId, depth + 1);
+        const int rowIdx = HitTestHierarchyRow(static_cast<int>(rows_.size()), kHierarchyRowHeight, scrollOffset_, pt.Y);
+        dragCandidateIndex_ = rowIdx;
+        dragSourceId_ = (rowIdx >= 0 && std::size_t(rowIdx) < rows_.size())
+            ? rows_[std::size_t(rowIdx)].id
+            : InvalidEntityId;
+        dragging_ = false;
+        dragStartPt_ = pt;
+        dragTarget_ = HierarchyDropTarget{};
+
+        if(rowIdx < 0) {
+            HandleRowClick(-1, false);
+        }
+    }
+
+    void HierarchyPanel::HandleTreeMouseMove(Gorgon::Geometry::Point pt) {
+        if(dragCandidateIndex_ >= 0 && dragSourceId_ != InvalidEntityId && viewport_.IsEditEnabled()) {
+            if(!dragging_) {
+                if(std::abs(pt.X - dragStartPt_.X) >= kDragThresholdPx ||
+                   std::abs(pt.Y - dragStartPt_.Y) >= kDragThresholdPx) {
+                    dragging_ = true;
+                }
             }
-        };
+            if(dragging_) {
+                dragTarget_ = ResolveHierarchyDropTarget(
+                    scene_, rows_, dragSourceId_, pt.Y, kHierarchyRowHeight, scrollOffset_);
+                Redraw();
+                return;
+            }
+        }
 
-        walk(InvalidEntityId, 0);
+        const int hover = HitTestHierarchyRow(static_cast<int>(rows_.size()), kHierarchyRowHeight, scrollOffset_, pt.Y);
+        if(hover != hoverIndex_) {
+            hoverIndex_ = hover;
+            Redraw();
+        }
+    }
+
+    void HierarchyPanel::HandleTreeMouseUp(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button /*btn*/) {
+        const int candidateIdx = dragCandidateIndex_;
+        const EntityId sourceId = dragSourceId_;
+        const bool wasDragging = dragging_;
+
+        dragCandidateIndex_ = -1;
+        dragSourceId_ = InvalidEntityId;
+        dragging_ = false;
+        dragTarget_ = HierarchyDropTarget{};
+
+        if(wasDragging && sourceId != InvalidEntityId && viewport_.IsEditEnabled()) {
+            const HierarchyDropTarget target = ResolveHierarchyDropTarget(
+                scene_, rows_, sourceId, pt.Y, kHierarchyRowHeight, scrollOffset_);
+            if(target.valid) {
+                DragReparentEntity(sourceId, target.parentId);
+            } else {
+                Redraw();
+            }
+            return;
+        }
+
+        if(candidateIdx >= 0) {
+            using Mod = Gorgon::Input::Keyboard::Modifier;
+            const bool shift = viewport_.IsShiftHeld() ||
+                static_cast<bool>(Gorgon::Input::Keyboard::CurrentModifier & Mod(Mod::Shift));
+            HandleRowClick(candidateIdx, shift);
+        }
+    }
+
+    bool HierarchyPanel::HandleTreeMouseScroll(Gorgon::Geometry::Point /*pt*/, float amount) {
+        if(amount == 0.0f)
+            return false;
+
+        scrollOffset_ -= static_cast<int>(std::lround(amount * static_cast<float>(kHierarchyRowHeight) * 2.0f));
+        clampScroll();
+        Redraw();
+        return true;
+    }
+
+    bool HierarchyPanel::DragReparentEntity(EntityId draggedId, EntityId targetParentId) {
+        if(!viewport_.IsEditEnabled())
+            return false;
+
+        if(!ApplyHierarchyDragReparent(scene_, draggedId, targetParentId))
+            return false;
+
+        viewport_.SetSelectedEntity(draggedId, false);
+        notifyModified(true);
+        return true;
+    }
+
+    void HierarchyPanel::rebuildRows() {
+        multiSelectMarkers_ = viewport_.GetSelectionCount() > 1;
+        rows_ = BuildHierarchyRows(scene_, &viewport_);
     }
 
     void HierarchyPanel::rebuildParentChoices() {
@@ -231,13 +426,7 @@ namespace Gorgon :: Editor {
 
     void HierarchyPanel::Rebuild() {
         rebuildRows();
-
-        suppressSelection_ = true;
-        list_.Clear();
-        for(const HierarchyRow &row : rows_)
-            list_.Add(row);
-        suppressSelection_ = false;
-
+        clampScroll();
         rebuildParentChoices();
         SyncSelection();
         updateActionState();
@@ -248,29 +437,84 @@ namespace Gorgon :: Editor {
         const bool showMulti = viewport_.GetSelectionCount() > 1;
         if(showMulti || multiSelectMarkers_) {
             rebuildRows();
-            suppressSelection_ = true;
-            list_.Clear();
-            for(const HierarchyRow &row : rows_)
-                list_.Add(row);
-            suppressSelection_ = false;
         }
-
-        const EntityId selectedId = viewport_.GetSelectedEntity();
-
-        long index = -1;
-        for(std::size_t i = 0; i < rows_.size(); ++i) {
-            if(rows_[i].id == selectedId) {
-                index = long(i);
-                break;
-            }
-        }
-
-        suppressSelection_ = true;
-        list_.SetSelectedIndex(index);
-        suppressSelection_ = false;
 
         rebuildParentChoices();
         updateActionState();
+        Redraw();
+    }
+
+    void HierarchyPanel::Redraw() {
+        if(!treeAttached_)
+            return;
+
+        treeGfx_.Clear();
+
+        const auto size = GetTreeSize();
+        if(size.Width <= 0 || size.Height <= 0)
+            return;
+
+        const float w = static_cast<float>(size.Width);
+        const float h = static_cast<float>(size.Height);
+        treeGfx_.Draw(0.0f, 0.0f, w, h, Col(0.11f, 0.12f, 0.15f));
+        clampScroll();
+
+        auto printer = Gorgon::Widgets::Registry::Active().Printer(Gorgon::Graphics::NamedFont::Small);
+
+        for(std::size_t i = 0; i < rows_.size(); ++i) {
+            const int ry = static_cast<int>(i) * kHierarchyRowHeight - scrollOffset_;
+            if(ry + kHierarchyRowHeight <= 0)
+                continue;
+            if(ry >= size.Height)
+                break;
+
+            const HierarchyRow &row = rows_[i];
+            const bool isSelected = viewport_.IsEntitySelected(row.id);
+            const bool isHover = (static_cast<int>(i) == hoverIndex_);
+            const bool isDragSource = dragging_ && (row.id == dragSourceId_);
+            const bool isDropTarget = dragging_ && !dragTarget_.isRoot && (dragTarget_.rowIndex == static_cast<int>(i));
+
+            Gorgon::Graphics::RGBAf bg = (i % 2 == 0) ? Col(0.13f, 0.14f, 0.18f) : Col(0.14f, 0.15f, 0.19f);
+            if(isSelected) {
+                bg = Col(0.22f, 0.45f, 0.85f, 0.90f);
+            } else if(isHover) {
+                bg = Col(0.20f, 0.22f, 0.27f);
+            }
+            if(isDragSource) {
+                bg = Col(0.36f, 0.30f, 0.16f, 0.90f);
+            }
+            treeGfx_.Draw(0.0f, static_cast<float>(ry), w, static_cast<float>(kHierarchyRowHeight), bg);
+
+            if(isDropTarget) {
+                const auto fill = dragTarget_.valid ? Col(0.22f, 0.78f, 0.98f, 0.26f) : Col(0.92f, 0.28f, 0.28f, 0.26f);
+                const auto border = dragTarget_.valid ? Col(0.32f, 0.86f, 1.0f, 0.98f) : Col(0.98f, 0.36f, 0.36f, 0.98f);
+                treeGfx_.Draw(0.0f, static_cast<float>(ry), w, static_cast<float>(kHierarchyRowHeight), fill);
+                DrawOutline(treeGfx_, 0.0f, static_cast<float>(ry), w, static_cast<float>(kHierarchyRowHeight), 2.0f, border);
+            } else if(isDragSource) {
+                DrawOutline(treeGfx_, 0.0f, static_cast<float>(ry), w, static_cast<float>(kHierarchyRowHeight), 1.5f,
+                            Col(1.0f, 0.80f, 0.30f, 0.95f));
+            }
+
+            printer.SetColor(row.visible ? Col(0.92f, 0.93f, 0.96f) : Col(0.55f, 0.58f, 0.65f));
+            const int textY = ry + std::max(0, (kHierarchyRowHeight - printer.GetHeight()) / 2);
+            printer.PrintNoWrap(treeGfx_, row.text, 6, textY, std::max(10, size.Width - 12));
+        }
+
+        if(dragging_ && dragTarget_.isRoot && dragTarget_.valid) {
+            const int barH = kHierarchyRowHeight;
+            const int barY = std::min(static_cast<int>(rows_.size()) * kHierarchyRowHeight - scrollOffset_,
+                                      std::max(0, size.Height - barH));
+            const int drawY = std::max(0, barY);
+            treeGfx_.Draw(0.0f, static_cast<float>(drawY), w, static_cast<float>(barH), Col(0.20f, 0.68f, 0.92f, 0.28f));
+            DrawOutline(treeGfx_, 0.0f, static_cast<float>(drawY), w, static_cast<float>(barH), 2.0f,
+                        Col(0.32f, 0.86f, 1.0f, 0.98f));
+            printer.SetColor(Col(0.88f, 0.96f, 1.0f));
+            const int textY = drawY + std::max(0, (barH - printer.GetHeight()) / 2);
+            printer.PrintNoWrap(treeGfx_, "Drop to unparent to root", 6, textY, std::max(10, size.Width - 12),
+                                Gorgon::Graphics::TextAlignment::Center);
+        }
+
+        DrawOutline(treeGfx_, 0.0f, 0.0f, w, h, 1.0f, Col(0.24f, 0.26f, 0.32f));
     }
 
     void HierarchyPanel::Layout() {
@@ -331,8 +575,9 @@ namespace Gorgon :: Editor {
         y += unit + pad;
 
         const int listHeight = std::max(unit * 3, interior.Height - y - pad);
-        list_.Move(Pixels(pad, y));
-        list_.Resize(Pixels(width, listHeight));
+        treeBox_.Move(Pixels(pad, y));
+        treeBox_.Resize(Pixels(width, listHeight));
+        Redraw();
     }
 
     void HierarchyPanel::notifyModified(bool structural) {
@@ -345,26 +590,10 @@ namespace Gorgon :: Editor {
                 OnStructureChanged();
         }
         else {
-            // Text (visibility / lock markers) changed -> rebuild row labels but keep selection.
-            const EntityId selectedId = viewport_.GetSelectedEntity();
+            // Text (visibility / lock markers) changed -> rebuild row labels and redraw.
             rebuildRows();
-
-            suppressSelection_ = true;
-            list_.Clear();
-            for(const HierarchyRow &row : rows_)
-                list_.Add(row);
-
-            long index = -1;
-            for(std::size_t i = 0; i < rows_.size(); ++i) {
-                if(rows_[i].id == selectedId) {
-                    index = long(i);
-                    break;
-                }
-            }
-            list_.SetSelectedIndex(index);
-            suppressSelection_ = false;
-
             updateActionState();
+            Redraw();
         }
 
         if(OnSelectionChanged)

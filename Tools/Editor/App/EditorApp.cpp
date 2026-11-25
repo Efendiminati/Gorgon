@@ -663,6 +663,7 @@ namespace Gorgon :: Editor {
         gestureActive_ = false;
         gesturePushed_ = false;
         // Edit-only gizmos, click-select and drag are off while the scripts own the scene.
+        viewport_.ClearDropPreview();
         viewport_.SetEditEnabled(false);
         viewport_.Redraw();
         updatePlayButtons();
@@ -793,6 +794,37 @@ namespace Gorgon :: Editor {
         assetBrowser_.OnAssetSelected = [this](const AssetEntry &) {
             updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
         };
+        assetBrowser_.OnAssetDragMove = [this](const AssetEntry &entry, Gorgon::Geometry::Point winPt) {
+            if(playMode_ != PlayMode::Stopped) {
+                viewport_.ClearDropPreview();
+                return;
+            }
+            const auto vpLoc = viewportBox_.GetLayer().TranslateToTopLevel({0, 0});
+            const auto vpSize = viewport_.GetViewportSize();
+            const bool inside = (winPt.X >= vpLoc.X && winPt.X < vpLoc.X + vpSize.Width &&
+                                 winPt.Y >= vpLoc.Y && winPt.Y < vpLoc.Y + vpSize.Height);
+            if(inside) {
+                viewport_.SetDropPreview(static_cast<float>(winPt.X - vpLoc.X),
+                                         static_cast<float>(winPt.Y - vpLoc.Y),
+                                         entry.name,
+                                         entry.type == AssetType::Scripts);
+            } else {
+                viewport_.ClearDropPreview();
+            }
+        };
+        assetBrowser_.OnAssetDragEnd = [this](const AssetEntry &entry, Gorgon::Geometry::Point winPt) {
+            viewport_.ClearDropPreview();
+            if(playMode_ != PlayMode::Stopped) return;
+            const auto vpLoc = viewportBox_.GetLayer().TranslateToTopLevel({0, 0});
+            const auto vpSize = viewport_.GetViewportSize();
+            const bool inside = (winPt.X >= vpLoc.X && winPt.X < vpLoc.X + vpSize.Width &&
+                                 winPt.Y >= vpLoc.Y && winPt.Y < vpLoc.Y + vpSize.Height);
+            if(inside) {
+                DropAssetAtViewportPoint(entry,
+                                         static_cast<float>(winPt.X - vpLoc.X),
+                                         static_cast<float>(winPt.Y - vpLoc.Y));
+            }
+        };
 
         std::error_code ec;
         std::string root;
@@ -868,6 +900,40 @@ namespace Gorgon :: Editor {
         }
 
         return insertAsset(*entry, outError);
+    }
+
+    bool EditorApp::DropAssetAtViewportPoint(const AssetEntry &entry, float sx, float sy, std::string *outError) {
+        if(playMode_ != PlayMode::Stopped) {
+            if(outError) *outError = "Stop play mode before editing the scene.";
+            return false;
+        }
+        if(entry.isDirectory) {
+            if(outError) *outError = "Folders cannot be dropped into the scene.";
+            return false;
+        }
+        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts) {
+            if(outError) *outError = "Only image and script assets can be dropped into the scene.";
+            return false;
+        }
+
+        if(currentFilePath_.empty() && !assetBrowser_.GetRoot().empty() &&
+           viewport_.GetAssetBaseDir() != assetBrowser_.GetRoot()) {
+            viewport_.SetAssetBaseDir(assetBrowser_.GetRoot());
+        }
+
+        const AssetDropResult res = DropAssetOntoViewport(
+            scene_, viewport_, entry, viewport_.GetAssetBaseDir(), sx, sy);
+        if(!res.succeeded) {
+            if(outError) *outError = "Could not drop this asset into the scene.";
+            return false;
+        }
+
+        viewport_.SetSelectedEntity(res.entityId, false);
+        refreshPanels();
+        viewport_.Redraw();
+        recordEdit(res.attachedScript ? "Attach Script" : "Drop Asset");
+        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        return true;
     }
 
     bool EditorApp::OnClosing() {

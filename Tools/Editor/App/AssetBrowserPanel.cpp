@@ -1,4 +1,5 @@
 #include "AssetBrowserPanel.h"
+#include "Viewport.h"
 
 #include <Gorgon/Filesystem.h>
 #include <Gorgon/Filesystem/Iterator.h>
@@ -395,6 +396,37 @@ namespace Gorgon :: Editor {
         return entity.id;
     }
 
+    AssetDropResult DropAssetOntoViewport(Scene &scene, EditorViewport &viewport,
+                                          const AssetEntry &entry, const std::string &assetBaseDir,
+                                          float sx, float sy) {
+        AssetDropResult res;
+        if(entry.isDirectory) return res;
+        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts) return res;
+
+        if(entry.type == AssetType::Scripts) {
+            const EntityId hitId = viewport.HitTestEntity(sx, sy);
+            if(hitId != InvalidEntityId) {
+                if(Entity *target = scene.FindEntity(hitId); target && !target->locked) {
+                    const std::string assetPath = MakeSceneRelativePath(entry.fullPath, assetBaseDir, entry.relativePath);
+                    target->script = ScriptComponent{assetPath};
+                    res.succeeded = true;
+                    res.attachedScript = true;
+                    res.entityId = hitId;
+                    return res;
+                }
+            }
+        }
+
+        const auto wp = viewport.ScreenToWorldSnapped(sx, sy);
+        const EntityId newId = InsertAssetAsEntity(scene, entry, assetBaseDir, wp.X, wp.Y);
+        if(newId == InvalidEntityId) return res;
+
+        res.succeeded = true;
+        res.attachedScript = false;
+        res.entityId = newId;
+        return res;
+    }
+
     // ---- AssetBrowserPanel ----
 
     AssetBrowserPanel::AssetBrowserPanel() {
@@ -498,11 +530,10 @@ namespace Gorgon :: Editor {
                 HandleMouseDown(pt, btn);
             });
             inputLayer_.SetMove([this](Gorgon::Geometry::Point pt) {
-                const int hover = HitTestTile(pt.X, pt.Y);
-                if(hover != hoverIndex_) {
-                    hoverIndex_ = hover;
-                    Redraw();
-                }
+                HandleMouseMove(pt);
+            });
+            inputLayer_.SetUp([this](Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn) {
+                HandleMouseUp(pt, btn);
             });
             inputLayer_.SetScroll([this](Gorgon::Geometry::Point pt, float amount) {
                 return HandleMouseScroll(pt, amount);
@@ -735,6 +766,65 @@ namespace Gorgon :: Editor {
 
         lastClickIndex_ = index;
         lastClickTime_ = now;
+
+        // Arm drag-and-drop for image/script assets when not in picker mode.
+        dragCandidateIndex_ = -1;
+        dragging_ = false;
+        if(!IsPicking()) {
+            if(const AssetEntry *entry = library_.GetSelected();
+               entry && !entry->isDirectory &&
+               (entry->type == AssetType::Images || entry->type == AssetType::Scripts)) {
+                dragCandidateIndex_ = index;
+                dragStartPt_ = pt;
+                dragEntry_ = *entry;
+            }
+        }
+    }
+
+    Gorgon::Geometry::Point AssetBrowserPanel::toWindowPoint(Gorgon::Geometry::Point gridPt) const {
+        if(gridAttached_) {
+            return inputLayer_.TranslateToTopLevel(gridPt);
+        }
+        return gridBox_.GetCurrentLocation() + gridPt;
+    }
+
+    void AssetBrowserPanel::HandleMouseMove(Gorgon::Geometry::Point pt) {
+        if(dragCandidateIndex_ >= 0) {
+            if(!dragging_) {
+                if(std::abs(pt.X - dragStartPt_.X) >= 6 || std::abs(pt.Y - dragStartPt_.Y) >= 6) {
+                    dragging_ = true;
+                    lastClickIndex_ = -1;
+                    Redraw();
+                }
+            }
+            if(dragging_ && OnAssetDragMove) {
+                OnAssetDragMove(dragEntry_, toWindowPoint(pt));
+            }
+            return;
+        }
+
+        const int hover = HitTestTile(pt.X, pt.Y);
+        if(hover != hoverIndex_) {
+            hoverIndex_ = hover;
+            Redraw();
+        }
+    }
+
+    void AssetBrowserPanel::HandleMouseUp(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button /*btn*/) {
+        if(dragCandidateIndex_ < 0) return;
+
+        const bool wasDragging = dragging_;
+        const AssetEntry entry = dragEntry_;
+        dragCandidateIndex_ = -1;
+        dragging_ = false;
+        dragEntry_ = AssetEntry{};
+
+        if(wasDragging) {
+            Redraw();
+            if(OnAssetDragEnd) {
+                OnAssetDragEnd(entry, toWindowPoint(pt));
+            }
+        }
     }
 
     bool AssetBrowserPanel::HandleMouseScroll(Gorgon::Geometry::Point /*pt*/, float amount) {
@@ -902,8 +992,10 @@ namespace Gorgon :: Editor {
                             static_cast<int>(y + h) - kTileLabelHeight + 3,
                             static_cast<int>(w) - 8, Gorgon::Graphics::TextAlignment::Center);
 
-        DrawOutline(gfxLayer_, x, y, w, h, 1.0f,
-                    selected ? Col(0.55f, 0.75f, 1.0f, 0.9f) : Col(0.26f, 0.29f, 0.35f));
+        const bool isDragged = dragging_ && index == dragCandidateIndex_;
+        DrawOutline(gfxLayer_, x, y, w, h, isDragged ? 2.0f : 1.0f,
+                    isDragged ? Col(1.0f, 0.82f, 0.28f, 0.95f)
+                              : (selected ? Col(0.55f, 0.75f, 1.0f, 0.9f) : Col(0.26f, 0.29f, 0.35f)));
     }
 
 } // namespace Gorgon::Editor
