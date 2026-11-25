@@ -98,6 +98,11 @@ namespace Gorgon :: Editor {
         /// Number of entity scripts the running play session compiled and drives.
         int GetPlayingScriptCount() const { return play_.GetScriptCount(); }
 
+        /// Keyboard/mouse state handed to the running play scripts (`using Input`). The editor
+        /// fills it from the window and viewport every frame; tests can drive it directly and call
+        /// TickPlay() to step a script deterministically.
+        InputState &GetPlayInput() { return playInput_; }
+
         /// Camera focus / entity actions, also bound to shortcuts.
         void FocusSelectedEntity();
         void DuplicateSelected();
@@ -130,6 +135,8 @@ namespace Gorgon :: Editor {
         void onFrame();
         bool confirmDiscardChanges(const std::string &action, std::function<void()> proceed);
         void showPlayError(const std::string &message);
+        /// Copies the editor's input snapshot into the play session before it steps.
+        void syncPlayInput();
 
         // Toolbar actions
         void onNewClicked();
@@ -162,6 +169,9 @@ namespace Gorgon :: Editor {
         Scene savedScene_;
         CommandStack commands_;
         PlaySession play_;
+        // Keyboard/mouse snapshot the editor feeds to the play session each frame. Held state
+        // persists; pressed/released edges are cleared once the session consumed them.
+        InputState playInput_;
         // True while a viewport drag is in progress: consecutive "Move" edits collapse into one
         // undo step instead of one step per mouse move.
         bool gestureActive_ = false;

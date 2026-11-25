@@ -1,5 +1,6 @@
 #pragma once
 
+#include "InputState.h"
 #include "Scene.h"
 
 #include <memory>
@@ -26,10 +27,14 @@ namespace Gorgon :: Editor {
      * back into the scene. Stop() tears the VMs down and restores the exact pre-play snapshot, so
      * playing never dirties the scene.
      *
-     * Scripts are compiled against one library that provides:
-     *   - EntityTransform with writable x, y, rotation, scaleX, scaleY
-     *   - RegisterUpdate(handler), appended to the source by the runtime, so a script only has to
+     * Scripts are compiled against two libraries:
+     *   - EditorPlay: EntityTransform with writable x, y, rotation, scaleX, scaleY, plus
+     *     RegisterUpdate(handler), appended to the source by the runtime, so a script only has to
      *     define `function Update(self, dt)`.
+     *   - Input (bring it in with `using Input`): IsKeyDown(name), IsKeyPressed(name),
+     *     IsKeyReleased(name), IsMouseDown(button), MouseX() and MouseY(). The state they read is
+     *     whatever was pushed into GetInput() before Tick(); pressed/released are edge flags that
+     *     are cleared at the end of every Tick().
      */
     class PlaySession {
     public:
@@ -44,7 +49,13 @@ namespace Gorgon :: Editor {
         bool Start(Scene &scene, const std::string &baseDir, std::string *outError = nullptr);
 
         /// Advances all running scripts by dt seconds. dt is clamped to [0, 0.25].
+        /// Pressed/released edge flags of GetInput() are cleared at the end of the call.
         void Tick(Scene &scene, float dt);
+
+        /// Keyboard/mouse state play scripts read through `using Input`. Push the current frame's
+        /// state in before calling Tick(); it stays valid for the life of the session.
+        InputState &GetInput();
+        const InputState &GetInput() const;
 
         /// Stops the session and restores the pre-play snapshot. Safe to call repeatedly.
         void Stop(Scene &scene);

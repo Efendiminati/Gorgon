@@ -325,6 +325,25 @@ namespace Gorgon :: Editor {
         return {800, 600};
     }
 
+    Gorgon::Geometry::Pointf EditorViewport::GetMouseWorldPosition() const {
+        const auto sz = GetViewportSize();
+        return camera_.ScreenToWorld(
+            static_cast<float>(lastMouse_.X), static_cast<float>(lastMouse_.Y),
+            static_cast<float>(sz.Width), static_cast<float>(sz.Height)
+        );
+    }
+
+    bool EditorViewport::IsMouseButtonDown(Gorgon::Input::Mouse::Button btn) const {
+        using Btn = Gorgon::Input::Mouse::Button;
+        const int bits = static_cast<int>(btn) & 0x1FF;
+
+        if(bits & static_cast<int>(Btn::Left))   return mouseDown_[0];
+        if(bits & static_cast<int>(Btn::Right))  return mouseDown_[1];
+        if(bits & static_cast<int>(Btn::Middle)) return mouseDown_[2];
+
+        return false;
+    }
+
     std::string EditorViewport::resolveAssetPath(const std::string &assetPath) const {
         if(assetPath.empty()) return {};
         std::filesystem::path p(assetPath);
@@ -575,6 +594,11 @@ namespace Gorgon :: Editor {
         auto hasButton = [](Btn mask, Btn target) -> bool {
             return ((static_cast<int>(mask) & static_cast<int>(target)) & 0x1FF) != 0;
         };
+
+        // Recorded before any early return: play-in-editor reads this even with editing disabled.
+        if(hasButton(btn, Btn::Left))   mouseDown_[0] = true;
+        if(hasButton(btn, Btn::Right))  mouseDown_[1] = true;
+        if(hasButton(btn, Btn::Middle)) mouseDown_[2] = true;
 
         // Middle mouse or Space + Left mouse => Pan
         if(hasButton(btn, Btn::Middle) || (hasButton(btn, Btn::Left) && spaceHeld_)) {
@@ -856,7 +880,16 @@ namespace Gorgon :: Editor {
         }
     }
 
-    void EditorViewport::HandleMouseUp(Gorgon::Geometry::Point /*pt*/, Gorgon::Input::Mouse::Button /*btn*/) {
+    void EditorViewport::HandleMouseUp(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn) {
+        using Btn = Gorgon::Input::Mouse::Button;
+
+        // Mirror the tracking in HandleMouseDown so the play session always sees the release.
+        lastMouse_ = pt;
+        const int bits = static_cast<int>(btn) & 0x1FF;
+        if(bits & static_cast<int>(Btn::Left))   mouseDown_[0] = false;
+        if(bits & static_cast<int>(Btn::Right))  mouseDown_[1] = false;
+        if(bits & static_cast<int>(Btn::Middle)) mouseDown_[2] = false;
+
         if(dragMode_ == DragMode::MarqueeSelect) {
             const bool wasDragged = marqueeDragged_;
             const bool wasAdditive = marqueeAdditive_;

@@ -124,6 +124,13 @@ namespace Gorgon :: Editor {
         void SetShiftHeld(bool held) { shiftHeld_ = held; }
         bool IsShiftHeld() const { return shiftHeld_; }
 
+        /// Mouse state the viewport tracks from its own input layer. Play-in-editor reads it to
+        /// feed the script Input API, so it is recorded even while editing is disabled.
+        Gorgon::Geometry::Point GetLastMousePosition() const { return lastMouse_; }
+        /// Last mouse position in world units (no grid snap) — what scripts see as MouseX/MouseY.
+        Gorgon::Geometry::Pointf GetMouseWorldPosition() const;
+        bool IsMouseButtonDown(Gorgon::Input::Mouse::Button btn) const;
+
         /// Explicit viewport size override (used when running headless / in selftests without a Layerbox).
         void SetViewportSizeOverride(Gorgon::Geometry::Size sz) { sizeOverride_ = sz; }
         Gorgon::Geometry::Size GetViewportSize() const;
@@ -203,6 +210,9 @@ namespace Gorgon :: Editor {
         bool editEnabled_ = true;
         bool spaceHeld_ = false;
         bool shiftHeld_ = false;
+        // Tracked from HandleMouseDown/HandleMouseUp regardless of edit mode, so scripts keep
+        // seeing the buttons while play-in-editor has editing disabled. Order: left, right, middle.
+        bool mouseDown_[3] = {false, false, false};
         Gorgon::Geometry::Size sizeOverride_{0, 0};
 
         std::string assetBaseDir_;

@@ -25,9 +25,13 @@ namespace Gorgon :: Editor {
         std::istringstream input;
         mutable std::string output;
 
+        // Keyboard/mouse state the Input library reads. Lives here so every VM sees one state.
+        Editor::InputState inputState;
+
         Scene snapshot;
 
         std::unique_ptr<Gorgon::Scripting::Library> library;
+        std::unique_ptr<Gorgon::Scripting::Library> inputLibrary;
         Gorgon::Scripting::MappedReferenceType<ScriptTransform> *entityType = nullptr;
 
         struct ScriptState {
@@ -96,6 +100,8 @@ namespace Gorgon :: Editor {
         impl.lastError.clear();
         impl.snapshot = scene;
         impl.running = true;
+        // A key pressed while editing must not fire IsKeyPressed() on the first play frame.
+        impl.inputState.ClearEdges();
 
         impl.library = std::unique_ptr<Gorgon::Scripting::Library>(
             new Gorgon::Scripting::Library("EditorPlay", "Play-in-editor script bindings")
@@ -153,6 +159,90 @@ namespace Gorgon :: Editor {
             )
         });
 
+        // ---- Input library ---------------------------------------------------
+        // A separate library, so a script opts into the input API with `using Input`. Every
+        // function returns a value (Int for the predicates, Float for the mouse position) so the
+        // results can be used in arithmetic as well as in conditions. The state lives in the
+        // session, not in the library, so all scripts of one session share it.
+        impl.inputLibrary = std::unique_ptr<Gorgon::Scripting::Library>(
+            new Gorgon::Scripting::Library("Input", "Keyboard and mouse queries for play scripts")
+        );
+
+        auto *inputState = &impl.inputState;
+
+        auto keyQuery = [inputState](const std::string &name, const std::string &help,
+                                     bool (InputState::*query)(const std::string &) const) {
+            return new Gorgon::Scripting::Function(
+                name, help, nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [inputState, query](std::string key) -> int {
+                            return (inputState->*query)(key) ? 1 : 0;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter(
+                                "Key",
+                                "Key name such as \"W\", \"Left\", \"Space\" or \"Enter\"",
+                                Gorgon::Scripting::Types::String()
+                            )
+                        }
+                    )
+                }
+            );
+        };
+
+        impl.inputLibrary->AddMembers({
+            keyQuery("IsKeyDown", "Returns 1 while the named key is held down, 0 otherwise.",
+                     &InputState::IsKeyDown),
+            keyQuery("IsKeyPressed", "Returns 1 on the frame the named key went down, 0 otherwise.",
+                     &InputState::IsKeyPressed),
+            keyQuery("IsKeyReleased", "Returns 1 on the frame the named key went up, 0 otherwise.",
+                     &InputState::IsKeyReleased),
+            new Gorgon::Scripting::Function(
+                "IsMouseDown",
+                "Returns 1 while the named mouse button (\"Left\", \"Right\", \"Middle\") is held down.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [inputState](std::string button) -> int {
+                            return inputState->IsMouseDown(button) ? 1 : 0;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter(
+                                "Button", "Mouse button name: \"Left\", \"Right\" or \"Middle\"",
+                                Gorgon::Scripting::Types::String()
+                            )
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "MouseX",
+                "World position of the mouse on x.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [inputState]() -> float { return inputState->mouseX; },
+                        Gorgon::Scripting::Types::Float(), {}
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "MouseY",
+                "World position of the mouse on y.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [inputState]() -> float { return inputState->mouseY; },
+                        Gorgon::Scripting::Types::Float(), {}
+                    )
+                }
+            )
+        });
+
+
         for(const auto &entity : scene.GetEntities()) {
             if(!entity.script || entity.script->path.empty())
                 continue;
@@ -182,10 +272,11 @@ namespace Gorgon :: Editor {
                     new Gorgon::Scripting::VirtualMachine(true, impl.log, impl.input)
                 );
                 state->vm->AddLibrary(*impl.library);
+                state->vm->AddLibrary(*impl.inputLibrary);
 
                 // Custom libraries are not flattened into the scope automatically (only the
                 // builtin Integrals and Keywords namespaces are), so bring ours in first.
-                code += "\nusing EditorPlay\nRegisterUpdate(Update)\n";
+                code += "\nusing EditorPlay\nusing Input\nRegisterUpdate(Update)\n";
                 std::istringstream source(code);
                 Gorgon::Scripting::StreamInput input(
                     source, Gorgon::Scripting::InputProvider::Programming, full.string()
@@ -274,6 +365,10 @@ namespace Gorgon :: Editor {
 
             WriteTransform(state->values, *entity);
         }
+
+        // Edge flags belong to one frame: a press is visible to every script of this Tick and to
+        // nobody afterwards. Held keys and buttons stay down until their up event arrives.
+        impl.inputState.ClearEdges();
     }
 
     void PlaySession::Stop(Scene &scene) {
@@ -285,6 +380,7 @@ namespace Gorgon :: Editor {
         impl.scripts.clear();
         impl.compiling = nullptr;
         impl.entityType = nullptr;
+        impl.inputLibrary.reset();
         impl.library.reset();
 
         if(impl.running)
@@ -295,6 +391,14 @@ namespace Gorgon :: Editor {
 
     bool PlaySession::IsRunning() const {
         return impl_->running;
+    }
+
+    InputState &PlaySession::GetInput() {
+        return impl_->inputState;
+    }
+
+    const InputState &PlaySession::GetInput() const {
+        return impl_->inputState;
     }
 
     int PlaySession::GetScriptCount() const {

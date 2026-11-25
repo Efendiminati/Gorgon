@@ -9,6 +9,7 @@ add_library(GorgonEditorCore STATIC
     Core/SceneSerializer.cpp
     Core/CommandStack.h
     Core/CommandStack.cpp
+    Core/InputState.h
     Core/PlaySession.h
     Core/PlaySession.cpp
     Core/SceneRuntime.h

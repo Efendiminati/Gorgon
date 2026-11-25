@@ -1,5 +1,6 @@
 #pragma once
 
+#include "InputState.h"
 #include "Scene.h"
 
 #include <Gorgon/Graphics/Layer.h>
@@ -58,6 +59,13 @@ namespace Gorgon :: Editor {
      * script is attached to is exposed as `self` with writable x, y, rotation, scaleX and scaleY.
      * Unlike the editor there is no snapshot/restore: script changes stay in the scene for the
      * lifetime of the runtime (the restore-on-stop snapshot only matters for editing).
+     *
+     * Input works the same way: scripts `using Input` can call IsKeyDown/IsKeyPressed/IsKeyReleased/
+     * IsMouseDown/MouseX/MouseY. The caller owns the state — fill GetInput() before Update(dt),
+     * usually from a window (KeyNameFromCode()/MouseButtonName() turn Gorgon's keycodes and button
+     * constants into the names the API expects, and GetCamera().ScreenToWorld() turns the mouse
+     * pixel position into the world position the scripts read). Pressed/released are one-frame edge
+     * flags: Update() consumes them.
      */
     class SceneRuntime {
     public:
@@ -81,8 +89,16 @@ namespace Gorgon :: Editor {
 
         bool IsLoaded() const;
 
-        /// Steps every attached script by dt seconds (clamped to [0, 0.25]).
+        /// Steps every attached script by dt seconds (clamped to [0, 0.25]). The state pushed into
+        /// GetInput() is handed to the scripts for this step; pressed/released edge flags are
+        /// consumed here, so set them again for the next frame.
         void Update(float dt);
+
+        /// Keyboard/mouse state the scripts read. Fill it before Update(): set key and button
+        /// names through SetKeyDown()/SetMouseButtonDown() and the world-space position through
+        /// SetMousePosition(). Held state persists across Update() calls until it is released.
+        InputState &GetInput();
+        const InputState &GetInput() const;
 
         /// Draws the scene into target, using the target's own size for the camera projection.
         void Render(Gorgon::Graphics::Layer &target);

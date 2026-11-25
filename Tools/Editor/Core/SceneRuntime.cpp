@@ -108,6 +108,9 @@ namespace Gorgon :: Editor {
         RuntimeCamera camera;
         SceneRenderOptions options;
 
+        // Keyboard/mouse state the caller fills; pushed into the play session before every step.
+        InputState input;
+
         std::unique_ptr<PlaySession> play;
         std::unordered_map<std::string, std::unique_ptr<Gorgon::Graphics::Bitmap>> sprites;
 
@@ -135,6 +138,9 @@ namespace Gorgon :: Editor {
                 return;
 
             play = std::unique_ptr<PlaySession>(new PlaySession);
+            // Seed the session with the caller's held state. Start() drops the edge flags, so a key
+            // pressed before the scripts ran does not read as freshly pressed on frame one.
+            play->GetInput() = input;
             std::string error;
             if(!play->Start(scene, baseDir, &error)) {
                 lastError = error;
@@ -278,11 +284,24 @@ namespace Gorgon :: Editor {
         if(!impl.loaded || !impl.play)
             return;
 
+        // Hand the caller's state to the scripts for this step. Tick() clears the session's edge
+        // flags, so the caller's own pressed/released flags are cleared here as well — they have
+        // been delivered exactly once.
+        impl.play->GetInput() = impl.input;
         impl.play->Tick(impl.scene, dt);
+        impl.input.ClearEdges();
 
         const auto &error = impl.play->GetLastError();
         if(!error.empty())
             impl.lastError = error;
+    }
+
+    InputState &SceneRuntime::GetInput() {
+        return impl_->input;
+    }
+
+    const InputState &SceneRuntime::GetInput() const {
+        return impl_->input;
     }
 
     void SceneRuntime::Render(Gorgon::Graphics::Layer &target) {

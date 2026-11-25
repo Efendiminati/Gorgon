@@ -551,6 +551,179 @@ TEST_CASE("Play session runs a GScript and restores the snapshot", "[EditorCore]
     std::filesystem::remove_all(dir, ec);
 }
 
+TEST_CASE("Play session Input library drives an entity from simulated keys and mouse", "[EditorCore][Play][Input]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_input_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // The script only ever writes `self` when the input state says so, so every assertion below is
+    // driven by InputState and nothing else.
+    {
+        std::ofstream out(dir / "move.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Input\n"
+               "function Update(self, dt)\n"
+               "    if(IsKeyDown(\"d\"))\n"
+               "        self.x = self.x + 200 * dt\n"
+               "    end if\n"
+               "    if(IsKeyPressed(\"Space\"))\n"
+               "        self.y = self.y + 10\n"
+               "    end if\n"
+               "    if(IsKeyReleased(\"A\"))\n"
+               "        self.y = self.y - 5\n"
+               "    end if\n"
+               "    if(IsMouseDown(\"Left\"))\n"
+               "        self.x = MouseX()\n"
+               "        self.y = MouseY()\n"
+               "    end if\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &entity = scene.CreateEntity("Mover");
+    entity.transform.x = 10.0f;
+    entity.transform.y = 20.0f;
+    entity.script = ScriptComponent{"move.gs"};
+    const EntityId id = entity.id;
+
+    PlaySession session;
+    std::string error;
+    REQUIRE(session.Start(scene, dir.generic_string(), &error));
+    INFO("play start error: " << error);
+    REQUIRE(session.GetScriptCount() == 1);
+
+    const auto posX = [&]() { return scene.FindEntity(id)->transform.x; };
+    const auto posY = [&]() { return scene.FindEntity(id)->transform.y; };
+
+    // With nothing pressed the script leaves the entity alone.
+    session.Tick(scene, 0.25f);
+    REQUIRE(Catch::Approx(posX()) == 10.0);
+    REQUIRE(Catch::Approx(posY()) == 20.0);
+
+    // Held key: the name is matched case insensitively ("D" fed, "d" queried).
+    session.GetInput().SetKeyDown("D", true);
+    session.Tick(scene, 0.25f);
+    REQUIRE(Catch::Approx(posX()) == 60.0);
+    session.Tick(scene, 0.25f);
+    REQUIRE(Catch::Approx(posX()) == 110.0);
+
+    // A press is an edge: it fires on the frame it arrives and the tick clears it.
+    session.GetInput().SetKeyDown("Space", true);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(posY()) == 30.0);
+    REQUIRE_FALSE(session.GetInput().IsKeyPressed("Space"));
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(posY()) == 30.0);
+
+    // A release without a matching press is not an edge, a real one is.
+    session.GetInput().SetKeyDown("A", false);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(posY()) == 30.0);
+    session.GetInput().SetKeyDown("A", true);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(posY()) == 30.0);
+    session.GetInput().SetKeyDown("A", false);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(posY()) == 25.0);
+
+    // Mouse world position and button state reach the script; Float results are written back
+    // through the typed transform accessors without corrupting the float members.
+    session.GetInput().SetMousePosition(320.0f, -64.0f);
+    session.GetInput().SetMouseButtonDown("Left", true);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(posX()) == 320.0);
+    REQUIRE(Catch::Approx(posY()) == -64.0);
+
+    // Releasing the button stops the mouse term; the still held "d" key keeps moving x again.
+    session.GetInput().SetMouseButtonDown("Left", false);
+    session.Tick(scene, 0.25f);
+    REQUIRE(Catch::Approx(posX()) == 370.0);
+    REQUIRE(Catch::Approx(posY()) == -64.0);
+
+    // Unknown names never throw and never report a press.
+    REQUIRE_FALSE(session.GetInput().IsKeyDown("Nope"));
+    REQUIRE_FALSE(session.GetInput().IsKeyPressed("Nope"));
+    REQUIRE_FALSE(session.GetInput().IsMouseDown("Nope"));
+
+    // Alias spellings resolve to the same key.
+    REQUIRE(session.GetInput().IsKeyDown(" d "));
+    session.GetInput().SetKeyDown("Return", true);
+    REQUIRE(session.GetInput().IsKeyDown("enter"));
+
+    // Stop restores the snapshot; the input state is not part of the scene.
+    session.Stop(scene);
+    REQUIRE(Catch::Approx(posX()) == 10.0);
+    REQUIRE(Catch::Approx(posY()) == 20.0);
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("SceneRuntime forwards its InputState to the scripts and consumes edges", "[EditorCore][Runtime][Input]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_runtime_input_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    {
+        std::ofstream out(dir / "steer.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Input\n"
+               "function Update(self, dt)\n"
+               "    if(IsKeyDown(\"Right\"))\n"
+               "        self.x = self.x + 100 * dt\n"
+               "    end if\n"
+               "    if(IsKeyPressed(\"Up\"))\n"
+               "        self.y = self.y + 1\n"
+               "    end if\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &hero = scene.CreateEntity("Hero");
+    hero.transform.x = 0.0f;
+    hero.transform.y = 0.0f;
+    hero.script = ScriptComponent{"steer.gs"};
+
+    SceneRuntime runtime;
+    std::string error;
+    REQUIRE(runtime.LoadFromScene(scene, dir.generic_string(), &error));
+    INFO("runtime load error: " << error);
+    REQUIRE(runtime.GetScriptCount() == 1);
+
+    // Nothing pressed: the runtime still steps without touching the transform.
+    runtime.Update(0.25f);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(hero.id)->transform.x) == 0.0);
+
+    // Held key persists across Update() calls.
+    runtime.GetInput().SetKeyDown("Right", true);
+    runtime.Update(0.25f);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(hero.id)->transform.x) == 25.0);
+    runtime.Update(0.25f);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(hero.id)->transform.x) == 50.0);
+
+    // A press reaches the script once and the runtime clears the edge afterwards.
+    runtime.GetInput().SetKeyDown("Up", true);
+    runtime.Update(0.0f);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(hero.id)->transform.y) == 1.0);
+    REQUIRE_FALSE(runtime.GetInput().IsKeyPressed("Up"));
+    runtime.Update(0.0f);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(hero.id)->transform.y) == 1.0);
+
+    // Key names are translated from Gorgon's keycodes for callers that bind a window.
+    REQUIRE(KeyNameFromCode(Gorgon::Input::Keyboard::Keycodes::Left) == "left");
+    REQUIRE(KeyNameFromCode(Gorgon::Input::Keyboard::Keycodes::Space) == "space");
+    REQUIRE(KeyNameFromCode(Gorgon::Input::Keyboard::Keycodes::A) == "a");
+    REQUIRE(KeyNameFromCode(0x7FFFFF).empty());
+    REQUIRE(MouseButtonName(Gorgon::Input::Mouse::Button::Middle) == "middle");
+    REQUIRE(NormalizeInputName("LMB") == "left");
+    REQUIRE(NormalizeInputName("ArrowUp") == "up");
+
+    std::filesystem::remove_all(dir, ec);
+}
+
 TEST_CASE("SceneRuntime loads a scene file, resolves paths and steps scripts", "[EditorCore][Runtime]") {
     const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_runtime_test";
     std::error_code ec;

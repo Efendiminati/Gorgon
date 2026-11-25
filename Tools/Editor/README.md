@@ -242,6 +242,89 @@ function Update(self, dt)
 end function
 ```
 
+## Script input (keyboard and mouse)
+
+Scripts reach the keyboard and mouse through the `Input` library. It is a separate library, so a
+script opts in with a `using Input` line; nothing is implicit.
+
+| Function | Returns | Meaning |
+| --- | --- | --- |
+| `IsKeyDown(name)` | Int (`1`/`0`) | Key is held down this frame. |
+| `IsKeyPressed(name)` | Int (`1`/`0`) | Key went down on this frame only. |
+| `IsKeyReleased(name)` | Int (`1`/`0`) | Key went up on this frame only. |
+| `IsMouseDown(button)` | Int (`1`/`0`) | Mouse button is held. |
+| `MouseX()`, `MouseY()` | Float | Mouse position in **world** units (not viewport pixels, no grid snap). |
+
+Key names are matched case- and whitespace-insensitively, so `"W"`, `"w"` and `" w "` are the same
+query, and `"Return"`/`"Enter"`, `"Esc"`/`"Escape"`, `"ArrowLeft"`/`"Left"` are folded onto one form.
+The exposed names are `a`–`z`, `0`–`9`, `left`, `right`, `up`, `down`, `space`, `enter`, `escape`,
+`tab`, `backspace`, `delete`, `insert`, `home`, `end`, `pageup`, `pagedown`, `shift`, `control`,
+`alt`, `meta` and `f1`–`f12`. Buttons are `left`, `right` and `middle` (`LMB`/`RMB`/`MMB` also work).
+An unknown name simply reports `0`; it never errors.
+
+Pressed and released are **edge flags for exactly one frame**: `PlaySession::Tick()` and
+`SceneRuntime::Update()` clear them at the end of the step, so every script sees a press once and a
+held key keeps reporting `IsKeyDown` until the release arrives.
+
+```
+using Input
+
+speed = 0.0
+
+function Update(self, dt)
+    # held key: continuous movement
+    if IsKeyDown("d") then
+        self.x = self.x + 200 * dt
+    end if
+
+    # edge: fire once per press
+    if IsKeyPressed("Space") then
+        speed = 600.0
+    end if
+
+    # mouse: follow the pointer while the left button is held
+    if IsMouseDown("Left") then
+        self.x = MouseX()
+        self.y = MouseY()
+    end if
+
+    return 0
+end function
+```
+
+### Feeding the input state
+
+The engine never reads a device itself — whoever owns the frame loop fills an `InputState`:
+
+- **Play-in-editor** does it for you: `EditorApp` mirrors every `KeyPreviewEvent` into the session,
+  and the viewport reports the pointer position and button state, converted to world units with its
+  own camera. Scripts therefore see the same coordinates the viewport draws.
+- **`SceneRuntime`** exposes `GetInput()` and expects you to fill it before `Update(dt)`:
+
+```cpp
+window.KeyPreviewEvent.Register([&](Gorgon::Input::Key key, float state) {
+    const auto name = Gorgon::Editor::KeyNameFromCode(key);   // "w", "left", "space", ...
+    if(!name.empty())
+        runtime.GetInput().SetKeyDown(name, state > 0.0f);
+});
+
+window.MouseEvent.Register([&](Gorgon::Input::Mouse::Button btn, float state) {
+    const auto name = Gorgon::Editor::MouseButtonName(btn);   // "left", "right", "middle"
+    if(!name.empty())
+        runtime.GetInput().SetMouseButtonDown(name, state > 0.0f);
+});
+
+// per frame, before runtime.Update(dt)
+const auto world = runtime.GetCamera().ScreenToWorld(mouseX, mouseY, size.Width, size.Height);
+runtime.GetInput().SetMousePosition(world.X, world.Y);
+runtime.Update(Gorgon::Time::DeltaTime() / 1000.0f);
+```
+
+Edge flags you set are consumed by the following `Update()`, so set them again for the next frame;
+held state persists until you clear it. `InputState::Reset()` forgets everything, `ClearEdges()` only
+drops the one-frame flags. Tests (and scripted demos) drive the same struct directly, which is how
+`--selftest` and the `[Input]` Catch2 cases exercise a real `.gs` script without a keyboard.
+
 ## Loading a scene in a Gorgon game
 
 `SceneRuntime` is the only class a game needs; it lives in `GorgonEditorCore`

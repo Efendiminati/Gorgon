@@ -1,4 +1,5 @@
 #include "Core/Scene.h"
+#include "Core/SceneRuntime.h"
 #include "Core/SceneSerializer.h"
 #include "EditorApp.h"
 #include "EditorTheme.h"
@@ -50,6 +51,7 @@ namespace {
     int RunMultiSelectSelfTest();
     int RunCopyPasteSelfTest();
     int RunPrefabSelfTest();
+    int RunInputSelfTest();
 
     int RunSelfTest() {
         using namespace Gorgon::Editor;
@@ -231,7 +233,11 @@ namespace {
             return prefabResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, round-trip, asset browser)\n";
+        if(const int inputResult = RunInputSelfTest()) {
+            return inputResult;
+        }
+
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, round-trip, asset browser)\n";
         return 0;
     }
 
@@ -707,6 +713,231 @@ namespace {
         library.SetFilter(AssetType::Prefabs);
         if(library.GetVisibleCount() != 1 || library.GetVisible()[0].type != AssetType::Prefabs) {
             std::cerr << "FAIL: Prefabs filter did not isolate the .gprefab.json file\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        std::filesystem::remove_all(dir, ec);
+        return 0;
+    }
+
+    /// Script input: a real .gs script driven by an InputState the test fills by hand, through both
+    /// PlaySession (play-in-editor) and SceneRuntime (game side).
+    int RunInputSelfTest() {
+        using namespace Gorgon::Editor;
+
+        std::error_code ec;
+        const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_input_selftest";
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+
+        {
+            std::ofstream out(dir / "input_move.gs", std::ios::binary | std::ios::trunc);
+            if(!out.good()) {
+                std::cerr << "FAIL: could not write the input test script\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            out << "using Input\n"
+                   "function Update(self, dt)\n"
+                   "    if(IsKeyDown(\"d\"))\n"
+                   "        self.x = self.x + 200 * dt\n"
+                   "    end if\n"
+                   "    if(IsKeyPressed(\"Space\"))\n"
+                   "        self.y = self.y + 10\n"
+                   "    end if\n"
+                   "    if(IsKeyReleased(\"A\"))\n"
+                   "        self.y = self.y - 5\n"
+                   "    end if\n"
+                   "    if(IsMouseDown(\"Left\"))\n"
+                   "        self.x = MouseX()\n"
+                   "        self.y = MouseY()\n"
+                   "    end if\n"
+                   "    return 0\n"
+                   "end function\n";
+        }
+
+        // ---- PlaySession -----------------------------------------------------
+        {
+            Scene scene;
+            Entity &entity = scene.CreateEntity("Mover");
+            entity.transform.x = 10.0f;
+            entity.transform.y = 20.0f;
+            entity.script = ScriptComponent{"input_move.gs"};
+            const EntityId id = entity.id;
+
+            PlaySession session;
+            std::string error;
+            if(!session.Start(scene, dir.generic_string(), &error)) {
+                std::cerr << "FAIL: script using Input did not start: " << error << "\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            if(session.GetScriptCount() != 1) {
+                std::cerr << "FAIL: input selftest compiled " << session.GetScriptCount() << " scripts\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            const auto x = [&]() { return scene.FindEntity(id)->transform.x; };
+            const auto y = [&]() { return scene.FindEntity(id)->transform.y; };
+
+            session.Tick(scene, 0.25f);
+            if(!Approx(x(), 10.0f) || !Approx(y(), 20.0f)) {
+                std::cerr << "FAIL: script moved the entity without input\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            // Held key: "D" is fed, the script asks for "d".
+            session.GetInput().SetKeyDown("D", true);
+            session.Tick(scene, 0.25f);
+            if(!Approx(x(), 60.0f)) {
+                std::cerr << "FAIL: IsKeyDown did not move the entity (x=" << x() << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            session.Tick(scene, 0.25f);
+            if(!Approx(x(), 110.0f)) {
+                std::cerr << "FAIL: held key did not keep moving the entity (x=" << x() << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            // Pressed is a one-frame edge.
+            session.GetInput().SetKeyDown("Space", true);
+            session.Tick(scene, 0.0f);
+            if(!Approx(y(), 30.0f)) {
+                std::cerr << "FAIL: IsKeyPressed did not fire (y=" << y() << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            if(session.GetInput().IsKeyPressed("Space")) {
+                std::cerr << "FAIL: pressed edge was not cleared by Tick\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            session.Tick(scene, 0.0f);
+            if(!Approx(y(), 30.0f)) {
+                std::cerr << "FAIL: IsKeyPressed fired twice (y=" << y() << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            // Released is an edge too, and an unmatched release is not one.
+            session.GetInput().SetKeyDown("A", false);
+            session.Tick(scene, 0.0f);
+            if(!Approx(y(), 30.0f)) {
+                std::cerr << "FAIL: unmatched release produced an edge (y=" << y() << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            session.GetInput().SetKeyDown("A", true);
+            session.Tick(scene, 0.0f);
+            session.GetInput().SetKeyDown("A", false);
+            session.Tick(scene, 0.0f);
+            if(!Approx(y(), 25.0f)) {
+                std::cerr << "FAIL: IsKeyReleased did not fire (y=" << y() << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            // Mouse: world position plus button state.
+            session.GetInput().SetMousePosition(320.0f, -64.0f);
+            session.GetInput().SetMouseButtonDown("Left", true);
+            session.Tick(scene, 0.0f);
+            if(!Approx(x(), 320.0f) || !Approx(y(), -64.0f)) {
+                std::cerr << "FAIL: MouseX/MouseY did not reach the script ("
+                          << x() << ", " << y() << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            session.GetInput().SetMouseButtonDown("Left", false);
+            session.Tick(scene, 0.25f);
+            if(!Approx(x(), 370.0f)) {
+                std::cerr << "FAIL: IsMouseDown stayed true after release (x=" << x() << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            session.Stop(scene);
+            if(!Approx(scene.FindEntity(id)->transform.x, 10.0f)) {
+                std::cerr << "FAIL: stop did not restore the scene\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+        }
+
+        // ---- SceneRuntime ----------------------------------------------------
+        {
+            Scene scene;
+            Entity &hero = scene.CreateEntity("Hero");
+            hero.script = ScriptComponent{"input_move.gs"};
+            const EntityId id = hero.id;
+
+            SceneRuntime runtime;
+            std::string error;
+            if(!runtime.LoadFromScene(scene, dir.generic_string(), &error) || runtime.GetScriptCount() != 1) {
+                std::cerr << "FAIL: runtime did not start the input script: " << error << "\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            runtime.GetInput().SetKeyDown("Right", true);   // not used by the script
+            runtime.GetInput().SetKeyDown("D", true);
+            runtime.Update(0.25f);
+            runtime.Update(0.25f);
+            if(!Approx(runtime.GetScene().FindEntity(id)->transform.x, 100.0f)) {
+                std::cerr << "FAIL: runtime held key did not move the entity (x="
+                          << runtime.GetScene().FindEntity(id)->transform.x << ")\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            runtime.GetInput().SetKeyDown("Space", true);
+            runtime.Update(0.0f);
+            if(!Approx(runtime.GetScene().FindEntity(id)->transform.y, 10.0f)) {
+                std::cerr << "FAIL: runtime press edge did not reach the script\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            if(runtime.GetInput().IsKeyPressed("Space")) {
+                std::cerr << "FAIL: runtime did not consume the press edge\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            runtime.Update(0.0f);
+            if(!Approx(runtime.GetScene().FindEntity(id)->transform.y, 10.0f)) {
+                std::cerr << "FAIL: runtime press edge fired twice\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+        }
+
+        // ---- Name translation ------------------------------------------------
+        namespace Keys = Gorgon::Input::Keyboard::Keycodes;
+        if(KeyNameFromCode(Keys::W) != "w" || KeyNameFromCode(Keys::Left) != "left" ||
+           KeyNameFromCode(Keys::Down) != "down" || KeyNameFromCode(Keys::Enter) != "enter" ||
+           KeyNameFromCode(Keys::Escape) != "escape") {
+            std::cerr << "FAIL: keycode to name translation is wrong\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        if(MouseButtonName(Gorgon::Input::Mouse::Button::Left) != "left" ||
+           MouseButtonName(Gorgon::Input::Mouse::Button::Right) != "right" ||
+           MouseButtonName(Gorgon::Input::Mouse::Button::Middle) != "middle") {
+            std::cerr << "FAIL: mouse button to name translation is wrong\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        if(NormalizeInputName("Return") != "enter" || NormalizeInputName(" D ") != "d" ||
+           NormalizeInputName("ArrowUp") != "up") {
+            std::cerr << "FAIL: input name normalization is wrong\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        if(KeyNameFromCode(0x7FFFFF).empty() == false) {
+            std::cerr << "FAIL: unknown keycode produced a name\n";
             std::filesystem::remove_all(dir, ec);
             return 1;
         }
@@ -1753,8 +1984,12 @@ int main(int argc, char *argv[]) {
                     std::ofstream script(playDir / "spin.gs", std::ios::binary | std::ios::trunc);
                     if(!script.good())
                         return fail("could not write the play test script");
-                    script << "function Update(self, dt)\n"
+                    script << "using Input\n"
+                              "function Update(self, dt)\n"
                               "    self.x = self.x + 100 * dt\n"
+                              "    if(IsKeyDown(\"D\"))\n"
+                              "        self.x = self.x + 50 * dt\n"
+                              "    end if\n"
                               "    self.rotation = self.rotation + 90 * dt\n"
                               "    return 0\n"
                               "end function\n";
@@ -1784,6 +2019,23 @@ int main(int argc, char *argv[]) {
                 if(std::abs(playMovedX - (playStartX + 25.0f)) > 1e-2f) {
                     return fail("phase 5 play script did not move the entity (got "
                                 + std::to_string(playMovedX) + ")");
+                }
+
+                // Input through the real path a keypress takes: window KeyPreviewEvent ->
+                // EditorApp -> play session -> GScript Input library.
+                window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::D, 1.0f);
+                app.TickPlay(0.25f);
+                const float holdingX = scene.FindEntity(picked)->transform.x;
+                if(std::abs(holdingX - (playMovedX + 37.5f)) > 1e-2f) {
+                    return fail("play script did not see the held key (got "
+                                + std::to_string(holdingX) + ")");
+                }
+                window.KeyPreviewEvent(Gorgon::Input::Keyboard::Keycodes::D, 0.0f);
+                app.TickPlay(0.25f);
+                const float releasedX = scene.FindEntity(picked)->transform.x;
+                if(std::abs(releasedX - (holdingX + 25.0f)) > 1e-2f) {
+                    return fail("play script kept moving after the key was released (got "
+                                + std::to_string(releasedX) + ")");
                 }
 
                 app.StopPlay();

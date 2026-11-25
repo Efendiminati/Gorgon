@@ -168,6 +168,13 @@ namespace Gorgon :: Editor {
         {
             window_.KeyPreviewEvent.Register([this](Gorgon::Input::Key key, float amount) {
                 namespace Keys = Gorgon::Input::Keyboard::Keycodes;
+
+                // Every key the input API knows also feeds the play session: a running script reads
+                // IsKeyDown/IsKeyPressed/IsKeyReleased by name, not just the editor's modifiers.
+                const std::string name = KeyNameFromCode(key);
+                if(!name.empty())
+                    playInput_.SetKeyDown(name, amount > 0.0f);
+
                 if(key == Keys::Space) {
                     viewport_.SetSpaceHeld(amount > 0.0f);
                 } else if(key == Keys::Shift || key == Keys::RShift) {
@@ -668,8 +675,26 @@ namespace Gorgon :: Editor {
         if(playMode_ != PlayMode::Playing)
             return;
 
+        syncPlayInput();
         play_.Tick(scene_, dt);
+        // The session consumed this frame's edges. Clearing the editor's copy keeps a press from
+        // being delivered again on the next frame.
+        playInput_.ClearEdges();
         viewport_.Redraw();
+    }
+
+    void EditorApp::syncPlayInput() {
+        using Btn = Gorgon::Input::Mouse::Button;
+
+        // The viewport records the pointer even while editing is disabled, which is exactly what
+        // play-in-editor needs.
+        const auto world = viewport_.GetMouseWorldPosition();
+        playInput_.SetMousePosition(world.X, world.Y);
+        playInput_.SetMouseButtonDown("Left", viewport_.IsMouseButtonDown(Btn::Left));
+        playInput_.SetMouseButtonDown("Right", viewport_.IsMouseButtonDown(Btn::Right));
+        playInput_.SetMouseButtonDown("Middle", viewport_.IsMouseButtonDown(Btn::Middle));
+
+        play_.GetInput() = playInput_;
     }
 
     bool EditorApp::StartPlay(std::string *outError) {
@@ -690,6 +715,10 @@ namespace Gorgon :: Editor {
                 *outError = error;
             return false;
         }
+
+        // Keys pressed while editing must not read as freshly pressed on the first play frame.
+        playInput_.ClearEdges();
+        play_.GetInput() = playInput_;
 
         playMode_ = PlayMode::Playing;
         gestureActive_ = false;
@@ -725,6 +754,8 @@ namespace Gorgon :: Editor {
 
         playMode_ = PlayMode::Stopped;
         viewport_.SetEditEnabled(true);
+        // Play input belongs to the session; nothing queued during it may fire on the next one.
+        playInput_.ClearEdges();
 
         // The restored snapshot is the committed state; playing never dirties the scene.
         lastCommittedScene_ = scene_;
