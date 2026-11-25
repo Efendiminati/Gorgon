@@ -9,10 +9,14 @@ namespace Gorgon :: Editor {
     namespace {
         constexpr float kPi = 3.14159265358979323846f;
         constexpr float kDegToRad = kPi / 180.0f;
+        constexpr float kRadToDeg = 180.0f / kPi;
         constexpr float kDefaultEntitySize = 64.0f;
         constexpr float kHandleSizePx = 8.0f;
         constexpr float kHandleHitRadiusPx = 9.0f;
         constexpr float kAxisLengthPx = 56.0f;
+        constexpr float kRotateStemPx = 28.0f;
+        constexpr float kRotateHandleRadiusPx = 6.0f;
+        constexpr float kRotateSnapDeg = 15.0f;
 
         Gorgon::Graphics::RGBAf ToRGBAf(const ColorRGBA &c) {
             return Gorgon::Graphics::RGBAf(
@@ -260,6 +264,28 @@ namespace Gorgon :: Editor {
         };
     }
 
+    Gorgon::Geometry::Pointf EditorViewport::ComputeRotateHandleScreenPos(const Entity &entity, float viewW, float viewH) const {
+        const auto wc = ComputeEntityWorldCorners(entity);
+        const auto sc0 = camera_.WorldToScreen(wc[0].X, wc[0].Y, viewW, viewH);
+        const auto sc1 = camera_.WorldToScreen(wc[1].X, wc[1].Y, viewW, viewH);
+        const Gorgon::Geometry::Pointf topMid{(sc0.X + sc1.X) * 0.5f, (sc0.Y + sc1.Y) * 0.5f};
+
+        const Transform wt = scene_.GetWorldTransform(entity.id);
+        const auto center = camera_.WorldToScreen(wt.x, wt.y, viewW, viewH);
+        float ux = topMid.X - center.X;
+        float uy = topMid.Y - center.Y;
+        const float len = std::sqrt(ux * ux + uy * uy);
+        if(len > 1e-3f) {
+            ux /= len;
+            uy /= len;
+        } else {
+            const float rad = wt.rotation * kDegToRad;
+            ux = std::sin(rad);
+            uy = -std::cos(rad);
+        }
+        return {topMid.X + ux * kRotateStemPx, topMid.Y + uy * kRotateStemPx};
+    }
+
     float EditorViewport::snapValue(float value) const {
         if(!gridSnap_) return value;
         const int gs = std::max(1, scene_.settings.gridSize);
@@ -305,6 +331,12 @@ namespace Gorgon :: Editor {
         const float viewW = static_cast<float>(sz.Width);
         const float viewH = static_cast<float>(sz.Height);
         const float hitSq = kHandleHitRadiusPx * kHandleHitRadiusPx;
+
+        // 0. Rotation handle (above top-center edge)
+        const auto rotPos = ComputeRotateHandleScreenPos(*e, viewW, viewH);
+        if(DistSq(sx, sy, rotPos.X, rotPos.Y) <= hitSq) {
+            return GizmoHandle::Rotate;
+        }
 
         // 1. Corner scale handles
         const auto corners = ComputeEntityWorldCorners(*e);
@@ -372,6 +404,12 @@ namespace Gorgon :: Editor {
                     dragMode_ = DragMode::MoveEntityX;
                 } else if(handle == GizmoHandle::TranslateY) {
                     dragMode_ = DragMode::MoveEntityY;
+                } else if(handle == GizmoHandle::Rotate) {
+                    dragMode_ = DragMode::RotateEntity;
+                    dragStartAngleDeg_ = std::atan2(
+                        dragStartWorld_.Y - dragStartWorldTransform_.y,
+                        dragStartWorld_.X - dragStartWorldTransform_.x
+                    ) * kRadToDeg;
                 } else {
                     dragMode_ = DragMode::ScaleEntity;
                 }
@@ -489,6 +527,31 @@ namespace Gorgon :: Editor {
                     if(OnSceneModified) OnSceneModified();
                 }
             }
+        } else if(dragMode_ == DragMode::RotateEntity) {
+            Entity *e = scene_.FindEntity(selectedEntity_);
+            if(e && !e->locked) {
+                const float dx = worldNow.X - dragStartWorldTransform_.x;
+                const float dy = worldNow.Y - dragStartWorldTransform_.y;
+                if(dx * dx + dy * dy > 1e-4f) {
+                    const float currentAngleDeg = std::atan2(dy, dx) * kRadToDeg;
+                    float deltaDeg = currentAngleDeg - dragStartAngleDeg_;
+                    while(deltaDeg > 180.0f) deltaDeg -= 360.0f;
+                    while(deltaDeg < -180.0f) deltaDeg += 360.0f;
+
+                    float newRot = dragStartLocalTransform_.rotation + deltaDeg;
+                    if(gridSnap_) {
+                        newRot = std::round(newRot / kRotateSnapDeg) * kRotateSnapDeg;
+                    }
+                    while(newRot > 180.0f) newRot -= 360.0f;
+                    while(newRot <= -180.0f) newRot += 360.0f;
+
+                    if(e->transform.rotation != newRot) {
+                        e->transform.rotation = newRot;
+                        Redraw();
+                        if(OnSceneModified) OnSceneModified();
+                    }
+                }
+            }
         }
 
         if(OnStatusChanged) {
@@ -500,7 +563,8 @@ namespace Gorgon :: Editor {
         const bool wasEditing = dragMode_ == DragMode::MoveEntity ||
                                 dragMode_ == DragMode::MoveEntityX ||
                                 dragMode_ == DragMode::MoveEntityY ||
-                                dragMode_ == DragMode::ScaleEntity;
+                                dragMode_ == DragMode::ScaleEntity ||
+                                dragMode_ == DragMode::RotateEntity;
         dragMode_ = DragMode::None;
         activeHandle_ = GizmoHandle::None;
         if(wasEditing && OnInteractionChanged) OnInteractionChanged(false);
@@ -539,6 +603,18 @@ namespace Gorgon :: Editor {
             Gorgon::Geometry::Pointf{x1 - nx, y1 - ny},
             color
         );
+    }
+
+    void EditorViewport::drawFilledCircle(float cx, float cy, float radius, Gorgon::Graphics::RGBAf color) {
+        constexpr int kSegments = 16;
+        const Gorgon::Geometry::Pointf center{cx, cy};
+        Gorgon::Geometry::Pointf prev{cx + radius, cy};
+        for(int i = 1; i <= kSegments; ++i) {
+            const float a = (2.0f * kPi * static_cast<float>(i)) / static_cast<float>(kSegments);
+            const Gorgon::Geometry::Pointf curr{cx + std::cos(a) * radius, cy + std::sin(a) * radius};
+            gfxLayer_.Draw(center, prev, curr, center, color);
+            prev = curr;
+        }
     }
 
     void EditorViewport::drawRectOutline(const std::array<Gorgon::Geometry::Pointf, 4> &pts, float thickness, Gorgon::Graphics::RGBAf color) {
@@ -688,6 +764,16 @@ namespace Gorgon :: Editor {
             gfxLayer_.Draw(sc[i].X - half - 1.0f, sc[i].Y - half - 1.0f, hs + 2.0f, hs + 2.0f, Gorgon::Graphics::RGBAf(0.08f, 0.10f, 0.14f, 1.0f));
             gfxLayer_.Draw(sc[i].X - half, sc[i].Y - half, hs, hs, Gorgon::Graphics::RGBAf(0.95f, 0.97f, 1.0f, 1.0f));
         }
+
+        // Rotation handle (stem from top-center edge + circular knob)
+        const Gorgon::Geometry::Pointf topMid{(sc[0].X + sc[1].X) * 0.5f, (sc[0].Y + sc[1].Y) * 0.5f};
+        const auto rotPos = ComputeRotateHandleScreenPos(*e, viewW, viewH);
+        drawLine(topMid.X, topMid.Y, rotPos.X, rotPos.Y, 1.5f, selColor);
+        drawFilledCircle(rotPos.X, rotPos.Y, kRotateHandleRadiusPx + 1.5f, Gorgon::Graphics::RGBAf(0.08f, 0.10f, 0.14f, 1.0f));
+        const Gorgon::Graphics::RGBAf rotFill = (dragMode_ == DragMode::RotateEntity)
+            ? Gorgon::Graphics::RGBAf(1.0f, 0.85f, 0.25f, 1.0f)
+            : Gorgon::Graphics::RGBAf(0.22f, 0.74f, 0.97f, 1.0f);
+        drawFilledCircle(rotPos.X, rotPos.Y, kRotateHandleRadiusPx, rotFill);
 
         // Translate X (red) and Y (green) arrows from entity center
         const Transform wt = scene_.GetWorldTransform(e->id);

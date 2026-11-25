@@ -45,7 +45,8 @@ namespace Gorgon :: Editor {
         ScaleTL,
         ScaleTR,
         ScaleBR,
-        ScaleBL
+        ScaleBL,
+        Rotate
     };
 
     class EditorViewport {
@@ -97,6 +98,7 @@ namespace Gorgon :: Editor {
         GizmoHandle HitTestGizmo(float sx, float sy) const;
         Gorgon::Geometry::Pointf ComputeEntityBaseSize(const Entity &entity) const;
         std::array<Gorgon::Geometry::Pointf, 4> ComputeEntityWorldCorners(const Entity &entity) const;
+        Gorgon::Geometry::Pointf ComputeRotateHandleScreenPos(const Entity &entity, float viewW, float viewH) const;
 
         /// Mouse event handlers (called by Input::Layer and testable directly)
         void HandleMouseDown(Gorgon::Geometry::Point pt, Gorgon::Input::Mouse::Button btn);
@@ -126,7 +128,8 @@ namespace Gorgon :: Editor {
             MoveEntity,
             MoveEntityX,
             MoveEntityY,
-            ScaleEntity
+            ScaleEntity,
+            RotateEntity
         };
 
         const CachedSprite *getOrLoadSprite(const std::string &assetPath) const;
@@ -134,6 +137,7 @@ namespace Gorgon :: Editor {
         float snapValue(float value) const;
 
         void drawLine(float x1, float y1, float x2, float y2, float thickness, Gorgon::Graphics::RGBAf color);
+        void drawFilledCircle(float cx, float cy, float radius, Gorgon::Graphics::RGBAf color);
         void drawRectOutline(const std::array<Gorgon::Geometry::Pointf, 4> &pts, float thickness, Gorgon::Graphics::RGBAf color);
         void drawGrid(float viewW, float viewH);
         void drawEntities(float viewW, float viewH);
@@ -163,6 +167,7 @@ namespace Gorgon :: Editor {
         Gorgon::Geometry::Pointf dragStartWorld_{0.0f, 0.0f};
         Transform dragStartLocalTransform_;
         Transform dragStartWorldTransform_;
+        float dragStartAngleDeg_ = 0.0f;
     };
 
 } // namespace Gorgon::Editor
