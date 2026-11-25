@@ -146,6 +146,14 @@ Entity fields (`id` is required, everything else optional):
 | `sprite` | object | none | `asset` (path to a png/jpg/bmp) and `tint` (`[r,g,b,a]`, multiplied into the sprite). |
 | `collider` | object | none | `type`: `"none"`, `"aabb"` or `"circle"`; `w`/`h` for AABBs, `radius` for circles, `offsetX`/`offsetY` relative to the entity centre. |
 | `script` | object | none | `path` to a `.gs` file with an `Update(self, dt)` function. |
+| `tags` | string[] | none | Free-form labels; `Scene.FindByTag`/`HasTag` read them. Omitted when empty. |
+| `properties` | object | none | String key/value pairs a script reads and writes with `Scene.GetProp`/`SetProp`. |
+| `spriteAnim` | object | none | Sprite-sheet animation: `asset`, `frameW`, `frameH`, `frameCount`, `fps`, `loop`, `playing`, `currentFrame`, `tint`. |
+| `text` | object | none | `text`, `color`, `fontSize`, `style`, and `align` (`left`/`center`/`right`). |
+| `audio` | object | none | `asset`, `volume` (0–1), `loop`, `playOnStart`. |
+| `camera` | object | none | `active`, `zoom`, `followTarget` entity id. |
+| `tilemap` | object | none | `tileW`, `tileH`, `cols`, `rows`, `tilesetCols`, `tilesetAsset` and a row-major `tiles` array (`-1` is an empty cell). |
+| `particles` | object | none | `emitRate` (per second), `lifetime`, `speed`, `startColor`, `endColor`, `size`, `active`. |
 | `prefabSource` | string | none | Path to the `.gprefab.json` this entity was instantiated from. Omitted when empty. |
 
 Notes:
@@ -159,6 +167,36 @@ Notes:
   the rest of the scene's ids intact, so references in scripts/tools stay valid.
 - **`prefabSource` is optional and additive.** It only records which prefab an entity came from;
   a scene written by an older editor loads unchanged, and scenes without prefabs never emit it.
+
+### Expanded components
+
+All of the following are optional and additive: a scene written before they existed loads
+unchanged, and each one is only written back when an entity carries it.
+
+| Component | Stepped by | What it does |
+| --- | --- | --- |
+| `spriteAnim` | `PlaySession::Tick` / `SceneRuntime::Update` | Splits the sheet into `frameW x frameH` cells, row-major, and advances `currentFrame` at `fps`. `loop = false` stops on the last frame (and clears `playing`). |
+| `text` | renderer | Drawn at the entity origin. `SceneRuntime::SetTextPrinter()` takes the host's `StyledPrinter`; without one a placeholder quad is drawn (headless runs have no font). |
+| `audio` | step | `playOnStart` fires the asset once per play session through the same path `Audio::PlaySound` uses, so it is recorded even without an audio device. |
+| `camera` | step | The first active component owns the projection: `zoom`, centred on `followTarget` (or on the camera entity). It overrides a script's `SetCameraPos`. |
+| `tilemap` | renderer | One quad per cell, textured from `tilesetAsset` (row-major with `tilesetCols` columns) or coloured per tile index when there is no tileset. |
+| `particles` | step | CPU emitter: `emitRate` particles per second, each living `lifetime` seconds and moving `speed` units/s from the emitter origin, coloured from `startColor` to `endColor`. Live particles live in the runtime, never in the scene file. |
+
+Tags and properties are plain entity metadata: the inspector edits tags as a comma-separated list,
+and scripts read/write both through `using Scene`:
+
+| Function | Returns | Meaning |
+| --- | --- | --- |
+| `FindByTag(tag)` | Int | first entity carrying the tag, `0` when there is none |
+| `FindAllByTag(tag)` | Int | number of entities carrying the tag |
+| `GetTaggedEntity(tag, index)` | Int | id of the index-th entity carrying the tag |
+| `HasTag(id, tag)` | Int | `1` when the entity carries the tag |
+| `AddTag(id, tag)` | Int | `1` when the tag was added |
+| `GetProp(id, key)` | String | property value, empty when the key does not exist |
+| `SetProp(id, key, value)` | Int | `1` when written |
+
+The inspector adds and removes every component above from the selected entity, plus the tags field.
+Scene files stay `schemaVersion: 1`.
 
 ### Prefabs (`.gprefab.json`)
 
@@ -430,6 +468,9 @@ what `SetPos` wrote, not the child's local value.
 | `SetCameraPos(x, y)` | Int | centres the camera on a world position |
 | `SetCameraZoom(zoom)` | Int | viewport pixels per world unit (clamped above zero) |
 | `GetCameraX()`, `GetCameraY()` | Float | world position the camera is centred on |
+| `FindByTag(tag)`, `FindAllByTag(tag)`, `GetTaggedEntity(tag, i)` | Int | tag lookups (see Expanded components) |
+| `HasTag(id, tag)`, `AddTag(id, tag)` | Int | tag queries and mutation |
+| `GetProp(id, key)`, `SetProp(id, key, value)` | String / Int | custom string properties |
 
 `Destroy` never invalidates the frame it was called in: the entity is removed at the end of the tick,
 after every `Update` has run, so a script may destroy entities other scripts still reference (or
