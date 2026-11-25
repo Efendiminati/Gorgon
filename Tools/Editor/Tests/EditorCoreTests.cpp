@@ -2161,3 +2161,396 @@ TEST_CASE("Audio GScript library records played sounds and no-ops without a devi
     std::filesystem::remove_all(dir, ec);
 }
 
+
+TEST_CASE("Expanded components and tags survive a JSON round-trip", "[EditorCore][JSON][Components]") {
+    Scene scene;
+    scene.name = "Expanded";
+
+    Entity &all = scene.CreateEntity("Everything");
+    all.tags = {"enemy", "boss"};
+    all.properties["hp"] = "120";
+    all.properties["wave"] = "3";
+
+    SpriteAnimComponent anim;
+    anim.asset = "assets/sheet.png";
+    anim.frameW = 16;
+    anim.frameH = 24;
+    anim.frameCount = 6;
+    anim.fps = 9.5f;
+    anim.loop = false;
+    anim.playing = true;
+    anim.currentFrame = 3;
+    anim.tint = {200, 120, 40, 220};
+    all.spriteAnim = anim;
+
+    TextComponent text;
+    text.text = "Hello, Gorgon";
+    text.color = {230, 210, 90, 255};
+    text.fontSize = 22.0f;
+    text.style = "bold";
+    text.align = TextAlign::Center;
+    all.text = text;
+
+    AudioComponent audio;
+    audio.asset = "assets/theme.ogg";
+    audio.volume = 0.35f;
+    audio.loop = true;
+    audio.playOnStart = false;
+    all.audio = audio;
+
+    CameraComponent camera;
+    camera.active = false;
+    camera.zoom = 2.5f;
+    camera.followTarget = 7;
+    all.camera = camera;
+
+    TilemapComponent tilemap;
+    tilemap.tileW = 16.0f;
+    tilemap.tileH = 16.0f;
+    tilemap.cols = 3;
+    tilemap.rows = 2;
+    tilemap.tilesetCols = 4;
+    tilemap.tilesetAsset = "assets/tiles.png";
+    tilemap.tiles = {0, 1, 2, 3, -1, 5};
+    all.tilemap = tilemap;
+
+    ParticleComponent particles;
+    particles.emitRate = 35.0f;
+    particles.lifetime = 0.75f;
+    particles.speed = 90.0f;
+    particles.startColor = {255, 255, 200, 255};
+    particles.endColor = {40, 40, 255, 0};
+    particles.size = 6.0f;
+    particles.active = false;
+    all.particles = particles;
+
+    const EntityId allId = all.id;
+
+    // A second, untouched entity proves the new fields stay absent when unused.
+    Entity &plain = scene.CreateEntity("Plain");
+    const EntityId plainId = plain.id;
+
+    const std::string encoded = SceneSerializer::ToJsonString(scene, 2);
+    REQUIRE(encoded.find("spriteAnim") != std::string::npos);
+    REQUIRE(encoded.find("tilemap") != std::string::npos);
+    REQUIRE(encoded.find("particles") != std::string::npos);
+    REQUIRE(encoded.find("\"tags\"") != std::string::npos);
+    REQUIRE(encoded.find("\"properties\"") != std::string::npos);
+
+    Scene loaded;
+    std::string error;
+    REQUIRE(SceneSerializer::FromJsonString(encoded, loaded, &error));
+    INFO("decode error: " << error);
+    REQUIRE(loaded == scene);
+
+    const Entity *copy = loaded.FindEntity(allId);
+    REQUIRE(copy != nullptr);
+    REQUIRE(copy->tags == std::vector<std::string>{"enemy", "boss"});
+    REQUIRE(copy->properties.at("hp") == "120");
+    REQUIRE(copy->spriteAnim.has_value());
+    REQUIRE(copy->spriteAnim->frameCount == 6);
+    REQUIRE(copy->spriteAnim->currentFrame == 3);
+    REQUIRE(copy->spriteAnim->fps == Catch::Approx(9.5f));
+    REQUIRE(copy->text.has_value());
+    REQUIRE(copy->text->align == TextAlign::Center);
+    REQUIRE(copy->audio.has_value());
+    REQUIRE(copy->audio->volume == Catch::Approx(0.35f));
+    REQUIRE(copy->camera.has_value());
+    REQUIRE(copy->camera->followTarget == 7);
+    REQUIRE(copy->tilemap.has_value());
+    REQUIRE(copy->tilemap->tiles == std::vector<int>{0, 1, 2, 3, -1, 5});
+    REQUIRE(copy->particles.has_value());
+    REQUIRE(copy->particles->emitRate == Catch::Approx(35.0f));
+
+    const Entity *plainCopy = loaded.FindEntity(plainId);
+    REQUIRE(plainCopy != nullptr);
+    REQUIRE(plainCopy->tags.empty());
+    REQUIRE(plainCopy->properties.empty());
+    REQUIRE_FALSE(plainCopy->spriteAnim.has_value());
+    REQUIRE_FALSE(plainCopy->tilemap.has_value());
+
+    // Backward compatibility: a schemaVersion 1 scene written before these components existed.
+    const std::string legacy = R"({
+        "schemaVersion": 1,
+        "name": "Legacy",
+        "settings": { "gridSize": 32, "backgroundColor": [24, 24, 30, 255] },
+        "entities": [
+            { "id": 1, "parentId": 0, "name": "Old", "visible": true, "locked": false, "zOrder": 0,
+              "transform": { "x": 0, "y": 0, "scaleX": 1, "scaleY": 1, "rotation": 0 },
+              "sprite": { "asset": "old.png", "tint": [255, 255, 255, 255] } }
+        ]
+    })";
+    Scene legacyScene;
+    REQUIRE(SceneSerializer::FromJsonString(legacy, legacyScene, &error));
+    REQUIRE(legacyScene.GetEntityCount() == 1);
+    REQUIRE(legacyScene.FindEntity(1)->tags.empty());
+    REQUIRE_FALSE(legacyScene.FindEntity(1)->particles.has_value());
+
+    // Scene tag/property helpers drive the GScript API.
+    REQUIRE(loaded.FindEntityByTag("boss") == allId);
+    REQUIRE(loaded.FindEntitiesByTag("enemy").size() == 1);
+    REQUIRE(loaded.HasTag(allId, "enemy"));
+    REQUIRE(loaded.GetProperty(allId, "wave") == "3");
+    REQUIRE(loaded.SetProperty(allId, "wave", "4"));
+    REQUIRE(loaded.GetProperty(allId, "wave") == "4");
+    REQUIRE(loaded.AddTag(plainId, "neutral"));
+    REQUIRE(loaded.HasTag(plainId, "neutral"));
+    REQUIRE(loaded.RemoveTag(plainId, "neutral"));
+    REQUIRE_FALSE(loaded.HasTag(plainId, "neutral"));
+}
+
+TEST_CASE("ComponentSimulation advances animations and particles and fires component audio once",
+          "[EditorCore][Components][Simulation]") {
+    ComponentSimulation simulation;
+    std::vector<std::string> triggered;
+    simulation.SetSoundSink([&triggered](const std::string &asset) { triggered.push_back(asset); });
+
+    Scene scene;
+
+    Entity &animated = scene.CreateEntity("Animated");
+    SpriteAnimComponent anim;
+    anim.frameCount = 4;
+    anim.fps = 4.0f; // 0.25 s per frame
+    anim.loop = true;
+    animated.spriteAnim = anim;
+    const EntityId animId = animated.id;
+
+    Entity &emitter = scene.CreateEntity("Emitter");
+    ParticleComponent particles;
+    particles.emitRate = 8.0f;
+    particles.lifetime = 0.5f;
+    particles.speed = 10.0f;
+    emitter.particles = particles;
+    const EntityId emitterId = emitter.id;
+
+    Entity &speaker = scene.CreateEntity("Speaker");
+    AudioComponent audio;
+    audio.asset = "assets/hit.wav";
+    audio.playOnStart = true;
+    speaker.audio = audio;
+
+    simulation.Step(scene, 0.25f);
+    REQUIRE(scene.FindEntity(animId)->spriteAnim->currentFrame == 1);
+    REQUIRE(simulation.GetParticleCount(emitterId) == 2); // 8/s * 0.25 s
+    REQUIRE(triggered.size() == 1);
+    REQUIRE(triggered[0] == "assets/hit.wav");
+
+    simulation.Step(scene, 0.25f);
+    REQUIRE(scene.FindEntity(animId)->spriteAnim->currentFrame == 2);
+    // Audio fires exactly once per session.
+    REQUIRE(triggered.size() == 1);
+
+    simulation.Step(scene, 0.25f);
+    simulation.Step(scene, 0.25f);
+    REQUIRE(scene.FindEntity(animId)->spriteAnim->currentFrame == 0); // wrapped (4 frames)
+
+    // Non-looping animations stop on the last frame.
+    auto &anim2 = *scene.FindEntity(animId)->spriteAnim;
+    anim2.loop = false;
+    anim2.currentFrame = 0;
+    anim2.playing = true;
+    anim2.frameTime = 0.0f;
+    for(int i = 0; i < 8; ++i)
+        simulation.Step(scene, 0.25f);
+    REQUIRE(anim2.currentFrame == 3);
+    REQUIRE_FALSE(anim2.playing);
+
+    // Old particles expire once they outlive their lifetime.
+    const std::size_t before = simulation.GetParticleCount(emitterId);
+    REQUIRE(before > 0);
+    scene.FindEntity(emitterId)->particles->active = false;
+    for(int i = 0; i < 4; ++i)
+        simulation.Step(scene, 0.25f);
+    REQUIRE(simulation.GetParticleCount(emitterId) == 0);
+    REQUIRE(simulation.GetEmittedCount(emitterId) >= before);
+
+    // A removed emitter is forgotten.
+    scene.RemoveEntity(emitterId, true);
+    simulation.Step(scene, 0.25f);
+    REQUIRE(simulation.GetParticles(emitterId) == nullptr);
+
+    simulation.Reset();
+    REQUIRE(triggered.size() == 1); // the sink is the test's; Reset only forgets state
+    REQUIRE(simulation.GetTriggeredSounds().empty());
+}
+
+TEST_CASE("Play session steps component animation, particles and component audio",
+          "[EditorCore][Play][Components]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_component_play_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    {
+        std::ofstream out(dir / "idle.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Update(self, dt)\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &actor = scene.CreateEntity("Actor");
+    actor.script = ScriptComponent{"idle.gs"};
+    SpriteAnimComponent anim;
+    anim.frameCount = 4;
+    anim.fps = 4.0f;
+    actor.spriteAnim = anim;
+    ParticleComponent particles;
+    particles.emitRate = 12.0f;
+    particles.lifetime = 1.0f;
+    actor.particles = particles;
+    AudioComponent audio;
+    audio.asset = "assets/music.ogg";
+    actor.audio = audio;
+    const EntityId actorId = actor.id;
+
+    PlaySession session;
+    std::string error;
+    REQUIRE(session.Start(scene, dir.generic_string(), &error));
+    INFO("start error: " << error);
+
+    // Play-on-start audio is triggered by the first component step, i.e. the first tick.
+    REQUIRE(session.GetPlayedSounds().empty());
+
+    session.Tick(scene, 0.25f);
+    REQUIRE(session.GetPlayedSounds().size() == 1);
+    REQUIRE(std::filesystem::path(session.GetPlayedSounds()[0]) == dir / "assets" / "music.ogg");
+    const Entity *after = scene.FindEntity(actorId);
+    REQUIRE(after != nullptr);
+    REQUIRE(after->spriteAnim->currentFrame == 1);
+    REQUIRE(session.GetParticles(actorId) != nullptr);
+    REQUIRE(session.GetParticles(actorId)->size() == 3); // 12/s * 0.25 s
+    REQUIRE(session.GetComponentSimulation().GetParticleCount(actorId) == 3);
+
+    session.Tick(scene, 0.25f);
+    REQUIRE(scene.FindEntity(actorId)->spriteAnim->currentFrame == 2);
+    REQUIRE(session.GetPlayedSounds().size() == 1); // play-on-start is once per session
+
+    session.Stop(scene);
+    // Stopping restores the pre-play snapshot, so the animation frame is back at the start.
+    REQUIRE(scene.FindEntity(actorId)->spriteAnim->currentFrame == 0);
+    REQUIRE(scene.FindEntity(actorId)->particles.has_value());
+}
+
+TEST_CASE("SceneRuntime animates a scriptless scene and uses the active CameraComponent",
+          "[EditorCore][Runtime][Components]") {
+    Scene scene;
+    scene.name = "ComponentOnly";
+
+    Entity &animated = scene.CreateEntity("Animated");
+    SpriteAnimComponent anim;
+    anim.frameCount = 8;
+    anim.fps = 10.0f;
+    animated.spriteAnim = anim;
+    const EntityId animId = animated.id;
+
+    Entity &emitter = scene.CreateEntity("Emitter");
+    ParticleComponent particles;
+    particles.emitRate = 20.0f;
+    particles.lifetime = 2.0f;
+    emitter.particles = particles;
+    const EntityId emitterId = emitter.id;
+
+    Entity &speaker = scene.CreateEntity("Speaker");
+    AudioComponent audio;
+    audio.asset = "assets/ambient.ogg";
+    speaker.audio = audio;
+
+    Entity &camera = scene.CreateEntity("MainCamera");
+    CameraComponent cameraComp;
+    cameraComp.active = true;
+    cameraComp.zoom = 3.0f;
+    cameraComp.followTarget = animId;
+    camera.camera = cameraComp;
+    const EntityId cameraId = camera.id;
+
+    // Move the followed entity away from the origin so the follow is observable.
+    scene.FindEntity(animId)->transform.x = 320.0f;
+    scene.FindEntity(animId)->transform.y = -64.0f;
+
+    SceneRuntime runtime;
+    std::string error;
+    REQUIRE(runtime.LoadFromScene(scene, std::string(), &error));
+    INFO("runtime error: " << error);
+
+    REQUIRE(runtime.GetScriptCount() == 0);
+    REQUIRE(runtime.GetActiveCameraEntity() == cameraId);
+
+    // dt is clamped to 0.25 s per step, so 0.5 s of animation is two steps.
+    runtime.Update(0.25f);
+    runtime.Update(0.25f);
+    REQUIRE(runtime.GetScene().FindEntity(animId)->spriteAnim->currentFrame == 5); // 10 fps * 0.5 s
+
+    const auto *live = runtime.GetParticles(emitterId);
+    REQUIRE(live != nullptr);
+    REQUIRE(live->size() == 10); // 20/s * 0.5 s
+
+    const auto &played = runtime.GetPlayedSounds();
+    REQUIRE(played.size() == 1);
+    REQUIRE(played[0].find("ambient.ogg") != std::string::npos);
+
+    REQUIRE(runtime.GetCamera().panX == Catch::Approx(320.0f));
+    REQUIRE(runtime.GetCamera().panY == Catch::Approx(-64.0f));
+    REQUIRE(runtime.GetCamera().zoom == Catch::Approx(3.0f));
+
+    // An inactive camera component no longer drives the projection.
+    runtime.GetScene().FindEntity(cameraId)->camera->active = false;
+    REQUIRE(runtime.GetActiveCameraEntity() == InvalidEntityId);
+}
+
+TEST_CASE("GScript tag and property helpers read and write entity metadata",
+          "[EditorCore][Play][Tags]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_tag_api_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    {
+        std::ofstream out(dir / "tags.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Scene\n"
+               "phase = 0\n"
+               "function Update(self, dt)\n"
+               "    phase = phase + 1\n"
+               "    if(phase = 1)\n"
+               "        t = FindByTag(\"hero\")\n"
+               "        self.x = t\n"
+               "        if(HasTag(t, \"hero\"))\n"
+               "            self.rotation = 1\n"
+               "        end if\n"
+               "        v = GetProp(t, \"hp\")\n"
+               "        self.y = 0\n"
+               "        SetProp(t, \"hp\", \"42\")\n"
+               "        SetProp(t, \"seen\", v)\n"
+               "    end if\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &hero = scene.CreateEntity("Hero");
+    hero.tags = {"hero", "player"};
+    hero.properties["hp"] = "100";
+    const EntityId heroId = hero.id;
+
+    Entity &driver = scene.CreateEntity("Driver");
+    driver.script = ScriptComponent{"tags.gs"};
+    const EntityId driverId = driver.id;
+
+    PlaySession session;
+    std::string error;
+    REQUIRE(session.Start(scene, dir.generic_string(), &error));
+    INFO("start error: " << error);
+
+    session.Tick(scene, 0.0f);
+    INFO("script error: " << session.GetLastError());
+    REQUIRE(scene.FindEntity(driverId)->transform.x == Catch::Approx(float(heroId)));
+    REQUIRE(scene.FindEntity(driverId)->transform.rotation == Catch::Approx(1.0f));
+
+    REQUIRE(scene.GetProperty(heroId, "hp") == "42");
+    REQUIRE(scene.GetProperty(heroId, "seen") == "100");
+
+    session.Stop(scene);
+    std::filesystem::remove_all(dir, ec);
+}
