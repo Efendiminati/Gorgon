@@ -10,6 +10,7 @@
 #include "HierarchyPanel.h"
 #include "InspectorPanel.h"
 #include "ScriptEditorPanel.h"
+#include "TimelinePanel.h"
 #include "Viewport.h"
 
 #include <Gorgon/Input/Shortcuts.h>
@@ -38,7 +39,8 @@ namespace Gorgon :: Editor {
     /// laid out inside it, so switching tabs never needs a re-creation of either panel.
     enum class BottomTab {
         Assets = 0,
-        Console
+        Console,
+        Timeline
     };
 
     class EditorApp {
@@ -66,9 +68,11 @@ namespace Gorgon :: Editor {
         // ---- Console & script editor ----------------------------------------
         ConsolePanel &GetConsolePanel() { return console_; }
         ScriptEditorPanel &GetScriptEditor() { return scriptEditor_; }
+        // ---- Animation timeline ---------------------------------------------
+        TimelinePanel &GetTimelinePanel() { return timeline_; }
 
         BottomTab GetBottomTab() const { return bottomTab_; }
-        /// Switches the bottom dock between the asset browser and the console.
+        /// Switches the bottom dock between the asset browser, the console and the timeline.
         void ShowBottomTab(BottomTab tab);
 
         /// Opens the built-in .gs editor on `path`. A relative path is resolved against the scene's
@@ -262,6 +266,7 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button btnTiles_{"Tiles (T)"};
         Gorgon::Widgets::Button btnAssetsTab_{"Assets"};
         Gorgon::Widgets::Button btnConsoleTab_{"Console"};
+        Gorgon::Widgets::Button btnTimelineTab_{"Timeline"};
         Gorgon::Widgets::Checkbox chkGridSnap_{"Grid Snap", true};
         Gorgon::Widgets::Label lblStatus_{"Ready"};
 
@@ -283,6 +288,8 @@ namespace Gorgon :: Editor {
         BottomTab bottomTab_ = BottomTab::Assets;
 
         EditorViewport viewport_;
+        // Bottom dock animation timeline. Declared after the viewport it previews through.
+        TimelinePanel timeline_{scene_, viewport_};
         std::unique_ptr<HierarchyPanel> hierarchy_;
         std::unique_ptr<InspectorPanel> inspector_;
 

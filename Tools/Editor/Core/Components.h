@@ -110,6 +110,26 @@ namespace Gorgon :: Editor {
         }
     };
 
+    /// One authored frame of a sprite-sheet animation: how long it stays on screen and which
+    /// sub-rect of the sheet it shows. A rect with a non-positive size means "use the grid cell
+    /// this frame's index names" (`frameW` x `frameH`, row-major across the sheet), so a frame only
+    /// has to override the part that differs from the sheet layout.
+    struct AnimFrame {
+        int durationMs = 100;
+        int x = 0;
+        int y = 0;
+        int w = 0;
+        int h = 0;
+
+        bool operator==(const AnimFrame &other) const {
+            return durationMs == other.durationMs && x == other.x && y == other.y &&
+                   w == other.w && h == other.h;
+        }
+        bool operator!=(const AnimFrame &other) const {
+            return !(*this == other);
+        }
+    };
+
     /// A sprite sheet animation: one asset split into a `cols x rows` grid of frames.
     /// `frameTime` is runtime state (advance accumulator) and is never serialized.
     struct SpriteAnimComponent {
@@ -123,13 +143,20 @@ namespace Gorgon :: Editor {
         int currentFrame = 0;
         ColorRGBA tint{255, 255, 255, 255};
         float frameTime = 0.0f;
+        /// Authored timeline: one entry per frame with its own duration and optional sheet rect.
+        /// Empty (the default) keeps the classic behaviour — `frameCount` grid cells of
+        /// `frameW x frameH`, each shown for `1 / fps` seconds — so scenes written before the
+        /// timeline existed load, play and serialize unchanged. The editor's timeline writes this
+        /// the first time a frame is edited.
+        std::vector<AnimFrame> frames;
 
         bool operator==(const SpriteAnimComponent &other) const {
             return asset == other.asset &&
                    frameW == other.frameW && frameH == other.frameH &&
                    frameCount == other.frameCount && fps == other.fps &&
                    loop == other.loop && playing == other.playing &&
-                   currentFrame == other.currentFrame && tint == other.tint;
+                   currentFrame == other.currentFrame && tint == other.tint &&
+                   frames == other.frames;
         }
         bool operator!=(const SpriteAnimComponent &other) const {
             return !(*this == other);

@@ -1,5 +1,7 @@
 #include "ComponentSimulation.h"
 
+#include "AnimTimeline.h"
+
 #include <algorithm>
 #include <cmath>
 #include <unordered_set>
@@ -63,25 +65,32 @@ namespace Gorgon :: Editor {
             // ---- Sprite sheet animation ------------------------------------------
             if(entity.spriteAnim.has_value()) {
                 auto &anim = *entity.spriteAnim;
-                if(anim.frameCount < 1)
+                // The authored timeline wins; an animation without one keeps the classic
+                // `frameCount` grid and a uniform `1 / fps` frame time.
+                const int frameCount = AnimationTimeline::FrameCount(anim);
+                if(anim.frames.empty() && anim.frameCount < 1)
                     anim.frameCount = 1;
-                if(anim.currentFrame < 0 || anim.currentFrame >= anim.frameCount)
+                if(frameCount > 0 && (anim.currentFrame < 0 || anim.currentFrame >= frameCount))
                     anim.currentFrame = 0;
 
-                if(anim.playing && anim.frameCount > 1 && anim.fps > 0.0f && dt > 0.0f) {
-                    const float frameDuration = 1.0f / anim.fps;
-                    anim.frameTime += dt;
+                if(anim.playing && frameCount > 1 && dt > 0.0f && (!anim.frames.empty() || anim.fps > 0.0f)) {
                     // A very long frame must not spin forever; the clamp keeps the loop bounded.
                     int advances = 0;
-                    while(anim.frameTime >= frameDuration && advances < 4096) {
+                    anim.frameTime += dt;
+                    while(advances < 4096) {
+                        const int durationMs = AnimationTimeline::FrameDurationMs(anim, anim.currentFrame);
+                        const float frameDuration = durationMs > 0 ? float(durationMs) / 1000.0f : 0.0f;
+                        if(!(frameDuration > 0.0f) || anim.frameTime < frameDuration)
+                            break;
+
                         anim.frameTime -= frameDuration;
                         ++advances;
-                        if(anim.currentFrame + 1 >= anim.frameCount) {
+                        if(anim.currentFrame + 1 >= frameCount) {
                             if(anim.loop) {
                                 anim.currentFrame = 0;
                             }
                             else {
-                                anim.currentFrame = anim.frameCount - 1;
+                                anim.currentFrame = frameCount - 1;
                                 anim.playing = false;
                                 anim.frameTime = 0.0f;
                                 break;

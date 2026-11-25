@@ -57,6 +57,8 @@ namespace Gorgon :: Editor {
         window_.Add(viewportBox_);
         // Added last so the script editor's window sits above the viewport it overlays.
         scriptEditor_.Attach(window_);
+        // Shares the bottom dock with the asset browser and the console.
+        timeline_.Attach(window_);
 
         toolbarPanel_.EnableScroll(false, false);
         hierarchyPanel_.EnableScroll(true, false);
@@ -74,6 +76,9 @@ namespace Gorgon :: Editor {
                 inspector_->Rebuild();
             // The tile brush follows the selection: it only arms on a paintable tilemap.
             updateTileToolButton();
+            // The timeline always shows the selected entity's animation (and drops the preview when
+            // the selection is not animatable).
+            timeline_.Sync();
             updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
         };
         viewport_.OnSceneModified = [this]() {
@@ -111,6 +116,18 @@ namespace Gorgon :: Editor {
             updateStatusText(wx, wy, zoom);
         };
 
+        // ---- Animation timeline (bottom dock) --------------------------------
+        // The panel edits the scene in place and reports the name of the edit; the app records one
+        // undo step per edit exactly like the other panels do.
+        timeline_.OnEdited = [this](const std::string &name) {
+            viewport_.Redraw();
+            if(inspector_)
+                inspector_->Refresh();
+            recordEdit(name);
+        };
+        timeline_.OnPreviewChanged = [this]() { viewport_.Redraw(); };
+        timeline_.Sync(true);
+
         // Phase 3 panels: hierarchy tree (left) and details inspector (right).
         hierarchy_ = std::make_unique<HierarchyPanel>(scene_, viewport_, hierarchyPanel_);
         inspector_ = std::make_unique<InspectorPanel>(scene_, viewport_, inspectorPanel_);
@@ -140,6 +157,8 @@ namespace Gorgon :: Editor {
                 recordEdit("Edit Property");
                 // Adding/removing a tilemap in the inspector decides whether the brush can arm.
                 updateTileToolButton();
+                // Inspector edits to an animation (fps, asset) must show up in the timeline strip.
+                timeline_.Sync();
                 updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
             };
         if(inspector_)
@@ -148,6 +167,8 @@ namespace Gorgon :: Editor {
                     hierarchy_->Rebuild();
                 viewport_.Redraw();
                 recordEdit("Edit Component");
+                // A component added or removed changes what the timeline can show.
+                timeline_.Sync(true);
             };
         if(inspector_)
             inspector_->OnBrowseRequested = [this](bool isScript) {
@@ -435,6 +456,8 @@ namespace Gorgon :: Editor {
             hierarchy_->Rebuild();
         if(inspector_)
             inspector_->Rebuild();
+        // Undo/redo replaced the scene wholesale: re-resolve the timeline's entity and frames.
+        timeline_.Sync();
     }
 
     void EditorApp::buildToolbar() {
@@ -477,14 +500,15 @@ namespace Gorgon :: Editor {
         });
         btnAssetsTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Assets); });
         btnConsoleTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Console); });
+        btnTimelineTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Timeline); });
 
         toolbarOrganizer_
             << btnNew_ << btnOpen_ << btnSave_ << btnSaveAs_ << btnExport_
             << btnPlay_ << btnPause_ << btnStop_
             << btnUndo_ << btnRedo_
             << btnResetView_ << btnTiles_ << chkGridSnap_
-            // Bottom dock tabs: the asset browser and the script console share one dock row.
-            << btnAssetsTab_ << btnConsoleTab_ << lblStatus_;
+            // Bottom dock tabs: asset browser, script console and animation timeline share one row.
+            << btnAssetsTab_ << btnConsoleTab_ << btnTimelineTab_ << lblStatus_;
     }
 
     void EditorApp::buildDockPlaceholders() {
@@ -521,21 +545,20 @@ namespace Gorgon :: Editor {
         inspectorPanel_.Move(Pixels(leftW + centerW, middleY));
         inspectorPanel_.Resize(Pixels(rightW, middleH));
 
-        // Bottom dock: the asset browser and the console share the row; only the active tab is
-        // laid out inside it. The inactive one is parked far outside the window instead of being
-        // hidden, because a hidden Layerbox keeps its layers attached and would still swallow the
-        // wheel over the visible panel.
+        // Bottom dock: the asset browser, the console and the timeline share the row; only the
+        // active tab is laid out inside it. The inactive ones are parked far outside the window
+        // instead of being hidden, because a hidden Layerbox keeps its layers attached and would
+        // still swallow the wheel over the visible panel.
         const int bottomTop = middleY + middleH;
         const int bottomHeight = std::max(0, sz.Height - bottomTop);
         constexpr int kParkedX = -16384;
-        if(bottomTab_ == BottomTab::Console) {
-            assetBrowser_.Layout(kParkedX, bottomTop, sz.Width, bottomHeight);
-            console_.Layout(0, bottomTop, sz.Width, bottomHeight);
-        }
-        else {
-            console_.Layout(kParkedX, bottomTop, sz.Width, bottomHeight);
-            assetBrowser_.Layout(0, bottomTop, sz.Width, bottomHeight);
-        }
+        const int assetsX = bottomTab_ == BottomTab::Assets ? 0 : kParkedX;
+        const int consoleX = bottomTab_ == BottomTab::Console ? 0 : kParkedX;
+        const int timelineX = bottomTab_ == BottomTab::Timeline ? 0 : kParkedX;
+
+        assetBrowser_.Layout(assetsX, bottomTop, sz.Width, bottomHeight);
+        console_.Layout(consoleX, bottomTop, sz.Width, bottomHeight);
+        timeline_.Layout(timelineX, bottomTop, sz.Width, bottomHeight);
 
         if(scriptEditor_.IsOpen())
             scriptEditor_.Layout(leftW, middleY, centerW, middleH);
@@ -771,6 +794,10 @@ namespace Gorgon :: Editor {
         if(playMode_ == PlayMode::Playing)
             TickPlay(dt);
 
+        // The timeline's own playhead runs at wall-clock speed and previews into the viewport
+        // without touching the scene.
+        timeline_.Tick(dt);
+
         PollHotReload(static_cast<double>(dt));
 
         // Script Log()/Print() output, compile failures and runtime errors arrive from the play tick
@@ -848,6 +875,8 @@ namespace Gorgon :: Editor {
         viewport_.SetEditEnabled(false);
         // The viewport reads live particle state from the running session.
         viewport_.SetPlaySession(&play_);
+        // Play owns the scene: the timeline's own playhead and preview step aside.
+        timeline_.SetScenePlaying(true);
         viewport_.Redraw();
         updatePlayButtons();
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
@@ -881,6 +910,8 @@ namespace Gorgon :: Editor {
         viewport_.SetEditEnabled(true);
         // Play input belongs to the session; nothing queued during it may fire on the next one.
         playInput_.ClearEdges();
+        // Hand the viewport back to the editor: the timeline previews the frame it shows again.
+        timeline_.SetScenePlaying(false);
 
         // The restored snapshot is the committed state; playing never dirties the scene.
         lastCommittedScene_ = scene_;
@@ -1464,6 +1495,7 @@ namespace Gorgon :: Editor {
     void EditorApp::updateBottomTabButtons() {
         btnAssetsTab_.SetText(bottomTab_ == BottomTab::Assets ? "[Assets]" : "Assets");
         btnConsoleTab_.SetText(bottomTab_ == BottomTab::Console ? "[Console]" : "Console");
+        btnTimelineTab_.SetText(bottomTab_ == BottomTab::Timeline ? "[Timeline]" : "Timeline");
     }
 
     bool EditorApp::OpenScriptEditor(const std::string &path, std::string *outError) {

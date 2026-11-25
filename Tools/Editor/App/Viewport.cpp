@@ -1,4 +1,5 @@
 #include "App/Viewport.h"
+#include "Core/AnimTimeline.h"
 #include "Core/FileWatcher.h"
 
 #include "Core/PlaySession.h"
@@ -201,6 +202,47 @@ namespace Gorgon :: Editor {
                 return true;
         }
         return false;
+    }
+
+    Gorgon::Geometry::Size EditorViewport::GetSpritePixelSize(const std::string &assetPath) const {
+        // Ask the cache first: a sheet the viewport already drew costs nothing to measure.
+        auto size = GetCachedSpriteSize(assetPath);
+        if(size.Width > 0 && size.Height > 0)
+            return size;
+
+        if(const auto *cached = getOrLoadSprite(assetPath); cached && cached->bitmap) {
+            const auto loaded = cached->bitmap->GetSize();
+            if(loaded.Width > 0 && loaded.Height > 0)
+                return loaded;
+        }
+
+        return {0, 0};
+    }
+
+    void EditorViewport::SetAnimationPreview(EntityId id, int frame) {
+        if(frame < 0 || id == InvalidEntityId) {
+            ClearAnimationPreview();
+            return;
+        }
+
+        previewEntity_ = id;
+        previewFrame_ = frame;
+    }
+
+    void EditorViewport::ClearAnimationPreview() {
+        previewEntity_ = InvalidEntityId;
+        previewFrame_ = -1;
+    }
+
+    int EditorViewport::GetDisplayedAnimationFrame(EntityId id) const {
+        const Entity *entity = scene_.FindEntity(id);
+        if(!entity || !entity->spriteAnim)
+            return -1;
+
+        if(id == previewEntity_ && previewFrame_ >= 0)
+            return previewFrame_;
+
+        return entity->spriteAnim->currentFrame;
     }
 
     Gorgon::Geometry::Size EditorViewport::GetCachedSpriteSize(const std::string &assetPath) const {
@@ -1416,24 +1458,25 @@ namespace Gorgon :: Editor {
             bool drewContent = false;
 
             if(e->spriteAnim.has_value()) {
-                // Show the frame the play session currently has, or frame 0 while editing.
+                // Show the preview frame the timeline selected, or the frame the runtime is on.
                 const auto &anim = *e->spriteAnim;
                 const auto *cached = getOrLoadSprite(anim.asset);
                 if(cached && cached->bitmap) {
                     const auto size = cached->bitmap->GetSize();
-                    const int frameW = std::max(1, anim.frameW);
-                    const int frameH = std::max(1, anim.frameH);
                     const float imageW = static_cast<float>(std::max(1, size.Width));
                     const float imageH = static_cast<float>(std::max(1, size.Height));
-                    const int perRow = std::max(1, size.Width / frameW);
-                    const int frame = std::clamp(anim.currentFrame, 0, std::max(0, anim.frameCount - 1));
-                    const int fx = (frame % perRow) * frameW;
-                    const int fy = (frame / perRow) * frameH;
+                    const int count = AnimationTimeline::FrameCount(anim);
+                    int frame = GetDisplayedAnimationFrame(e->id);
+                    if(frame < 0)
+                        frame = 0;
+                    frame = count > 0 ? std::clamp(frame, 0, count - 1) : 0;
+                    const auto rect = AnimationTimeline::FrameSourceRect(anim, frame,
+                                                                         size.Width, size.Height);
 
-                    const Gorgon::Geometry::Pointf t1{fx / imageW, fy / imageH};
-                    const Gorgon::Geometry::Pointf t2{(fx + frameW) / imageW, fy / imageH};
-                    const Gorgon::Geometry::Pointf t3{(fx + frameW) / imageW, (fy + frameH) / imageH};
-                    const Gorgon::Geometry::Pointf t4{fx / imageW, (fy + frameH) / imageH};
+                    const Gorgon::Geometry::Pointf t1{rect.x / imageW, rect.y / imageH};
+                    const Gorgon::Geometry::Pointf t2{(rect.x + rect.w) / imageW, rect.y / imageH};
+                    const Gorgon::Geometry::Pointf t3{(rect.x + rect.w) / imageW, (rect.y + rect.h) / imageH};
+                    const Gorgon::Geometry::Pointf t4{rect.x / imageW, (rect.y + rect.h) / imageH};
                     gfxLayer_.Draw(*cached->bitmap, sc[0], sc[1], sc[2], sc[3],
                                    t1, t2, t3, t4, ToRGBAf(anim.tint));
                     drewContent = true;

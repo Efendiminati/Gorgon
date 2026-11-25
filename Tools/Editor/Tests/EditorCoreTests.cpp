@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include "Core/AnimTimeline.h"
 #include "Core/CollisionSystem.h"
 #include "Core/CommandStack.h"
 #include "Core/FileWatcher.h"
@@ -3490,4 +3491,366 @@ TEST_CASE("Tile palette layout hit-tests the swatch the user sees", "[EditorCore
 
     // A 64x32 tileset packed 4 tiles wide with 16px tiles holds 2 rows of 4.
     REQUIRE(TilemapPainter::TilesetTileCount(map, 64, 32, 16) == 8);
+}
+
+// ---- Animation timeline -----------------------------------------------------
+
+namespace {
+    SpriteAnimComponent legacyAnimation(int frameCount = 4, float fps = 10.0f) {
+        SpriteAnimComponent anim;
+        anim.asset = "assets/hero.png";
+        anim.frameW = 32;
+        anim.frameH = 32;
+        anim.frameCount = frameCount;
+        anim.fps = fps;
+        anim.loop = true;
+        return anim;
+    }
+}
+
+TEST_CASE("A legacy animation grid expands into timeline frames", "[EditorCore][Timeline]") {
+    auto anim = legacyAnimation(4, 10.0f); // 4 frames, 100 ms each
+
+    // Before materializing, the timeline reads the classic grid.
+    REQUIRE_FALSE(AnimationTimeline::HasExplicitFrames(anim));
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 4);
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 0) == 100);
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 3) == 100);
+    REQUIRE(AnimationTimeline::TotalDurationMs(anim) == 400);
+    REQUIRE(AnimationTimeline::EffectiveFps(anim) == Catch::Approx(10.0f));
+
+    // Grid rects are row-major across the sheet: a 3-wide sheet puts frame 3 on its second row.
+    const auto f0 = AnimationTimeline::FrameSourceRect(anim, 0, 96, 64);
+    REQUIRE(f0 == AnimFrameRect{0, 0, 32, 32});
+    const auto f3 = AnimationTimeline::FrameSourceRect(anim, 3, 96, 64);
+    REQUIRE(f3 == AnimFrameRect{0, 32, 32, 32});
+    const auto f5 = AnimationTimeline::FrameSourceRect(anim, 5, 96, 64);
+    REQUIRE(f5 == AnimFrameRect{64, 32, 32, 32});
+
+    // Materializing bakes the durations but leaves the rects implicit, so the sheet layout stays
+    // whatever the renderer sees (never the guess made without an image).
+    REQUIRE(AnimationTimeline::Materialize(anim));
+    REQUIRE(AnimationTimeline::HasExplicitFrames(anim));
+    REQUIRE(anim.frames.size() == 4);
+    REQUIRE(anim.frameCount == 4);
+    for(const auto &frame : anim.frames) {
+        REQUIRE(frame.durationMs == 100);
+        REQUIRE(frame.w == 0);
+        REQUIRE(frame.h == 0);
+    }
+    // A second materialize is a no-op.
+    REQUIRE_FALSE(AnimationTimeline::Materialize(anim));
+
+    // An explicit frame rect wins over the grid.
+    REQUIRE(AnimationTimeline::SetFrameRect(anim, 1, AnimFrameRect{64, 32, 16, 16}));
+    const auto pinned = AnimationTimeline::FrameSourceRect(anim, 1, 96, 64);
+    REQUIRE(pinned == AnimFrameRect{64, 32, 16, 16});
+    REQUIRE(AnimationTimeline::FrameSourceRect(anim, 0, 96, 64) == AnimFrameRect{0, 0, 32, 32});
+
+    // The view carries the running start time of every frame.
+    const auto view = AnimationTimeline::BuildView(anim, 96, 64);
+    REQUIRE(view.size() == 4);
+    REQUIRE(view[0].startMs == 0);
+    REQUIRE(view[1].startMs == 100);
+    REQUIRE(view[2].startMs == 200);
+    REQUIRE(view[3].startMs == 300);
+    REQUIRE(view[3].index == 3);
+}
+
+TEST_CASE("Timeline frames can be added, duplicated, deleted and reordered",
+          "[EditorCore][Timeline]") {
+    auto anim = legacyAnimation(3, 10.0f);
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 3);
+
+    // Add appends a copy of the frame it follows.
+    REQUIRE(AnimationTimeline::SetFrameDuration(anim, 2, 250));
+    const int added = AnimationTimeline::AddFrame(anim, 2);
+    REQUIRE(added == 3);
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 4);
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 3) == 250);
+
+    // Adding after an out-of-range index lands at the end instead of failing.
+    const int clampedAdd = AnimationTimeline::AddFrame(anim, 99);
+    REQUIRE(clampedAdd == 4);
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 5);
+
+    // Duplicate inserts right after the source and copies its duration.
+    const int copy = AnimationTimeline::DuplicateFrame(anim, 0);
+    REQUIRE(copy == 1);
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 6);
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 1) == 100);
+
+    // Out-of-range duplicate adds nothing.
+    REQUIRE(AnimationTimeline::DuplicateFrame(anim, -1) == -1);
+    REQUIRE(AnimationTimeline::DuplicateFrame(anim, 6) == -1);
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 6);
+
+    // Reorder moves a frame and keeps the count.
+    REQUIRE(AnimationTimeline::MoveFrame(anim, 0, 4));
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 6);
+    REQUIRE(AnimationTimeline::MoveFrame(anim, 0, 0) == false);   // no-op
+    REQUIRE(AnimationTimeline::MoveFrame(anim, -2, 1) == false);  // out of range
+    REQUIRE(AnimationTimeline::MoveFrame(anim, 1, 99) == false);
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 6);
+
+    // Delete removes exactly one frame.
+    REQUIRE(AnimationTimeline::DeleteFrame(anim, 0));
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 5);
+    REQUIRE_FALSE(AnimationTimeline::DeleteFrame(anim, 5));
+    REQUIRE_FALSE(AnimationTimeline::DeleteFrame(anim, -1));
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 5);
+
+    // The current frame never dangles after the animation shrinks.
+    anim.currentFrame = 4;
+    REQUIRE(AnimationTimeline::DeleteFrame(anim, 4));
+    REQUIRE(anim.currentFrame == AnimationTimeline::FrameCount(anim) - 1);
+
+    // Deleting every frame is allowed and lands on a well-defined empty timeline.
+    while(AnimationTimeline::FrameCount(anim) > 0)
+        REQUIRE(AnimationTimeline::DeleteFrame(anim, 0));
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 0);
+    REQUIRE(anim.currentFrame == 0);
+}
+
+TEST_CASE("Timeline durations clamp and the fps shortcut retimes every frame",
+          "[EditorCore][Timeline]") {
+    auto anim = legacyAnimation(4, 10.0f);
+
+    REQUIRE(AnimationTimeline::SetFrameDuration(anim, 0, 40));
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 0) == 40);
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 1) == 100);
+    REQUIRE(AnimationTimeline::TotalDurationMs(anim) == 340);
+
+    // Durations are clamped to at least 1 ms, and a no-op edit reports "unchanged".
+    REQUIRE(AnimationTimeline::SetFrameDuration(anim, 0, -50));
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 0) == 1);
+    REQUIRE_FALSE(AnimationTimeline::SetFrameDuration(anim, 0, 1));
+
+    // Out-of-range indices are ignored.
+    REQUIRE_FALSE(AnimationTimeline::SetFrameDuration(anim, 9, 30));
+    REQUIRE_FALSE(AnimationTimeline::SetFrameDuration(anim, -1, 30));
+
+    // 24 fps is 41.67 ms, rounded to 42.
+    REQUIRE(AnimationTimeline::RetimeToFps(anim, 24.0f));
+    REQUIRE(anim.fps == Catch::Approx(24.0f));
+    for(int i = 0; i < AnimationTimeline::FrameCount(anim); ++i)
+        REQUIRE(AnimationTimeline::FrameDurationMs(anim, i) == 42);
+    REQUIRE(AnimationTimeline::TotalDurationMs(anim) == 168);
+    REQUIRE_FALSE(AnimationTimeline::RetimeToFps(anim, 24.0f)); // already there
+    REQUIRE_FALSE(AnimationTimeline::RetimeToFps(anim, 0.0f));  // nonsense fps is refused
+
+    // A single-frame duration edit keeps the reported fps in step.
+    REQUIRE(AnimationTimeline::SetFrameDuration(anim, 0, 1000));
+    REQUIRE(anim.fps > 0.0f);
+    REQUIRE(AnimationTimeline::EffectiveFps(anim) ==
+            Catch::Approx(float(AnimationTimeline::FrameCount(anim)) * 1000.0f /
+                          float(AnimationTimeline::TotalDurationMs(anim))));
+}
+
+TEST_CASE("An animation with zero frames is a safe, empty timeline", "[EditorCore][Timeline]") {
+    SpriteAnimComponent anim;
+    anim.frameCount = 0;
+    anim.fps = 12.0f;
+
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 0);
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 0) == 0);
+    REQUIRE(AnimationTimeline::TotalDurationMs(anim) == 0);
+    REQUIRE(AnimationTimeline::EffectiveFps(anim) == Catch::Approx(0.0f));
+    REQUIRE(AnimationTimeline::BuildView(anim).empty());
+
+    // Every mutation is a no-op rather than a crash.
+    REQUIRE(AnimationTimeline::DuplicateFrame(anim, 0) == -1);
+    REQUIRE_FALSE(AnimationTimeline::DeleteFrame(anim, 0));
+    REQUIRE_FALSE(AnimationTimeline::MoveFrame(anim, 0, 1));
+    REQUIRE_FALSE(AnimationTimeline::SetFrameDuration(anim, 0, 100));
+    REQUIRE_FALSE(AnimationTimeline::RetimeToFps(anim, 12.0f));
+
+    // Add Frame seeds the first frame; a zero-frame animation still has a grid rect to show.
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 0);
+    REQUIRE_FALSE(AnimationTimeline::Materialize(anim));
+    const auto rect = AnimationTimeline::FrameSourceRect(anim, 0);
+    REQUIRE(rect == AnimFrameRect{0, 0, 32, 32});
+
+    REQUIRE(AnimationTimeline::AddFrame(anim, -1) == 0);
+    REQUIRE(AnimationTimeline::FrameCount(anim) == 1);
+    REQUIRE(AnimationTimeline::FrameDurationMs(anim, 0) == 83); // 1000 / 12 fps, rounded
+    REQUIRE(anim.frameCount == 1);
+
+    // A playhead over an empty animation simply stands still.
+    TimelinePlayhead empty;
+    empty.Play();
+    SpriteAnimComponent nothing;
+    nothing.frameCount = 0;
+    REQUIRE_FALSE(empty.Advance(nothing, 1.0f));
+    REQUIRE(empty.GetProgress(nothing) == Catch::Approx(0.0f));
+}
+
+TEST_CASE("The timeline playhead runs at wall-clock speed and honours loop",
+          "[EditorCore][Timeline]") {
+    auto anim = legacyAnimation(3, 10.0f); // 3 x 100 ms
+    AnimationTimeline::Materialize(anim);
+    REQUIRE(AnimationTimeline::SetFrameDuration(anim, 0, 200));
+    // Frames: 200, 100, 100 = 400 ms total.
+
+    TimelinePlayhead playhead;
+    playhead.Scrub(anim, 0);
+    REQUIRE(playhead.GetFrame() == 0);
+
+    // Half of the first frame: still frame 0, half-way through it.
+    REQUIRE_FALSE(playhead.Advance(anim, 0.1f));
+    REQUIRE(playhead.GetFrame() == 0);
+    REQUIRE(playhead.GetFrameProgress(anim) == Catch::Approx(0.5f).margin(0.02));
+
+    // Crossing the first frame's 200 ms lands on frame 1, 20 ms into its 100 ms.
+    REQUIRE(playhead.Advance(anim, 0.12f));
+    REQUIRE(playhead.GetFrame() == 1);
+    REQUIRE(playhead.GetProgress(anim) == Catch::Approx(0.55f).margin(0.02));
+
+    // A big delta advances several frames at once instead of one per call.
+    REQUIRE(playhead.Advance(anim, 0.15f));
+    REQUIRE(playhead.GetFrame() == 2);
+
+    // Loop wraps back to the first frame.
+    REQUIRE(playhead.Advance(anim, 0.1f));
+    REQUIRE(playhead.GetFrame() == 0);
+
+    // Without loop it stops on the last frame and reports no further movement.
+    anim.loop = false;
+    playhead.Scrub(anim, 1);
+    playhead.Play();
+    REQUIRE(playhead.Advance(anim, 1.0f));
+    REQUIRE(playhead.GetFrame() == 2);
+    REQUIRE_FALSE(playhead.IsPlaying());
+    REQUIRE_FALSE(playhead.Advance(anim, 1.0f));
+    REQUIRE(playhead.GetFrame() == 2);
+
+    // Scrub clamps out-of-range frames and restarts the frame timer.
+    playhead.Scrub(anim, 99);
+    REQUIRE(playhead.GetFrame() == 2);
+    REQUIRE(playhead.GetElapsedMs() == Catch::Approx(0.0f));
+    playhead.Scrub(anim, -5);
+    REQUIRE(playhead.GetFrame() == 0);
+
+    playhead.Reset();
+    REQUIRE(playhead.GetFrame() == 0);
+    REQUIRE_FALSE(playhead.IsPlaying());
+}
+
+TEST_CASE("The runtime stepper honours authored frame durations", "[EditorCore][Timeline]") {
+    Scene scene;
+    Entity &actor = scene.CreateEntity("Actor");
+    actor.spriteAnim = legacyAnimation(2, 4.0f); // 250 ms frames
+    AnimationTimeline::Materialize(*actor.spriteAnim);
+    // Frame 0 lingers for 500 ms, frame 1 for 100 ms.
+    REQUIRE(AnimationTimeline::SetFrameDuration(*actor.spriteAnim, 0, 500));
+    REQUIRE(AnimationTimeline::SetFrameDuration(*actor.spriteAnim, 1, 100));
+
+    ComponentSimulation simulation;
+    simulation.Step(scene, 0.25f);
+    REQUIRE(actor.spriteAnim->currentFrame == 0); // 250 of 500 ms
+    simulation.Step(scene, 0.25f);
+    REQUIRE(actor.spriteAnim->currentFrame == 1); // the long frame ended
+    simulation.Step(scene, 0.1f);
+    REQUIRE(actor.spriteAnim->currentFrame == 0); // wrapped after its 100 ms
+}
+
+TEST_CASE("The timeline strip layout hit-tests the cell the user sees", "[EditorCore][Timeline]") {
+    // Ten 100px cells with a 10px gap starting at (5, 4).
+    const auto layout = TimelineStripLayout::Compute(5.0f, 4.0f, 10, 100.0f, 60.0f, 10.0f);
+    REQUIRE(layout.count == 10);
+    REQUIRE(layout.Width() == Catch::Approx(10 * 100.0f + 9 * 10.0f));
+
+    float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+    REQUIRE(layout.CellRect(0, x, y, w, h));
+    REQUIRE(x == Catch::Approx(5.0f));
+    REQUIRE(y == Catch::Approx(4.0f));
+    REQUIRE(w == Catch::Approx(100.0f));
+    REQUIRE(h == Catch::Approx(60.0f));
+
+    REQUIRE(layout.CellRect(2, x, y, w, h));
+    REQUIRE(x == Catch::Approx(5.0f + 2 * 110.0f));
+    REQUIRE_FALSE(layout.CellRect(10, x, y, w, h));
+    REQUIRE_FALSE(layout.CellRect(-1, x, y, w, h));
+
+    // Picking inside a cell, and missing in the gap between two cells.
+    REQUIRE(layout.HitTest(5.0f, 10.0f) == 0);
+    REQUIRE(layout.HitTest(104.0f, 10.0f) == 0);
+    REQUIRE(layout.HitTest(106.0f, 10.0f) == -1); // the 10px gap
+    REQUIRE(layout.HitTest(115.0f, 10.0f) == 1);
+    REQUIRE(layout.HitTest(115.0f, 100.0f) == -1); // below the strip
+
+    // The duration box is the band the mouse handler maps to in-place timing edits.
+    REQUIRE(layout.DurationRect(1, x, y, w, h));
+    const float durX = x, durY = y, durW = w, durH = h;
+    REQUIRE(layout.HitTestDuration(durX + 2.0f, durY + 2.0f) == 1);
+    REQUIRE(layout.HitTestDuration(durX + 2.0f, 6.0f) == -1); // top of the cell, not the box
+
+    // Dropping a frame on the left half of cell 3 inserts it before that cell.
+    REQUIRE(layout.InsertionIndex(5.0f) == 0);
+    REQUIRE(layout.InsertionIndex(5.0f + 3 * 110.0f + 10.0f) == 3);
+    REQUIRE(layout.InsertionIndex(5.0f + 3 * 110.0f + 90.0f) == 4);
+    REQUIRE(layout.InsertionIndex(5000.0f) == 10);
+
+    // The playhead marker walks across the cell it sits in.
+    REQUIRE(layout.PlayheadX(0, 0.0f) == Catch::Approx(5.0f));
+    REQUIRE(layout.PlayheadX(0, 0.5f) == Catch::Approx(55.0f));
+    REQUIRE(layout.PlayheadX(2, 0.0f) == Catch::Approx(225.0f));
+    REQUIRE(layout.PlayheadX(99, 1.0f) == Catch::Approx(5.0f + 9 * 110.0f + 100.0f)); // clamped
+}
+
+TEST_CASE("An edited animation timeline survives a JSON round-trip", "[EditorCore][Timeline]") {
+    Scene scene;
+    scene.name = "Timeline";
+    Entity &actor = scene.CreateEntity("Actor");
+    actor.spriteAnim = legacyAnimation(3, 12.0f);
+    SpriteAnimComponent &anim = *actor.spriteAnim;
+    const EntityId id = actor.id;
+
+    // Untouched animations serialize exactly as before: no `frames` key at all.
+    const std::string legacy = SceneSerializer::ToJsonString(scene, 2);
+    REQUIRE(legacy.find("\"spriteAnim\"") != std::string::npos);
+    REQUIRE(legacy.find("\"frames\"") == std::string::npos);
+
+    // Edit the timeline: add a frame, retime two, pin a custom rect.
+    REQUIRE(AnimationTimeline::AddFrame(anim, 2) == 3);
+    REQUIRE(AnimationTimeline::SetFrameDuration(anim, 0, 250));
+    REQUIRE(AnimationTimeline::RetimeToFps(anim, 20.0f));       // 50 ms everywhere
+    REQUIRE(AnimationTimeline::SetFrameDuration(anim, 3, 480));
+    REQUIRE(AnimationTimeline::SetFrameRect(anim, 1, AnimFrameRect{32, 64, 16, 24}));
+
+    const std::string encoded = SceneSerializer::ToJsonString(scene, 2);
+    REQUIRE(encoded.find("\"frames\"") != std::string::npos);
+    REQUIRE(encoded.find("\"durationMs\"") != std::string::npos);
+
+    Scene loaded;
+    std::string error;
+    REQUIRE(SceneSerializer::FromJsonString(encoded, loaded, &error));
+    INFO("decode error: " << error);
+
+    const Entity *copy = loaded.FindEntity(id);
+    REQUIRE(copy != nullptr);
+    REQUIRE(copy->spriteAnim.has_value());
+    const auto &restored = *copy->spriteAnim;
+    REQUIRE(restored.frames.size() == 4);
+    REQUIRE(restored.frameCount == 4);
+    REQUIRE(restored.frames[0].durationMs == 50);
+    REQUIRE(restored.frames[3].durationMs == 480);
+    REQUIRE(restored.frames[1].x == 32);
+    REQUIRE(restored.frames[1].y == 64);
+    REQUIRE(restored.frames[1].w == 16);
+    REQUIRE(restored.frames[1].h == 24);
+    REQUIRE(restored.frames[0].w == 0); // implicit rects stay implicit
+    REQUIRE(loaded == scene);
+
+    // The reloaded timeline still reports the same sheet rects and total length.
+    REQUIRE(AnimationTimeline::TotalDurationMs(restored) ==
+            AnimationTimeline::TotalDurationMs(anim));
+    REQUIRE(AnimationTimeline::FrameSourceRect(restored, 1, 96, 96) ==
+            AnimFrameRect{32, 64, 16, 24});
+
+    // A malformed frame list is rejected instead of half-loaded.
+    const std::string broken = encoded.substr(0, encoded.find("\"frames\"")) + "\"frames\": 7}}]}";
+    Scene rejected;
+    REQUIRE_FALSE(SceneSerializer::FromJsonString(broken, rejected, &error));
+    REQUIRE_FALSE(error.empty());
 }

@@ -3181,6 +3181,190 @@ int main(int argc, char *argv[]) {
             Gorgon::NextFrame();
         }
 
+        // ---- Phase 7: animation timeline (tab, frames, scrub, undo) -----------
+        {
+            using namespace Gorgon::Editor;
+
+            auto fail = [&](const std::string &message) {
+                std::cerr << "FAIL: " << message << "\n";
+                window.Close();
+                return 1;
+            };
+
+            if(picked == InvalidEntityId)
+                return fail("the timeline phase needs a selectable entity");
+
+            Entity *target = scene.FindEntity(picked);
+            if(!target)
+                return fail("the timeline target disappeared");
+
+            // Give the entity a 4-frame sheet animation, then reopen the scene so the editor treats
+            // it as the committed baseline (undo must not un-attach the component).
+            SpriteAnimComponent anim;
+            anim.frameW = 32;
+            anim.frameH = 32;
+            anim.frameCount = 4;
+            anim.fps = 10.0f; // 100 ms per frame
+            anim.loop = true;
+            target->spriteAnim = anim;
+
+            std::error_code tec;
+            const auto timelineScenePath =
+                std::filesystem::temp_directory_path() / "gorgon_editor_smoke_timeline.gscene.json";
+            std::string timelineError;
+            if(!app.SaveSceneFile(timelineScenePath.string(), &timelineError)) {
+                std::filesystem::remove(timelineScenePath, tec);
+                return fail("could not save the timeline smoke scene: " + timelineError);
+            }
+            if(!app.OpenSceneFile(timelineScenePath.string(), &timelineError)) {
+                std::filesystem::remove(timelineScenePath, tec);
+                return fail("could not reopen the timeline smoke scene: " + timelineError);
+            }
+            std::filesystem::remove(timelineScenePath, tec);
+
+            app.GetViewport().SetSelectedEntity(picked, true);
+            app.ShowBottomTab(BottomTab::Timeline);
+            Gorgon::NextFrame();
+
+            if(app.GetBottomTab() != BottomTab::Timeline)
+                return fail("the Timeline tab did not open");
+
+            auto &timeline = app.GetTimelinePanel();
+            const int originalFrames = timeline.GetFrameCount();
+            if(originalFrames != 4)
+                return fail("the timeline did not pick up the entity's 4 frames");
+            if(timeline.GetVisibleFrameCount() != 4)
+                return fail("the timeline strip did not lay out a cell per frame");
+
+            // -- selecting a frame previews it without touching the scene selection ----
+            const TimelineStripLayout strip = timeline.GetStripLayout();
+            float cx = 0.0f, cy = 0.0f, cw = 0.0f, ch = 0.0f;
+            if(!strip.CellRect(1, cx, cy, cw, ch))
+                return fail("the timeline strip has no cell 1");
+
+            timeline.HandleMouseDown({int(cx + cw * 0.5f), int(cy + 10.0f)},
+                                     Gorgon::Input::Mouse::Button::Left);
+            timeline.HandleMouseUp({int(cx + cw * 0.5f), int(cy + 10.0f)},
+                                   Gorgon::Input::Mouse::Button::Left);
+
+            if(timeline.GetSelectedFrame() != 1)
+                return fail("clicking a frame cell did not select it");
+            if(app.GetViewport().GetSelectedEntity() != picked)
+                return fail("selecting a timeline frame disturbed the scene selection");
+            if(app.GetViewport().GetDisplayedAnimationFrame(picked) != 1)
+                return fail("the scrubbed frame was not previewed in the viewport");
+
+            // -- add a frame, then delete it ------------------------------------------
+            const int addedIndex = timeline.AddFrame();
+            Gorgon::NextFrame();
+            if(addedIndex != originalFrames)
+                return fail("Add Frame did not append a frame at the end");
+            if(timeline.GetFrameCount() != originalFrames + 1)
+                return fail("Add Frame did not grow the animation");
+            if(app.GetUndoName() != "Add Frame")
+                return fail("Add Frame did not become an 'Add Frame' undo step");
+            if(!app.IsDirty())
+                return fail("a timeline edit did not mark the scene dirty");
+
+            timeline.SetSelectedFrame(timeline.GetFrameCount() - 1);
+            if(!timeline.DeleteFrame())
+                return fail("Delete Frame refused to remove the appended frame");
+            Gorgon::NextFrame();
+            if(timeline.GetFrameCount() != originalFrames)
+                return fail("Delete Frame did not shrink the animation back");
+
+            // -- Undo restores the deleted frame, a second Undo removes the added one --
+            app.Undo();
+            Gorgon::NextFrame();
+            if(timeline.GetFrameCount() != originalFrames + 1)
+                return fail("undo did not bring the deleted frame back");
+
+            app.Undo();
+            Gorgon::NextFrame();
+            if(timeline.GetFrameCount() != originalFrames)
+                return fail("undoing the Add Frame did not restore the original frame count");
+            if(scene.FindEntity(picked) == nullptr || !scene.FindEntity(picked)->spriteAnim)
+                return fail("undoing the timeline edits dropped the animation component");
+
+            // -- drag-to-reorder: frame 0 dropped between frames 2 and 3 ---------------
+            for(int i = 0; i < originalFrames; ++i)
+                timeline.SetFrameDuration(i, 100 * (i + 1)); // distinct durations to prove the order
+            app.GetCommandStack().Clear();
+
+            const TimelineStripLayout dragStrip = timeline.GetStripLayout();
+            float x0 = 0.0f, y0 = 0.0f, w0 = 0.0f, h0 = 0.0f;
+            float x2 = 0.0f, y2 = 0.0f, w2 = 0.0f, h2 = 0.0f;
+            if(!dragStrip.CellRect(0, x0, y0, w0, h0) || !dragStrip.CellRect(2, x2, y2, w2, h2))
+                return fail("the timeline strip cannot address the cells for a reorder drag");
+
+            const int reorderUndoBefore = int(app.GetCommandStack().GetUndoCount());
+            timeline.HandleMouseDown({int(x0 + w0 * 0.5f), int(y0 + 10.0f)},
+                                     Gorgon::Input::Mouse::Button::Left);
+            timeline.HandleMouseMove({int(x2 + w2 * 0.6f), int(y2 + 10.0f)});
+            timeline.HandleMouseUp({int(x2 + w2 * 0.6f), int(y2 + 10.0f)},
+                                   Gorgon::Input::Mouse::Button::Left);
+
+            const SpriteAnimComponent *reordered = &*scene.FindEntity(picked)->spriteAnim;
+            if(AnimationTimeline::FrameDurationMs(*reordered, 0) != 200 ||
+               AnimationTimeline::FrameDurationMs(*reordered, 1) != 300 ||
+               AnimationTimeline::FrameDurationMs(*reordered, 2) != 100 ||
+               AnimationTimeline::FrameDurationMs(*reordered, 3) != 400) {
+                return fail("dragging a frame did not reorder the animation");
+            }
+            if(app.GetUndoName() != "Reorder Frames")
+                return fail("the reorder drag did not become a 'Reorder Frames' undo step");
+            if(int(app.GetCommandStack().GetUndoCount()) != reorderUndoBefore + 1)
+                return fail("the reorder drag was not exactly one undo step");
+
+            app.Undo();
+            Gorgon::NextFrame();
+            if(AnimationTimeline::FrameDurationMs(*scene.FindEntity(picked)->spriteAnim, 0) != 100)
+                return fail("undoing the reorder did not restore the frame order");
+
+            // -- duration editing and the fps shortcut are undoable too ---------------
+            const int durationUndoBefore = int(app.GetCommandStack().GetUndoCount());
+            if(!timeline.SetFrameDuration(0, 250))
+                return fail("the timeline refused a duration edit");
+            if(AnimationTimeline::FrameDurationMs(*scene.FindEntity(picked)->spriteAnim, 0) != 250)
+                return fail("the duration edit did not reach the component");
+            if(app.GetUndoName() != "Set Frame Duration")
+                return fail("a duration edit did not become a 'Set Frame Duration' undo step");
+            if(int(app.GetCommandStack().GetUndoCount()) != durationUndoBefore + 1)
+                return fail("a duration edit was not exactly one undo step");
+
+            if(!timeline.RetimeToFps(20.0f))
+                return fail("the fps shortcut did not retime the animation");
+            if(AnimationTimeline::FrameDurationMs(*scene.FindEntity(picked)->spriteAnim, 1) != 50)
+                return fail("the fps retime did not rewrite every duration");
+            app.Undo();
+            app.Undo();
+            Gorgon::NextFrame();
+
+            // -- the playhead runs at wall-clock speed and stops with Stop ------------
+            timeline.SetSelectedFrame(0);
+            timeline.Play();
+            if(!timeline.IsPlaying())
+                return fail("the timeline playhead did not start");
+
+            bool advanced = false;
+            for(int i = 0; i < 40 && !advanced; ++i) {
+                app.GetTimelinePanel().Tick(1.0f / 30.0f);
+                Gorgon::NextFrame();
+                advanced = timeline.GetPlayheadFrame() != 0;
+            }
+            if(!advanced)
+                return fail("the playhead never left the first frame");
+
+            timeline.Stop();
+            if(timeline.IsPlaying())
+                return fail("Stop did not stop the timeline playhead");
+
+            // Leave the editor as the earlier phases left it.
+            app.ShowBottomTab(BottomTab::Assets);
+            app.GetCommandStack().Clear();
+            Gorgon::NextFrame();
+        }
+
         // Verify save/open round-trip through EditorApp in live window mode
         const auto tmpPath = (std::filesystem::temp_directory_path() / "gorgon_editor_smoke.gscene.json").string();
         std::string err;
@@ -3198,7 +3382,7 @@ int main(int argc, char *argv[]) {
             std::cerr << "FAIL: inspector edit did not persist through save/open\n";
             return 1;
         }
-        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + tilemap paint + round-trip)\n";
+        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + tilemap paint + animation timeline + round-trip)\n";
         return 0;
     }
 

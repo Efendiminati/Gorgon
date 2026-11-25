@@ -1,5 +1,6 @@
 #include "SceneRuntime.h"
 
+#include "AnimTimeline.h"
 #include "PlaySession.h"
 #include "SceneSerializer.h"
 
@@ -444,20 +445,22 @@ namespace Gorgon :: Editor {
                     bool drew = false;
                     if(sheet) {
                         const auto size = sheet->GetSize();
-                        const int frameW = std::max(1, anim.frameW);
-                        const int frameH = std::max(1, anim.frameH);
                         const float imageW = float(std::max(1, size.Width));
                         const float imageH = float(std::max(1, size.Height));
-                        const int perRow = std::max(1, size.Width / frameW);
-                        const int frame = std::clamp(anim.currentFrame, 0,
-                                                     std::max(0, anim.frameCount - 1));
-                        const int fx = (frame % perRow) * frameW;
-                        const int fy = (frame / perRow) * frameH;
+                        const int count = AnimationTimeline::FrameCount(anim);
+                        int frame = count > 0
+                            ? std::clamp(anim.currentFrame, 0, count - 1)
+                            : 0;
+                        // The frame names a sub-rect of the sheet; frames that do not set one keep
+                        // using their grid cell, so a sheet authored before the timeline existed
+                        // plays identically.
+                        const auto rect = AnimationTimeline::FrameSourceRect(anim, frame, size.Width,
+                                                                            size.Height);
 
-                        const Gorgon::Geometry::Pointf t1{fx / imageW, fy / imageH};
-                        const Gorgon::Geometry::Pointf t2{(fx + frameW) / imageW, fy / imageH};
-                        const Gorgon::Geometry::Pointf t3{(fx + frameW) / imageW, (fy + frameH) / imageH};
-                        const Gorgon::Geometry::Pointf t4{fx / imageW, (fy + frameH) / imageH};
+                        const Gorgon::Geometry::Pointf t1{rect.x / imageW, rect.y / imageH};
+                        const Gorgon::Geometry::Pointf t2{(rect.x + rect.w) / imageW, rect.y / imageH};
+                        const Gorgon::Geometry::Pointf t3{(rect.x + rect.w) / imageW, (rect.y + rect.h) / imageH};
+                        const Gorgon::Geometry::Pointf t4{rect.x / imageW, (rect.y + rect.h) / imageH};
                         target.Draw(*sheet, corners[0], corners[1], corners[2], corners[3],
                                     t1, t2, t3, t4, ToRGBAf(anim.tint));
                         drew = true;

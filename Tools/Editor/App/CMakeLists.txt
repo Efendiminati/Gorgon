@@ -9,6 +9,8 @@ add_executable(GorgonEditor
     ConsolePanel.cpp
     ScriptEditorPanel.h
     ScriptEditorPanel.cpp
+    TimelinePanel.h
+    TimelinePanel.cpp
     Viewport.h
     Viewport.cpp
     HierarchyPanel.h

@@ -1,5 +1,7 @@
 #include "SceneSerializer.h"
 
+#include "AnimTimeline.h"
+
 #include <algorithm>
 #include <cctype>
 #include <fstream>
@@ -140,6 +142,26 @@ namespace Gorgon :: Editor {
                 o.Set("playing", a.playing);
                 o.Set("currentFrame", a.currentFrame);
                 o.Set("tint", colorToJson(a.tint));
+                // Written only when the timeline has been authored, so a scene nobody retimed stays
+                // byte identical to what earlier editors wrote.
+                if(!a.frames.empty()) {
+                    JSON::Array framesArr;
+                    framesArr.reserve(a.frames.size());
+                    for(const auto &frame : a.frames) {
+                        JSON::Value frameObj;
+                        frameObj.Set("durationMs", frame.durationMs);
+                        // A frame without its own rect keeps using its grid cell; only an explicit
+                        // rect is stored, which keeps hand-edited files readable.
+                        if(frame.w > 0 && frame.h > 0) {
+                            frameObj.Set("x", frame.x);
+                            frameObj.Set("y", frame.y);
+                            frameObj.Set("w", frame.w);
+                            frameObj.Set("h", frame.h);
+                        }
+                        framesArr.push_back(std::move(frameObj));
+                    }
+                    o.Set("frames", JSON::Value(std::move(framesArr)));
+                }
                 eObj.Set("spriteAnim", std::move(o));
             }
 
@@ -369,6 +391,44 @@ namespace Gorgon :: Editor {
                 if(o.Has("tint") && !o["tint"].IsNull()) {
                     if(!colorFromJson(o["tint"], comp.tint, outError, "spriteAnim.tint"))
                         return false;
+                }
+                if(o.Has("frames") && !o["frames"].IsNull()) {
+                    const auto &framesVal = o["frames"];
+                    if(!framesVal.IsArray()) {
+                        setError(outError, "Entity " + std::to_string(rawId) +
+                                           " 'spriteAnim.frames' must be an array");
+                        return false;
+                    }
+                    if(framesVal.GetCount() > AnimationTimeline::MaxFrames) {
+                        setError(outError, "Entity " + std::to_string(rawId) + " 'spriteAnim.frames' has " +
+                                           std::to_string(framesVal.GetCount()) +
+                                           " frames (max " +
+                                           std::to_string(AnimationTimeline::MaxFrames) + ")");
+                        return false;
+                    }
+                    comp.frames.reserve(static_cast<std::size_t>(framesVal.GetCount()));
+                    for(int i = 0; i < framesVal.GetCount(); ++i) {
+                        const auto &frameVal = framesVal[i];
+                        if(!frameVal.IsObject()) {
+                            setError(outError, "Entity " + std::to_string(rawId) +
+                                               " has a non-object animation frame");
+                            return false;
+                        }
+                        AnimFrame frame;
+                        frame.durationMs = std::max(AnimationTimeline::MinFrameDurationMs,
+                                                    getIntField(frameVal, "durationMs",
+                                                                AnimationTimeline::DefaultFrameDurationMs));
+                        frame.x = std::max(0, getIntField(frameVal, "x", 0));
+                        frame.y = std::max(0, getIntField(frameVal, "y", 0));
+                        frame.w = std::max(0, getIntField(frameVal, "w", 0));
+                        frame.h = std::max(0, getIntField(frameVal, "h", 0));
+                        comp.frames.push_back(frame);
+                    }
+                    if(!comp.frames.empty()) {
+                        comp.frameCount = static_cast<int>(comp.frames.size());
+                        if(comp.currentFrame < 0 || comp.currentFrame >= comp.frameCount)
+                            comp.currentFrame = 0;
+                    }
                 }
                 e.spriteAnim = comp;
             }

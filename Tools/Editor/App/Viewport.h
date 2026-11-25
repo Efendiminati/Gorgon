@@ -82,6 +82,21 @@ namespace Gorgon :: Editor {
         /// passing nullptr (or stopping play) falls back to drawing the emitter marker only.
         void SetPlaySession(const PlaySession *session) { playSession_ = session; }
 
+        // ---- Animation timeline preview ----------------------------------------
+        /// Frame the timeline asks the viewport to draw for one entity, without touching its
+        /// component: scrubbing a frame or running the playhead previews it while the scene (and
+        /// the undo stack) stay untouched. A negative frame clears the override.
+        void SetAnimationPreview(EntityId id, int frame);
+        void ClearAnimationPreview();
+        EntityId GetAnimationPreviewEntity() const { return previewEntity_; }
+        /// Frame the viewport draws for `id`: the preview override when it applies, otherwise the
+        /// component's `currentFrame`. -1 when the entity carries no animation.
+        int GetDisplayedAnimationFrame(EntityId id) const;
+
+        /// Pixel size of a sprite sheet, loading it if it is not cached yet. (0, 0) when the asset
+        /// cannot be loaded, which is what the timeline falls back to for a grid rect.
+        Gorgon::Geometry::Size GetSpritePixelSize(const std::string &assetPath) const;
+
         /// Sets the base directory used to resolve relative sprite asset paths.
         void SetAssetBaseDir(const std::string &dir);
         const std::string &GetAssetBaseDir() const { return assetBaseDir_; }
@@ -306,6 +321,10 @@ namespace Gorgon :: Editor {
         Gorgon::Geometry::Size sizeOverride_{0, 0};
 
         const PlaySession *playSession_ = nullptr;
+
+        // Entity whose animation frame is previewed from the timeline (and the frame to draw).
+        EntityId previewEntity_ = InvalidEntityId;
+        int previewFrame_ = -1;
 
         std::string assetBaseDir_;
         mutable std::unordered_map<std::string, CachedSprite> spriteCache_;

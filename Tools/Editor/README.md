@@ -82,8 +82,9 @@ scene path and a `*` while there are unsaved changes.
 cannot delete or move anything.
 
 Toolbar buttons: **New**, **Open**, **Save**, **Save As**, **Export**, **Play**, **Pause**, **Stop**,
-**Undo**, **Redo**, **Reset View**, **Tiles**, plus the **Grid Snap** toggle and a status line showing
-the world position under the cursor and the current zoom.
+**Undo**, **Redo**, **Reset View**, **Tiles**, **Assets**, **Console**, **Timeline**, plus the
+**Grid Snap** toggle and a status line showing the world position under the cursor and the current
+zoom.
 
 Panels:
 
@@ -101,6 +102,8 @@ Panels:
   Shows every GScript `Log()`/`Print()` line, every compile failure and every runtime error with a
   timestamp, a severity (Info / Warn / Error) and the entity/script it came from, colour coded, with
   an *Errors only* filter and a *Clear* button. See [Script console](#script-console).
+- **Timeline** — the third bottom-dock tab: the selected entity's sprite animation as a strip of
+  frame cells. See [Animation timeline](#animation-timeline).
 
 ### Tilemap painting
 
@@ -130,6 +133,65 @@ The **Details** panel gained *Tileset*, *Paint Tool* (Brush / Fill / Eraser) and
 A whole stroke — press, every paint, release — is **one undo step** named `Paint Tiles`, so `Ctrl+Z`
 restores the cells exactly as they were before the press. A stroke that changes nothing records
 nothing.
+
+### Animation timeline
+
+The **Timeline** tab in the bottom dock turns the sprite-animation component into something you can
+author by eye instead of typing numbers into the Inspector. It always shows the selected entity, so
+clicking through the hierarchy walks through their animations; the Inspector keeps its plain numeric
+`fps` / `frameCount` fields next to it.
+
+Each frame is a cell in a horizontal strip, drawn in playing order:
+
+```
++------------------+  +------------------+  +------------------+
+| #0               |  | #1               |  | #2               |
+| 0,0 32x32        |  | 32,0 32x32       |  | 64,0 16x24 *     |
+| [   100 ms    ]  |  | [   250 ms    ]  |  | [    50 ms    ]  |
++------------------+  +------------------+  +------------------+
+```
+
+- **`#n`** is the frame index, **`x,y WxH`** the sheet sub-rect it shows (with a `*` when the frame
+  pins its own rect instead of using its grid cell), and the lower box is its duration in
+  milliseconds.
+- The highlighted cell is the selected frame; the red marker is the playhead, which slides across a
+  cell while it is shown.
+
+| Input | Action |
+| --- | --- |
+| Click a cell | Select that frame and preview it in the viewport |
+| Click the duration box of a cell | Select it and put the caret in the timeline's *Duration (ms)* field |
+| Drag a cell sideways | Reorder: the yellow bar shows where the frame will land |
+| Mouse wheel over the strip | Scroll the strip when the animation has more frames than fit |
+
+Buttons along the top of the tab:
+
+| Button | What it does |
+| --- | --- |
+| **Play** / **Stop** | Runs the playhead at wall-clock speed through the authored durations, previewing the viewport; *Stop* parks it on the selected frame |
+| **Loop** | Mirrors the component's `loop`: on, the playhead wraps; off, it stops on the last frame |
+| **Add Frame** | Appends a frame after the selection, a copy of the frame it follows (its duration and rect) |
+| **Duplicate** | Inserts a copy of the selected frame right after it |
+| **Delete Frame** | Removes the selected frame (the last frame may be deleted too — the strip then shows a hint) |
+| **FPS** + **Retime** | Rewrites every frame duration to `1000 / fps` |
+| **Duration (ms)** | The selected frame's duration, clamped to at least 1 ms |
+
+Selecting a frame never changes the scene selection, and scrubbing/playing **never touches the
+scene**: the preview is a viewport override (`EditorViewport::SetAnimationPreview`), so nothing
+dirties the document or fills the undo stack. Every real edit — add, duplicate, delete, reorder,
+duration, retime, loop — goes through the same `recordEdit` / `applyHistoryChange` helpers as the
+rest of the editor and is **one undo step** (`Add Frame`, `Delete Frame`, `Reorder Frames`,
+`Set Frame Duration`, `Retime Frames`, `Set Loop`).
+
+Empty states are hints rather than errors: no selection, an entity without an animation component,
+and an animation with zero frames each show a sentence in the strip instead of drawing cells, and
+every operation is a no-op.
+
+The first edit converts the classic grid (`frameCount` cells of `frameW x frameH` at `1 / fps`
+seconds) into an explicit timeline. Frames that do not override their rect keep using their grid
+cell, so editing one frame's timing never changes which part of the sheet the others show. While
+play-in-editor runs, the timeline stands aside: the running scene owns the viewport and its own
+animation stepping.
 
 ### Script editor
 
@@ -212,7 +274,7 @@ Entity fields (`id` is required, everything else optional):
 | `script` | object | none | `path` to a `.gs` file with an `Update(self, dt)` function. |
 | `tags` | string[] | none | Free-form labels; `Scene.FindByTag`/`HasTag` read them. Omitted when empty. |
 | `properties` | object | none | String key/value pairs a script reads and writes with `Scene.GetProp`/`SetProp`. |
-| `spriteAnim` | object | none | Sprite-sheet animation: `asset`, `frameW`, `frameH`, `frameCount`, `fps`, `loop`, `playing`, `currentFrame`, `tint`. |
+| `spriteAnim` | object | none | Sprite-sheet animation: `asset`, `frameW`, `frameH`, `frameCount`, `fps`, `loop`, `playing`, `currentFrame`, `tint`, and the optional authored `frames` timeline (see [Animation timeline](#animation-timeline)). |
 | `text` | object | none | `text`, `color`, `fontSize`, `style`, and `align` (`left`/`center`/`right`). |
 | `audio` | object | none | `asset`, `volume` (0–1), `loop`, `playOnStart`. |
 | `camera` | object | none | `active`, `zoom`, `followTarget` entity id. |
@@ -239,7 +301,7 @@ unchanged, and each one is only written back when an entity carries it.
 
 | Component | Stepped by | What it does |
 | --- | --- | --- |
-| `spriteAnim` | `PlaySession::Tick` / `SceneRuntime::Update` | Splits the sheet into `frameW x frameH` cells, row-major, and advances `currentFrame` at `fps`. `loop = false` stops on the last frame (and clears `playing`). |
+| `spriteAnim` | `PlaySession::Tick` / `SceneRuntime::Update` | Splits the sheet into `frameW x frameH` cells, row-major, and advances `currentFrame` at `fps`. `loop = false` stops on the last frame (and clears `playing`). An authored `frames` timeline overrides both: every frame carries its own duration and can pin its own sheet sub-rect. |
 | `text` | renderer | Drawn at the entity origin. `SceneRuntime::SetTextPrinter()` takes the host's `StyledPrinter`; without one a placeholder quad is drawn (headless runs have no font). |
 | `audio` | step | `playOnStart` fires the asset once per play session through the same path `Audio::PlaySound` uses, so it is recorded even without an audio device. |
 | `camera` | step | The first active component owns the projection: `zoom`, centred on `followTarget` (or on the camera entity). It overrides a script's `SetCameraPos`. |
@@ -261,6 +323,34 @@ and scripts read/write both through `using Scene`:
 
 The inspector adds and removes every component above from the selected entity, plus the tags field.
 Scene files stay `schemaVersion: 1`.
+
+#### Authored animation timeline (`spriteAnim.frames`)
+
+A sprite animation that was retimed in the editor's timeline also carries a `frames` array. Each
+entry is one frame in playing order:
+
+```json
+"spriteAnim": {
+  "asset": "assets/hero.png", "frameW": 32, "frameH": 32, "frameCount": 3,
+  "fps": 8.0, "loop": true, "playing": true, "currentFrame": 0,
+  "tint": [255, 255, 255, 255],
+  "frames": [
+    { "durationMs": 120 },
+    { "durationMs": 80, "x": 64, "y": 32, "w": 32, "h": 32 },
+    { "durationMs": 200 }
+  ]
+}
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `frames[].durationMs` | int | How long the frame stays up, minimum 1. Defaults to 100 when missing. |
+| `frames[].x`, `y`, `w`, `h` | int | Sheet sub-rect the frame shows. Omitted (or a zero size) means "use the grid cell this frame's index names", so frames only store what differs. |
+
+The array is written only for animations that were authored, and `frameCount` is kept equal to its
+length, so a scene written before the timeline existed loads, plays and saves unchanged. The runtime
+(`ComponentSimulation`, `SceneRuntime` and the editor viewport) steps and draws the explicit
+durations and rects when they are there, and the classic uniform grid when they are not.
 
 ### Prefabs (`.gprefab.json`)
 
@@ -769,7 +859,7 @@ writes the manifest, scene and assets and warns about the missing executable.
 ctest --test-dir build/WindowsTesting -C Release -R EditorCore --output-on-failure
 
 GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, console, syntax check, round-trip
-GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor, tile painting
+GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor, tile painting, animation timeline
 EditorDemo.exe --selftest        rem SceneRuntime: load, path resolution, script ticking
 GorgonPlayer.exe --selftest      rem exported bundle: game.json, scene load, 30 scripted frames
 ```
@@ -782,6 +872,17 @@ hit-testing, and a JSON round-trip of a painted map. The `--smoke` paint phase d
 through the real window: it arms the tool, paints the cell under a computed pixel, checks the
 `Paint Tiles` undo step, undoes it and confirms the cell went back, picks a tile from the palette,
 and fills a rectangle as a single undo step.
+
+`[Timeline]` covers the animation timeline without a window: expanding the classic grid into frames,
+add / duplicate / delete / reorder with out-of-range indices (and a zero-frame animation, where every
+operation is a safe no-op), the duration clamp and the `fps` retime, the wall-clock playhead
+(per-frame durations, loop wrap, stopping on the last frame, scrubbing), frame durations reaching the
+runtime stepper, the strip layout's cell / duration-box / insertion-index / playhead geometry, and a
+JSON round-trip of an edited animation that also proves an untouched one writes no `frames` at all.
+The `--smoke` timeline phase drives the real window: it opens the tab, selects a frame by clicking
+its cell (and checks the scene selection and the viewport preview), adds a frame, deletes it, undoes
+both, drags frame 0 between frames 2 and 3 as one `Reorder Frames` step, edits a duration, retimes by
+fps, and runs the playhead until it leaves the first frame.
 
 The Catch2 suite covers the script runtime too: `[Lifecycle]` (Start → Update → OnDestroy order,
 including a destroyed entity's hook and the Play-stop hooks), `[Scene]` (name lookup, spawn, deferred
@@ -812,9 +913,10 @@ Tools/Editor/
   CMakeLists.txt         GorgonEditorCore + app + player + tests
   Core/                  Scene, Entity, Components, SceneSerializer, GameExporter,
                          CommandStack, PlaySession, SceneRuntime, FileWatcher,
-                         TilemapPainter (grid geometry, stroke math, palette layout)
+                         TilemapPainter (grid geometry, stroke math, palette layout),
+                         AnimTimeline (frame model, per-frame durations, strip layout, playhead)
   App/                   EditorApp (window shell), Viewport, HierarchyPanel,
-                         InspectorPanel, AssetBrowserPanel, EditorTheme, Main
+                         InspectorPanel, AssetBrowserPanel, TimelinePanel, EditorTheme, Main
   Player/                GorgonPlayer entry point (exported game runtime)
   Tests/                 Catch2 tests for Core
 Examples/EditorDemo/     demo scene, assets, scripts and the small runtime example

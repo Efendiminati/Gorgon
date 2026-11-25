@@ -17,6 +17,8 @@ add_library(GorgonEditorCore STATIC
     Core/ComponentSimulation.cpp
     Core/TilemapPainter.h
     Core/TilemapPainter.cpp
+    Core/AnimTimeline.h
+    Core/AnimTimeline.cpp
     Core/InputState.h
     Core/ScriptLog.h
     Core/ScriptLog.cpp
