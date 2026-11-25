@@ -85,7 +85,7 @@ Panels:
 - **Details** — name, visibility, lock, z-order, transform (x, y, scale, rotation), sprite
   asset + tint, collider (type, width/height or radius, offset) and script path. The `...` buttons
   open the asset browser as a picker for sprite and script fields.
-- **Asset browser** — scans the project folder, filters by All/Images/Audio/Fonts/Scripts/Resources,
+- **Asset browser** — scans the project folder, filters by All/Images/Audio/Fonts/Scripts/Prefabs/Resources,
   has a search box and image thumbnails. Single click selects, double click (or *Add to Scene*)
   inserts: images become sprite entities, `.gs` files attach a `ScriptComponent`.
 
@@ -146,6 +146,7 @@ Entity fields (`id` is required, everything else optional):
 | `sprite` | object | none | `asset` (path to a png/jpg/bmp) and `tint` (`[r,g,b,a]`, multiplied into the sprite). |
 | `collider` | object | none | `type`: `"none"`, `"aabb"` or `"circle"`; `w`/`h` for AABBs, `radius` for circles, `offsetX`/`offsetY` relative to the entity centre. |
 | `script` | object | none | `path` to a `.gs` file with an `Update(self, dt)` function. |
+| `prefabSource` | string | none | Path to the `.gprefab.json` this entity was instantiated from. Omitted when empty. |
 
 Notes:
 
@@ -156,6 +157,46 @@ Notes:
   the tint when it is not plain white.
 - **Ids are stable**; new entities take the next free id. Duplicating or deleting entities keeps
   the rest of the scene's ids intact, so references in scripts/tools stay valid.
+- **`prefabSource` is optional and additive.** It only records which prefab an entity came from;
+  a scene written by an older editor loads unchanged, and scenes without prefabs never emit it.
+
+### Prefabs (`.gprefab.json`)
+
+A prefab is a reusable entity blueprint: one root entity plus its whole descendant subtree, stored
+with the root at the local origin `(0, 0)` and ids normalized to `1..N`.
+
+```json
+{
+  "schemaVersion": 1,
+  "type": "gorgon.prefab",
+  "name": "Turret",
+  "rootId": 1,
+  "entities": [
+    { "id": 1, "parentId": 0, "name": "Turret", "transform": { "x": 0.0, "y": 0.0, "rotation": 30.0 } },
+    { "id": 2, "parentId": 1, "name": "Barrel", "transform": { "x": 12.0, "y": 0.0 } }
+  ]
+}
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schemaVersion` | int | Required, currently `1`. |
+| `type` | string | `"gorgon.prefab"`; informational. |
+| `name` | string | Prefab name; defaults to the root entity's name. |
+| `rootId` | int | Local id of the root entity; defaults to the first root found. |
+| `entities` | array | Root first, then descendants in DFS order. Same entity schema as a scene. |
+
+Workflow:
+
+- **Save as Prefab** — select an entity, then use `Save as Prefab` in the Inspector's *Prefab*
+  section. The file goes to the scene's folder (or the asset browser root) as
+  `<EntityName>.gprefab.json`, and the entity is linked to it via `prefabSource`.
+- **Instantiate** — the Asset Browser lists `.gprefab.json` files under the **Prefabs** filter;
+  double-click them or drag them into the viewport. The whole subtree appears at the drop point
+  (grid-snapped) with fresh entity ids as one undo step.
+- **Apply / Revert** — a linked instance shows its `prefabSource` plus `Apply` and `Revert`
+  buttons. Both restore the instance from the file on disk as a single undo step, keeping the
+  instance's own id, parent and position so placement and scene references survive.
 
 ## Scripting (GScript)
 
@@ -277,7 +318,7 @@ scripts and writes `%TEMP%\gorgon_editor_demo_report.txt` with the resulting tra
 ```bat
 ctest --test-dir build/WindowsTesting -C Release -R EditorCore --output-on-failure
 
-GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, JSON round-trip, asset browser
+GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, JSON round-trip, asset browser
 GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor
 EditorDemo.exe --selftest        rem SceneRuntime: load, path resolution, script ticking
 ```

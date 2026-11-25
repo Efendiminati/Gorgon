@@ -54,6 +54,21 @@ namespace Gorgon :: Editor {
         /// Inserts the asset selected in the browser into the scene at the viewport center.
         bool InsertSelectedAssetIntoScene(std::string *outError = nullptr);
         bool DropAssetAtViewportPoint(const AssetEntry &entry, float sx, float sy, std::string *outError = nullptr);
+
+        // ---- Prefabs ---------------------------------------------------------
+        /// Writes `entityId` and its subtree to `path` as a .gprefab.json (adds the extension
+        /// when missing). Returns false with a message when the entity is missing or unwritable.
+        bool SaveEntityAsPrefab(EntityId entityId, const std::string &path, std::string *outError = nullptr);
+        /// Instantiates a prefab file into the scene under the viewport center (grid snapped).
+        bool InstantiatePrefabFile(const std::string &path, float worldX, float worldY,
+                                   EntityId *outRootId = nullptr, std::string *outError = nullptr);
+        /// Copies the prefab file's contents onto an existing instance as one undo step.
+        bool ApplyPrefabToEntity(EntityId entityId, std::string *outError = nullptr);
+        /// Resets an instance to the prefab file on disk as one undo step.
+        bool RevertEntityToPrefab(EntityId entityId, std::string *outError = nullptr);
+
+        /// Directory new prefabs are written to (the scene's folder, else the asset browser root).
+        std::string GetPrefabDirectory() const;
         HierarchyPanel &GetHierarchy() { return *hierarchy_; }
         InspectorPanel &GetInspector() { return *inspector_; }
         const std::string &GetCurrentFilePath() const { return currentFilePath_; }
@@ -128,6 +143,11 @@ namespace Gorgon :: Editor {
         // Asset browser helpers
         bool insertAsset(const AssetEntry &entry, std::string *outError);
         void setupAssetBrowser();
+
+        // Prefab helpers
+        bool resolvePrefabPath(const std::string &prefabSource, const std::string &baseDir,
+                               std::string &outPath) const;
+        void onSavePrefabRequested(EntityId entityId);
 
         Gorgon::UI::Window &window_;
         Scene scene_;

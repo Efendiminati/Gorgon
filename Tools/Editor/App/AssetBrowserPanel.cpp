@@ -1,4 +1,5 @@
 #include "AssetBrowserPanel.h"
+#include "Core/SceneSerializer.h"
 #include "Viewport.h"
 
 #include <Gorgon/Filesystem.h>
@@ -98,6 +99,7 @@ namespace Gorgon :: Editor {
             case AssetType::Audio:     return "Audio";
             case AssetType::Fonts:     return "Fonts";
             case AssetType::Scripts:   return "Scripts";
+            case AssetType::Prefabs:   return "Prefabs";
             case AssetType::Resources: return "Resources";
             case AssetType::All:
             default:                   return "All";
@@ -111,6 +113,7 @@ namespace Gorgon :: Editor {
         if(ext == "wav" || ext == "ogg" || ext == "flac")               return AssetType::Audio;
         if(ext == "ttf" || ext == "otf")                                return AssetType::Fonts;
         if(ext == "gs" || ext == "gscript")                             return AssetType::Scripts;
+        if(ext == "gprefab.json" || ext == "gprefab")                 return AssetType::Prefabs;
         if(ext == "gor")                                                return AssetType::Resources;
 
         return AssetType::All;
@@ -214,7 +217,14 @@ namespace Gorgon :: Editor {
                     if(Gorgon::Filesystem::IsDirectory(entry.fullPath)) {
                         entry.isDirectory = true;
                     } else {
-                        entry.extension = ToLowerCopy(Gorgon::Filesystem::GetExtension(name));
+                        const std::string lowerName = ToLowerCopy(name);
+                        const std::string prefabSuffix = ".gprefab.json";
+                        if(lowerName.size() > prefabSuffix.size() &&
+                           lowerName.compare(lowerName.size() - prefabSuffix.size(), prefabSuffix.size(), prefabSuffix) == 0) {
+                            entry.extension = "gprefab.json";
+                        } else {
+                            entry.extension = ToLowerCopy(Gorgon::Filesystem::GetExtension(name));
+                        }
                         entry.type = GetAssetTypeForExtension(entry.extension);
                     }
 
@@ -370,7 +380,20 @@ namespace Gorgon :: Editor {
     EntityId InsertAssetAsEntity(Scene &scene, const AssetEntry &entry, const std::string &assetBaseDir,
                                  float worldX, float worldY) {
         if(entry.isDirectory) return InvalidEntityId;
-        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts) return InvalidEntityId;
+        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts && entry.type != AssetType::Prefabs) {
+            return InvalidEntityId;
+        }
+
+        const std::string assetPath = MakeSceneRelativePath(entry.fullPath, assetBaseDir, entry.relativePath);
+
+        if(entry.type == AssetType::Prefabs) {
+            EntityId rootId = InvalidEntityId;
+            if(!SceneSerializer::InstantiatePrefabFromFile(
+                   entry.fullPath, scene, worldX, worldY, assetPath, &rootId)) {
+                return InvalidEntityId;
+            }
+            return rootId;
+        }
 
         int maxZ = 0;
         for(const auto &existing : scene.GetEntities()) {
@@ -384,8 +407,6 @@ namespace Gorgon :: Editor {
         entity.transform.x = worldX;
         entity.transform.y = worldY;
         entity.zOrder = maxZ + 1;
-
-        const std::string assetPath = MakeSceneRelativePath(entry.fullPath, assetBaseDir, entry.relativePath);
 
         if(entry.type == AssetType::Images) {
             entity.sprite = SpriteComponent{assetPath, {255, 255, 255, 255}};
@@ -401,7 +422,9 @@ namespace Gorgon :: Editor {
                                           float sx, float sy) {
         AssetDropResult res;
         if(entry.isDirectory) return res;
-        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts) return res;
+        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts && entry.type != AssetType::Prefabs) {
+            return res;
+        }
 
         if(entry.type == AssetType::Scripts) {
             const EntityId hitId = viewport.HitTestEntity(sx, sy);
@@ -767,13 +790,13 @@ namespace Gorgon :: Editor {
         lastClickIndex_ = index;
         lastClickTime_ = now;
 
-        // Arm drag-and-drop for image/script assets when not in picker mode.
+        // Arm drag-and-drop for image/script/prefab assets when not in picker mode.
         dragCandidateIndex_ = -1;
         dragging_ = false;
         if(!IsPicking()) {
             if(const AssetEntry *entry = library_.GetSelected();
                entry && !entry->isDirectory &&
-               (entry->type == AssetType::Images || entry->type == AssetType::Scripts)) {
+               (entry->type == AssetType::Images || entry->type == AssetType::Scripts || entry->type == AssetType::Prefabs)) {
                 dragCandidateIndex_ = index;
                 dragStartPt_ = pt;
                 dragEntry_ = *entry;
@@ -965,6 +988,9 @@ namespace Gorgon :: Editor {
                 tagText = "DIR";
             } else if(entry.type == AssetType::Scripts) {
                 tag = Col(0.44f, 0.72f, 0.98f);
+            } else if(entry.type == AssetType::Prefabs) {
+                tag = Col(0.30f, 0.78f, 0.86f);
+                tagText = "PFB";
             } else if(entry.type == AssetType::Audio) {
                 tag = Col(0.72f, 0.50f, 0.92f);
             } else if(entry.type == AssetType::Fonts) {

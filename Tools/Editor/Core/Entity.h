@@ -19,6 +19,7 @@ namespace Gorgon :: Editor {
         std::optional<SpriteComponent> sprite;
         std::optional<ColliderComponent> collider;
         std::optional<ScriptComponent> script;
+        std::string prefabSource;
 
         bool operator==(const Entity &other) const {
             return id == other.id &&
@@ -30,7 +31,8 @@ namespace Gorgon :: Editor {
                    transform == other.transform &&
                    sprite == other.sprite &&
                    collider == other.collider &&
-                   script == other.script;
+                   script == other.script &&
+                   prefabSource == other.prefabSource;
         }
 
         bool operator!=(const Entity &other) const {

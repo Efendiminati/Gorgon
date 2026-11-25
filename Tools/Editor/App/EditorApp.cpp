@@ -29,6 +29,21 @@ namespace Gorgon :: Editor {
             }
             return path;
         }
+
+        std::string EnsurePrefabExtension(std::string path) {
+            if(path.empty()) return path;
+            const std::string ext = ".gprefab.json";
+            if(path.size() >= ext.size() && path.compare(path.size() - ext.size(), ext.size(), ext) == 0)
+                return path;
+
+            const std::string shortExt = ".gprefab";
+            if(path.size() >= shortExt.size() &&
+               path.compare(path.size() - shortExt.size(), shortExt.size(), shortExt) == 0) {
+                return path + ".json";
+            }
+
+            return path + ext;
+        }
     } // namespace
 
     EditorApp::EditorApp(Gorgon::UI::Window &window)
@@ -130,6 +145,23 @@ namespace Gorgon :: Editor {
                         assetBrowser_.EndPicker();
                         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
                     });
+            };
+
+        if(inspector_)
+            inspector_->OnSavePrefabRequested = [this](EntityId id) { onSavePrefabRequested(id); };
+        if(inspector_)
+            inspector_->OnApplyPrefabRequested = [this](EntityId id) {
+                std::string err;
+                if(!ApplyPrefabToEntity(id, &err)) {
+                    Gorgon::UI::ShowMessage("Apply Prefab", err.empty() ? "Could not apply the prefab." : err);
+                }
+            };
+        if(inspector_)
+            inspector_->OnRevertPrefabRequested = [this](EntityId id) {
+                std::string err;
+                if(!RevertEntityToPrefab(id, &err)) {
+                    Gorgon::UI::ShowMessage("Revert Prefab", err.empty() ? "Could not revert to the prefab." : err);
+                }
             };
 
         // Keyboard preview for Space+left-drag pan and Shift multi-select
@@ -784,6 +816,199 @@ namespace Gorgon :: Editor {
         return true;
     }
 
+    // ---- Prefabs ------------------------------------------------------------
+
+    std::string EditorApp::GetPrefabDirectory() const {
+        if(!currentFilePath_.empty()) {
+            const std::filesystem::path scenePath(currentFilePath_);
+            if(scenePath.has_parent_path())
+                return scenePath.parent_path().generic_string();
+        }
+        const std::string root = assetBrowser_.GetRoot();
+        if(!root.empty())
+            return root;
+        std::error_code ec;
+        return std::filesystem::current_path(ec).generic_string();
+    }
+
+    bool EditorApp::resolvePrefabPath(const std::string &prefabSource, const std::string &baseDir,
+                                      std::string &outPath) const {
+        if(prefabSource.empty())
+            return false;
+
+        std::filesystem::path p(prefabSource);
+        if(p.is_absolute()) {
+            outPath = p.generic_string();
+            return std::filesystem::exists(outPath);
+        }
+
+        // Relative prefab paths resolve against the scene folder first, then the browser root.
+        std::vector<std::string> bases;
+        if(!baseDir.empty()) bases.push_back(baseDir);
+        if(!assetBrowser_.GetRoot().empty()) bases.push_back(assetBrowser_.GetRoot());
+
+        for(const auto &base : bases) {
+            const auto candidate = (std::filesystem::path(base) / p).lexically_normal();
+            if(std::filesystem::exists(candidate)) {
+                outPath = candidate.generic_string();
+                return true;
+            }
+        }
+
+        if(!bases.empty()) {
+            outPath = (std::filesystem::path(bases.front()) / p).lexically_normal().generic_string();
+        } else {
+            outPath = p.generic_string();
+        }
+        return false;
+    }
+
+    bool EditorApp::SaveEntityAsPrefab(EntityId entityId, const std::string &path, std::string *outError) {
+        if(playMode_ != PlayMode::Stopped) {
+            if(outError) *outError = "Stop play mode before saving a prefab.";
+            return false;
+        }
+        if(!scene_.HasEntity(entityId)) {
+            if(outError) *outError = "Select an entity to save as a prefab.";
+            return false;
+        }
+        if(path.empty()) {
+            if(outError) *outError = "A prefab file path is required.";
+            return false;
+        }
+
+        const std::string finalPath = EnsurePrefabExtension(path);
+        const std::filesystem::path parent = std::filesystem::path(finalPath).parent_path();
+        if(!parent.empty()) {
+            std::error_code ec;
+            std::filesystem::create_directories(parent, ec);
+        }
+
+        if(!SceneSerializer::SavePrefabToFile(scene_, entityId, finalPath, outError))
+            return false;
+
+        // Remember the link on the source entity so Apply/Revert work without retyping the path.
+        if(Entity *entity = scene_.FindEntity(entityId)) {
+            const std::string stored = assetBrowser_.GetLibrary().MakeSceneRelativePath(
+                finalPath, viewport_.GetAssetBaseDir());
+            const std::string link = stored.empty() ? finalPath : stored;
+            if(entity->prefabSource != link) {
+                entity->prefabSource = link;
+                recordEdit("Link Prefab");
+                if(inspector_)
+                    inspector_->Refresh();
+            }
+        }
+
+        assetBrowser_.Refresh();
+        return true;
+    }
+
+    void EditorApp::onSavePrefabRequested(EntityId entityId) {
+        const Entity *entity = scene_.FindEntity(entityId);
+        if(!entity)
+            return;
+
+        std::string baseName = entity->name.empty() ? std::string("Prefab") : entity->name;
+        for(char &c : baseName) {
+            if(c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' || c == '<' || c == '>' || c == '|')
+                c = '_';
+        }
+        std::string dir = GetPrefabDirectory();
+        std::string defaultPath = dir.empty() ? (baseName + ".gprefab.json")
+                                             : (dir + "/" + baseName + ".gprefab.json");
+
+        Gorgon::UI::Input<std::string>(
+            "Save as Prefab",
+            "Write this entity and its children to a .gprefab.json file:",
+            "Path",
+            [this, entityId](const std::string &path) {
+                std::string err;
+                if(!SaveEntityAsPrefab(entityId, path, &err)) {
+                    Gorgon::UI::ShowMessage("Save as Prefab", err.empty() ? "Could not write the prefab." : err);
+                }
+            },
+            defaultPath,
+            [](const std::string &s) { return !s.empty(); },
+            Gorgon::UI::CloseOption::Cancel
+        );
+    }
+
+    bool EditorApp::InstantiatePrefabFile(const std::string &path, float worldX, float worldY,
+                                          EntityId *outRootId, std::string *outError) {
+        if(playMode_ != PlayMode::Stopped) {
+            if(outError) *outError = "Stop play mode before editing the scene.";
+            return false;
+        }
+        if(path.empty()) {
+            if(outError) *outError = "No prefab file given.";
+            return false;
+        }
+
+        const std::string link = assetBrowser_.GetLibrary().MakeSceneRelativePath(
+            path, viewport_.GetAssetBaseDir());
+
+        std::vector<EntityId> created;
+        EntityId rootId = InvalidEntityId;
+        if(!SceneSerializer::InstantiatePrefabFromFile(
+               path, scene_, worldX, worldY, link.empty() ? path : link, &rootId, &created, outError)) {
+            return false;
+        }
+
+        viewport_.SetSelectedEntities(created, false);
+        refreshPanels();
+        viewport_.Redraw();
+        recordEdit("Instantiate Prefab");
+        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+
+        if(outRootId)
+            *outRootId = rootId;
+        return true;
+    }
+
+    bool EditorApp::ApplyPrefabToEntity(EntityId entityId, std::string *outError) {
+        if(playMode_ != PlayMode::Stopped) {
+            if(outError) *outError = "Stop play mode before editing the scene.";
+            return false;
+        }
+
+        Entity *entity = scene_.FindEntity(entityId);
+        if(!entity) {
+            if(outError) *outError = "Selected entity no longer exists.";
+            return false;
+        }
+        if(entity->prefabSource.empty()) {
+            if(outError) *outError = "This entity is not linked to a prefab.";
+            return false;
+        }
+
+        std::string resolved;
+        if(!resolvePrefabPath(entity->prefabSource, viewport_.GetAssetBaseDir(), resolved)) {
+            if(outError) *outError = "Prefab file not found: " + resolved;
+            return false;
+        }
+
+        PrefabData prefab;
+        if(!SceneSerializer::LoadPrefabFromFile(resolved, prefab, outError))
+            return false;
+
+        // Re-apply the prefab's own contents, keeping this instance's identity and placement.
+        if(!SceneSerializer::RevertPrefabInstance(scene_, entityId, prefab, outError))
+            return false;
+
+        viewport_.ClearSpriteCache();
+        refreshPanels();
+        viewport_.Redraw();
+        recordEdit("Apply Prefab");
+        updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        return true;
+    }
+
+    bool EditorApp::RevertEntityToPrefab(EntityId entityId, std::string *outError) {
+        // Revert and Apply share one implementation: both restore the instance from the file.
+        return ApplyPrefabToEntity(entityId, outError);
+    }
+
     void EditorApp::setupAssetBrowser() {
         assetBrowser_.OnAssetActivated = [this](const AssetEntry &entry) {
             std::string error;
@@ -854,8 +1079,8 @@ namespace Gorgon :: Editor {
             if(outError) *outError = "Folders cannot be added to the scene.";
             return false;
         }
-        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts) {
-            if(outError) *outError = "Only image and script assets can be added to the scene.";
+        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts && entry.type != AssetType::Prefabs) {
+            if(outError) *outError = "Only image, script and prefab assets can be added to the scene.";
             return false;
         }
 
@@ -911,8 +1136,8 @@ namespace Gorgon :: Editor {
             if(outError) *outError = "Folders cannot be dropped into the scene.";
             return false;
         }
-        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts) {
-            if(outError) *outError = "Only image and script assets can be dropped into the scene.";
+        if(entry.type != AssetType::Images && entry.type != AssetType::Scripts && entry.type != AssetType::Prefabs) {
+            if(outError) *outError = "Only image, script and prefab assets can be dropped into the scene.";
             return false;
         }
 

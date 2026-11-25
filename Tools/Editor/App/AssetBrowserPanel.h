@@ -33,11 +33,12 @@ namespace Gorgon :: Editor {
         Audio,
         Fonts,
         Scripts,
+        Prefabs,
         Resources
     };
 
     /// Number of entries in AssetType (All included).
-    constexpr int AssetTypeCount = 6;
+    constexpr int AssetTypeCount = 7;
 
     /// Human readable name of an asset type ("All", "Images", ...).
     const char *GetAssetTypeName(AssetType type);

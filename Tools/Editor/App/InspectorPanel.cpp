@@ -107,6 +107,14 @@ namespace Gorgon :: Editor {
         panel_.Add(btnAddScript_);
         panel_.Add(btnRemoveScript_);
 
+        // ---- prefab --------------------------------------------------------
+        panel_.Add(lblPrefab_);
+        panel_.Add(lblPrefabSource_);
+        panel_.Add(lblPrefabPath_);
+        panel_.Add(btnApplyPrefab_);
+        panel_.Add(btnRevertPrefab_);
+        panel_.Add(btnSavePrefab_);
+
         // Sprite tint supports alpha so tint can fade an entity out.
         spriteTint_.SetAlpha(true);
         backgroundColor_.SetAlpha(false);
@@ -182,6 +190,11 @@ namespace Gorgon :: Editor {
         pickRow(lblScriptPath_, scriptPath_, btnPickScript_);
         fullRow(btnAddScript_);
         fullRow(btnRemoveScript_);
+
+        sectionRow(lblPrefab_);
+        fieldRow(lblPrefabSource_, lblPrefabPath_);
+        pairRow(btnApplyPrefab_, btnRevertPrefab_);
+        fullRow(btnSavePrefab_);
     }
 
     Entity *InspectorPanel::selectedEntity() {
@@ -377,6 +390,18 @@ namespace Gorgon :: Editor {
         btnRemoveCollider_.ClickEvent.Register([this]() { removeCollider(); });
         btnAddScript_.ClickEvent.Register([this]() { addScript(); });
         btnRemoveScript_.ClickEvent.Register([this]() { removeScript(); });
+        btnSavePrefab_.ClickEvent.Register([this]() {
+            if(Entity *entity = selectedEntity(); entity && OnSavePrefabRequested)
+                OnSavePrefabRequested(entity->id);
+        });
+        btnApplyPrefab_.ClickEvent.Register([this]() {
+            if(Entity *entity = selectedEntity(); entity && !entity->prefabSource.empty() && OnApplyPrefabRequested)
+                OnApplyPrefabRequested(entity->id);
+        });
+        btnRevertPrefab_.ClickEvent.Register([this]() {
+            if(Entity *entity = selectedEntity(); entity && !entity->prefabSource.empty() && OnRevertPrefabRequested)
+                OnRevertPrefabRequested(entity->id);
+        });
     }
 
     void InspectorPanel::updateVisibility() {
@@ -447,6 +472,14 @@ namespace Gorgon :: Editor {
         btnPickScript_.SetVisible(hasScript);
         btnAddScript_.SetVisible(hasEntity && !hasScript);
         btnRemoveScript_.SetVisible(hasScript);
+
+        const bool hasPrefab = hasEntity && !entity->prefabSource.empty();
+        lblPrefab_.SetVisible(hasEntity);
+        lblPrefabSource_.SetVisible(hasPrefab);
+        lblPrefabPath_.SetVisible(hasPrefab);
+        btnApplyPrefab_.SetVisible(hasPrefab);
+        btnRevertPrefab_.SetVisible(hasPrefab);
+        btnSavePrefab_.SetVisible(hasEntity);
     }
 
     void InspectorPanel::pushValues() {
@@ -511,6 +544,8 @@ namespace Gorgon :: Editor {
 
         if(entity->script && !scriptPath_.IsFocused())
             scriptPath_.Set(entity->script->path);
+
+        lblPrefabPath_.Text = entity->prefabSource;
 
         updating_ = false;
     }

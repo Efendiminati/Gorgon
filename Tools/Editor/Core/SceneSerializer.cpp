@@ -123,6 +123,10 @@ namespace Gorgon :: Editor {
                 eObj.Set("script", std::move(scObj));
             }
 
+            if(!e.prefabSource.empty()) {
+                eObj.Set("prefabSource", e.prefabSource);
+            }
+
             return eObj;
         }
 
@@ -214,6 +218,8 @@ namespace Gorgon :: Editor {
                 comp.path = getStringField(sc, "path", "");
                 e.script = std::move(comp);
             }
+
+            e.prefabSource = getStringField(eObj, "prefabSource", "");
 
             return true;
         }
@@ -582,6 +588,7 @@ namespace Gorgon :: Editor {
                 created.sprite = src.sprite;
                 created.collider = src.collider;
                 created.script = src.script;
+                created.prefabSource = src.prefabSource;
 
                 if(src.parentId == InvalidEntityId) {
                     created.transform.x += offsetX;
@@ -638,6 +645,434 @@ namespace Gorgon :: Editor {
             setError(outError, err.what());
             return false;
         }
+    }
+
+    // ---- Prefabs (.gprefab.json) --------------------------------------------
+
+    Gorgon::Encoding::JSON::Value SceneSerializer::PrefabToJson(
+        const Scene &scene,
+        EntityId rootId,
+        const std::string &prefabName
+    ) {
+        using Gorgon::Encoding::JSON;
+        JSON::Value root;
+        root.Set("schemaVersion", PrefabData::CurrentSchemaVersion);
+        root.Set("type", std::string("gorgon.prefab"));
+
+        const Entity *rootEntity = scene.FindEntity(rootId);
+        if(!rootEntity) {
+            root.Set("name", prefabName);
+            root.Set("rootId", 0);
+            JSON::Array emptyArr;
+            root.Set("entities", JSON::Value(std::move(emptyArr)));
+            return root;
+        }
+
+        const std::string resolvedName = prefabName.empty() ? rootEntity->name : prefabName;
+        root.Set("name", resolvedName);
+
+        // Collect root + descendants in DFS order so parents always precede children.
+        std::vector<EntityId> orderedIds;
+        std::unordered_set<EntityId> visited;
+        std::function<void(EntityId)> collect = [&](EntityId id) {
+            if(!visited.insert(id).second) return;
+            if(!scene.HasEntity(id)) return;
+            orderedIds.push_back(id);
+            for(EntityId childId : scene.GetChildIds(id)) {
+                collect(childId);
+            }
+        };
+        collect(rootId);
+
+        // Normalize IDs to 1..N so prefab files are self-contained and deterministic.
+        std::unordered_map<EntityId, EntityId> localIdMap;
+        localIdMap.reserve(orderedIds.size());
+        EntityId nextLocalId = 1;
+        for(EntityId oldId : orderedIds) {
+            localIdMap[oldId] = nextLocalId++;
+        }
+
+        root.Set("rootId", static_cast<int>(localIdMap[rootId]));
+
+        JSON::Array entitiesArr;
+        entitiesArr.reserve(orderedIds.size());
+        for(EntityId oldId : orderedIds) {
+            const Entity *src = scene.FindEntity(oldId);
+            if(!src) continue;
+
+            Entity copy = *src;
+            copy.id = localIdMap[oldId];
+            EntityId mappedParent = InvalidEntityId;
+            if(oldId == rootId) {
+                copy.parentId = InvalidEntityId;
+                copy.transform.x = 0.0f;
+                copy.transform.y = 0.0f;
+                copy.prefabSource.clear();
+            } else {
+                auto pit = localIdMap.find(src->parentId);
+                mappedParent = (pit != localIdMap.end()) ? pit->second : InvalidEntityId;
+                copy.parentId = mappedParent;
+            }
+            entitiesArr.push_back(entityToJson(copy, mappedParent));
+        }
+        root.Set("entities", std::move(entitiesArr));
+        return root;
+    }
+
+    std::string SceneSerializer::PrefabToJsonString(
+        const Scene &scene,
+        EntityId rootId,
+        const std::string &prefabName,
+        int indent
+    ) {
+        return Json.Encode(PrefabToJson(scene, rootId, prefabName), indent);
+    }
+
+    bool SceneSerializer::SavePrefabToFile(
+        const Scene &scene,
+        EntityId rootId,
+        const std::string &filePath,
+        std::string *outError,
+        int indent
+    ) {
+        const Entity *rootEntity = scene.FindEntity(rootId);
+        if(!rootEntity) {
+            setError(outError, "Cannot save prefab: entity #" + std::to_string(rootId) + " not found");
+            return false;
+        }
+        try {
+            const std::string text = PrefabToJsonString(scene, rootId, rootEntity->name, indent);
+            std::ofstream out(filePath, std::ios::binary | std::ios::trunc);
+            if(!out) {
+                setError(outError, "Failed to open prefab file for writing: " + filePath);
+                return false;
+            }
+            out.write(text.data(), static_cast<std::streamsize>(text.size()));
+            if(!out) {
+                setError(outError, "Failed while writing prefab file: " + filePath);
+                return false;
+            }
+            return true;
+        } catch(const std::exception &err) {
+            setError(outError, err.what());
+            return false;
+        }
+    }
+
+    bool SceneSerializer::LoadPrefabFromJson(
+        const Gorgon::Encoding::JSON::Value &root,
+        PrefabData &outPrefab,
+        std::string *outError
+    ) {
+        try {
+            if(!root.IsObject()) {
+                setError(outError, "Prefab root must be a JSON object");
+                return false;
+            }
+
+            const int version = getIntField(root, "schemaVersion", 1);
+            if(version < 1 || version > PrefabData::CurrentSchemaVersion) {
+                setError(outError, "Unsupported prefab schemaVersion: " + std::to_string(version));
+                return false;
+            }
+
+            if(!root.Has("entities") || !root["entities"].IsArray()) {
+                setError(outError, "Prefab JSON missing 'entities' array");
+                return false;
+            }
+
+            const auto &arr = root["entities"];
+            if(arr.GetCount() == 0) {
+                setError(outError, "Prefab 'entities' array is empty");
+                return false;
+            }
+
+            PrefabData parsed;
+            parsed.schemaVersion = version;
+            parsed.name = getStringField(root, "name", "");
+            parsed.entities.reserve(static_cast<std::size_t>(arr.GetCount()));
+
+            std::unordered_set<EntityId> seenIds;
+            for(int i = 0; i < arr.GetCount(); ++i) {
+                Entity e;
+                if(!entityFromJson(arr[i], i, e, outError)) {
+                    return false;
+                }
+                if(!seenIds.insert(e.id).second) {
+                    setError(outError, "Duplicate entity id in prefab: " + std::to_string(e.id));
+                    return false;
+                }
+                parsed.entities.push_back(std::move(e));
+            }
+
+            const int declaredRoot = getIntField(root, "rootId", 0);
+            if(declaredRoot > 0) {
+                parsed.rootId = static_cast<EntityId>(declaredRoot);
+            } else {
+                for(const auto &e : parsed.entities) {
+                    if(e.parentId == InvalidEntityId) {
+                        parsed.rootId = e.id;
+                        break;
+                    }
+                }
+            }
+
+            if(parsed.rootId == InvalidEntityId || seenIds.find(parsed.rootId) == seenIds.end()) {
+                setError(outError, "Prefab missing valid root entity");
+                return false;
+            }
+
+            std::unordered_map<EntityId, EntityId> parentMap;
+            parentMap.reserve(parsed.entities.size());
+            for(auto &e : parsed.entities) {
+                if(e.id == parsed.rootId) {
+                    e.parentId = InvalidEntityId;
+                } else if(e.parentId == InvalidEntityId || seenIds.find(e.parentId) == seenIds.end()) {
+                    setError(outError, "Prefab entity " + std::to_string(e.id) + " has invalid parentId ");
+                    return false;
+                }
+                parentMap[e.id] = e.parentId;
+            }
+
+            // Cycle check
+            for(const auto &e : parsed.entities) {
+                EntityId cur = e.parentId;
+                std::size_t hops = 0;
+                while(cur != InvalidEntityId) {
+                    if(cur == e.id || ++hops > parsed.entities.size()) {
+                        setError(outError, "Cycle detected in prefab hierarchy");
+                        return false;
+                    }
+                    cur = parentMap[cur];
+                }
+            }
+
+            if(parsed.name.empty()) {
+                for(const auto &e : parsed.entities) {
+                    if(e.id == parsed.rootId) {
+                        parsed.name = e.name;
+                        break;
+                    }
+                }
+            }
+
+            outPrefab = std::move(parsed);
+            return true;
+        } catch(const JSON::Error &err) {
+            setError(outError, err.what());
+            return false;
+        } catch(const std::exception &err) {
+            setError(outError, err.what());
+            return false;
+        }
+    }
+
+    bool SceneSerializer::LoadPrefabFromJsonString(
+        const std::string &jsonText,
+        PrefabData &outPrefab,
+        std::string *outError
+    ) {
+        try {
+            JSON::Value val = Json.Parse(jsonText);
+            return LoadPrefabFromJson(val, outPrefab, outError);
+        } catch(const JSON::Error &err) {
+            setError(outError, err.what());
+            return false;
+        } catch(const std::exception &err) {
+            setError(outError, err.what());
+            return false;
+        }
+    }
+
+    bool SceneSerializer::LoadPrefabFromFile(
+        const std::string &filePath,
+        PrefabData &outPrefab,
+        std::string *outError
+    ) {
+        std::ifstream in(filePath, std::ios::binary);
+        if(!in) {
+            setError(outError, "Failed to open prefab file: " + filePath);
+            return false;
+        }
+        std::ostringstream oss;
+        oss << in.rdbuf();
+        return LoadPrefabFromJsonString(oss.str(), outPrefab, outError);
+    }
+
+    bool SceneSerializer::InstantiatePrefab(
+        const PrefabData &prefab,
+        Scene &targetScene,
+        float worldX,
+        float worldY,
+        const std::string &prefabSource,
+        EntityId *outRootId,
+        std::vector<EntityId> *outAllIds,
+        std::string *outError
+    ) {
+        if(!prefab.IsValid()) {
+            setError(outError, "Cannot instantiate invalid or empty prefab");
+            return false;
+        }
+
+        std::unordered_set<std::string> usedNames;
+        for(const auto &existing : targetScene.GetEntities()) {
+            usedNames.insert(existing.name);
+        }
+
+        std::unordered_map<EntityId, EntityId> idMap;
+        idMap.reserve(prefab.entities.size());
+        std::vector<EntityId> createdIds;
+        createdIds.reserve(prefab.entities.size());
+
+        for(const auto &src : prefab.entities) {
+            const bool isRoot = (src.id == prefab.rootId);
+            const std::string desiredName = src.name.empty() ? (isRoot && !prefab.name.empty() ? prefab.name : std::string("Prefab")) : src.name;
+            const std::string uniqueName = isRoot ? makeUniqueEntityName(desiredName, usedNames) : desiredName;
+            usedNames.insert(uniqueName);
+
+            Entity &created = targetScene.CreateEntity(uniqueName, InvalidEntityId);
+            created.visible = src.visible;
+            created.locked = src.locked;
+            created.zOrder = src.zOrder;
+            created.transform = src.transform;
+            created.sprite = src.sprite;
+            created.collider = src.collider;
+            created.script = src.script;
+            created.prefabSource = isRoot ? prefabSource : src.prefabSource;
+
+            if(isRoot) {
+                created.transform.x = worldX;
+                created.transform.y = worldY;
+            }
+
+            idMap[src.id] = created.id;
+            createdIds.push_back(created.id);
+        }
+
+        for(const auto &src : prefab.entities) {
+            if(src.id == prefab.rootId || src.parentId == InvalidEntityId) {
+                continue;
+            }
+            auto pit = idMap.find(src.parentId);
+            if(pit == idMap.end()) continue;
+            if(Entity *dst = targetScene.FindEntity(idMap[src.id])) {
+                dst->parentId = pit->second;
+            }
+        }
+
+        const EntityId newRootId = idMap[prefab.rootId];
+        if(outRootId) {
+            *outRootId = newRootId;
+        }
+        if(outAllIds) {
+            *outAllIds = std::move(createdIds);
+        }
+        return true;
+    }
+
+    bool SceneSerializer::InstantiatePrefabFromFile(
+        const std::string &filePath,
+        Scene &targetScene,
+        float worldX,
+        float worldY,
+        const std::string &prefabSource,
+        EntityId *outRootId,
+        std::vector<EntityId> *outAllIds,
+        std::string *outError
+    ) {
+        PrefabData prefab;
+        if(!LoadPrefabFromFile(filePath, prefab, outError)) {
+            return false;
+        }
+        return InstantiatePrefab(prefab, targetScene, worldX, worldY, prefabSource, outRootId, outAllIds, outError);
+    }
+
+    bool SceneSerializer::RevertPrefabInstance(
+        Scene &scene,
+        EntityId instanceRootId,
+        const PrefabData &prefab,
+        std::string *outError
+    ) {
+        if(!prefab.IsValid()) {
+            setError(outError, "Cannot revert from invalid prefab");
+            return false;
+        }
+        Entity *instanceRoot = scene.FindEntity(instanceRootId);
+        if(!instanceRoot) {
+            setError(outError, "Prefab instance entity #" + std::to_string(instanceRootId) + " not found");
+            return false;
+        }
+
+        const Entity *prefabRoot = nullptr;
+        for(const auto &e : prefab.entities) {
+            if(e.id == prefab.rootId) {
+                prefabRoot = &e;
+                break;
+            }
+        }
+        if(!prefabRoot) {
+            setError(outError, "Prefab root entity missing");
+            return false;
+        }
+
+        // Preserve instance placement, parenting, and prefab link.
+        const float keepX = instanceRoot->transform.x;
+        const float keepY = instanceRoot->transform.y;
+        const EntityId keepParent = instanceRoot->parentId;
+        const std::string keepSource = instanceRoot->prefabSource;
+
+        // Remove existing descendants of the instance.
+        const std::vector<EntityId> directChildren = scene.GetChildIds(instanceRootId);
+        for(EntityId childId : directChildren) {
+            scene.RemoveEntity(childId, true);
+        }
+
+        // Re-fetch pointer after removals.
+        instanceRoot = scene.FindEntity(instanceRootId);
+        if(!instanceRoot) {
+            setError(outError, "Prefab instance root lost during revert");
+            return false;
+        }
+
+        instanceRoot->name = prefabRoot->name;
+        instanceRoot->visible = prefabRoot->visible;
+        instanceRoot->locked = prefabRoot->locked;
+        instanceRoot->zOrder = prefabRoot->zOrder;
+        instanceRoot->transform = prefabRoot->transform;
+        instanceRoot->transform.x = keepX;
+        instanceRoot->transform.y = keepY;
+        instanceRoot->parentId = keepParent;
+        instanceRoot->sprite = prefabRoot->sprite;
+        instanceRoot->collider = prefabRoot->collider;
+        instanceRoot->script = prefabRoot->script;
+        instanceRoot->prefabSource = keepSource;
+
+        // Recreate prefab descendants under instanceRootId.
+        std::unordered_map<EntityId, EntityId> idMap;
+        idMap[prefab.rootId] = instanceRootId;
+        for(const auto &src : prefab.entities) {
+            if(src.id == prefab.rootId) continue;
+            Entity &created = scene.CreateEntity(src.name, InvalidEntityId);
+            created.visible = src.visible;
+            created.locked = src.locked;
+            created.zOrder = src.zOrder;
+            created.transform = src.transform;
+            created.sprite = src.sprite;
+            created.collider = src.collider;
+            created.script = src.script;
+            created.prefabSource = src.prefabSource;
+            idMap[src.id] = created.id;
+        }
+        for(const auto &src : prefab.entities) {
+            if(src.id == prefab.rootId) continue;
+            auto pit = idMap.find(src.parentId);
+            if(pit == idMap.end()) continue;
+            if(Entity *dst = scene.FindEntity(idMap[src.id])) {
+                dst->parentId = pit->second;
+            }
+        }
+
+        return true;
     }
 
 } // namespace Gorgon::Editor

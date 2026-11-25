@@ -680,3 +680,233 @@ TEST_CASE("SceneRuntime loads a scene file, resolves paths and steps scripts", "
 
     std::filesystem::remove_all(dir, ec);
 }
+
+TEST_CASE("Prefab save, load and instantiate remap IDs and subtree links", "[EditorCore][Prefab]") {
+    std::error_code ec;
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_prefab_tests";
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    Scene scene;
+    // Root at a non-zero position: the file normalizes it to local origin.
+    Entity &root = scene.CreateEntity("Turret");
+    root.transform.x = 400.0f;
+    root.transform.y = -120.0f;
+    root.transform.rotation = 30.0f;
+    root.zOrder = 7;
+    root.sprite = SpriteComponent{"turret.png", {200, 40, 40, 255}};
+    const EntityId rootId = root.id;
+
+    Entity &barrel = scene.CreateEntity("Barrel", rootId);
+    barrel.transform.x = 12.0f;
+    barrel.transform.y = -4.0f;
+    barrel.collider = ColliderComponent{ColliderType::AABB, 24.0f, 8.0f, 4.0f, 0.0f, 0.0f};
+    const EntityId barrelId = barrel.id;
+
+    Entity &muzzle = scene.CreateEntity("Muzzle", barrelId);
+    muzzle.transform.x = 20.0f;
+    muzzle.transform.y = 0.0f;
+    muzzle.script = ScriptComponent{"fire.gs"};
+    const EntityId muzzleId = muzzle.id;
+
+    // An unrelated entity must not leak into the prefab.
+    scene.CreateEntity("Unrelated");
+
+    const auto prefabPath = (dir / "turret.gprefab.json").string();
+    std::string error;
+    REQUIRE(SceneSerializer::SavePrefabToFile(scene, rootId, prefabPath, &error));
+    INFO("prefab save error: " << error);
+    REQUIRE(std::filesystem::exists(prefabPath));
+
+    PrefabData prefab;
+    REQUIRE(SceneSerializer::LoadPrefabFromFile(prefabPath, prefab, &error));
+    INFO("prefab load error: " << error);
+    REQUIRE(prefab.IsValid());
+    REQUIRE(prefab.name == "Turret");
+    REQUIRE(prefab.entities.size() == 3);
+
+    // Local IDs are normalized to 1..N with the root first.
+    REQUIRE(prefab.rootId == 1);
+    const Entity *prefabRoot = nullptr;
+    const Entity *prefabBarrel = nullptr;
+    const Entity *prefabMuzzle = nullptr;
+    for(const auto &e : prefab.entities) {
+        if(e.name == "Turret") prefabRoot = &e;
+        else if(e.name == "Barrel") prefabBarrel = &e;
+        else if(e.name == "Muzzle") prefabMuzzle = &e;
+    }
+    REQUIRE(prefabRoot);
+    REQUIRE(prefabBarrel);
+    REQUIRE(prefabMuzzle);
+
+    // The root transform is stored relative to the prefab origin.
+    REQUIRE(Catch::Approx(prefabRoot->transform.x) == 0.0);
+    REQUIRE(Catch::Approx(prefabRoot->transform.y) == 0.0);
+    REQUIRE(Catch::Approx(prefabRoot->transform.rotation) == 30.0);
+    REQUIRE(prefabRoot->zOrder == 7);
+    REQUIRE(prefabBarrel->parentId == prefabRoot->id);
+    REQUIRE(prefabMuzzle->parentId == prefabBarrel->id);
+    REQUIRE(Catch::Approx(prefabBarrel->transform.x) == 12.0);
+    REQUIRE(Catch::Approx(prefabMuzzle->transform.x) == 20.0);
+    REQUIRE(prefabMuzzle->script.has_value());
+
+    // Instantiate into a different scene at a world position with fresh IDs.
+    Scene target;
+    Entity &placeholder = target.CreateEntity("Turret"); // name collision forces a unique root name
+    const EntityId placeholderId = placeholder.id;
+
+    EntityId instanceRoot = InvalidEntityId;
+    std::vector<EntityId> created;
+    REQUIRE(SceneSerializer::InstantiatePrefab(prefab, target, 250.0f, -75.0f, "turret.gprefab.json",
+                                               &instanceRoot, &created, &error));
+    INFO("prefab instantiate error: " << error);
+    REQUIRE(instanceRoot != InvalidEntityId);
+    REQUIRE(instanceRoot != prefabRoot->id);
+    REQUIRE(instanceRoot != placeholderId);
+    REQUIRE(created.size() == 3);
+    REQUIRE(target.GetEntityCount() == 4);
+
+    const Entity *instRoot = target.FindEntity(instanceRoot);
+    REQUIRE(instRoot);
+    REQUIRE(instRoot->name == "Turret Copy");
+    REQUIRE(instRoot->prefabSource == "turret.gprefab.json");
+    REQUIRE(Catch::Approx(instRoot->transform.x) == 250.0);
+    REQUIRE(Catch::Approx(instRoot->transform.y) == -75.0);
+    REQUIRE(instRoot->parentId == InvalidEntityId);
+
+    // Children keep their local offsets and are re-parented to the new IDs.
+    const std::vector<EntityId> children = target.GetChildIds(instanceRoot);
+    REQUIRE(children.size() == 1);
+    const Entity *instBarrel = target.FindEntity(children.front());
+    REQUIRE(instBarrel);
+    REQUIRE(instBarrel->name == "Barrel");
+    REQUIRE(Catch::Approx(instBarrel->transform.x) == 12.0);
+    const std::vector<EntityId> grandchildren = target.GetChildIds(instBarrel->id);
+    REQUIRE(grandchildren.size() == 1);
+    const Entity *instMuzzle = target.FindEntity(grandchildren.front());
+    REQUIRE(instMuzzle);
+    REQUIRE(instMuzzle->name == "Muzzle");
+    REQUIRE(instMuzzle->script.has_value());
+    // Only the instance root carries the prefab link.
+    REQUIRE(instBarrel->prefabSource.empty());
+
+    // A second instantiation must not reuse IDs or collide on the root name.
+    EntityId secondRoot = InvalidEntityId;
+    REQUIRE(SceneSerializer::InstantiatePrefab(prefab, target, 0.0f, 0.0f, "turret.gprefab.json", &secondRoot));
+    REQUIRE(secondRoot != instanceRoot);
+    REQUIRE(target.GetEntityCount() == 7);
+    REQUIRE(target.FindEntity(secondRoot)->name == "Turret Copy 2");
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Prefab JSON rejects malformed payloads and missing files", "[EditorCore][Prefab]") {
+    PrefabData prefab;
+    std::string error;
+
+    REQUIRE_FALSE(SceneSerializer::LoadPrefabFromJsonString("not json at all", prefab, &error));
+    REQUIRE_FALSE(error.empty());
+
+    REQUIRE_FALSE(SceneSerializer::LoadPrefabFromJsonString("{\"schemaVersion\":1,\"entities\":[]}", prefab, &error));
+    REQUIRE_FALSE(error.empty());
+
+    // Entity referencing a parent that is not part of the prefab.
+    REQUIRE_FALSE(SceneSerializer::LoadPrefabFromJsonString(
+        "{\"schemaVersion\":1,\"rootId\":1,\"entities\":["
+        "{\"id\":1,\"parentId\":0,\"name\":\"Root\"},"
+        "{\"id\":2,\"parentId\":9,\"name\":\"Orphan\"}]}",
+        prefab, &error));
+    REQUIRE_FALSE(error.empty());
+
+    // Future schema version.
+    REQUIRE_FALSE(SceneSerializer::LoadPrefabFromJsonString(
+        "{\"schemaVersion\":99,\"rootId\":1,\"entities\":[{\"id\":1,\"parentId\":0,\"name\":\"Root\"}]}",
+        prefab, &error));
+    REQUIRE_FALSE(error.empty());
+
+    // A missing file fails without leaving a half-built prefab behind.
+    REQUIRE_FALSE(SceneSerializer::LoadPrefabFromFile("no_such_prefab.gprefab.json", prefab, &error));
+    REQUIRE_FALSE(prefab.IsValid());
+
+    Scene scratch;
+    std::string instantiateError;
+    REQUIRE_FALSE(SceneSerializer::InstantiatePrefab(prefab, scratch, 0.0f, 0.0f,
+                                                     std::string(), nullptr, nullptr, &instantiateError));
+    REQUIRE(scratch.GetEntityCount() == 0);
+
+    // Saving a prefab for an entity that does not exist is refused.
+    Scene empty;
+    std::string saveError;
+    REQUIRE_FALSE(SceneSerializer::SavePrefabToFile(empty, 42, "nope.gprefab.json", &saveError));
+    REQUIRE_FALSE(saveError.empty());
+}
+
+TEST_CASE("Scene round-trip preserves prefabSource and prefab instances survive a save", "[EditorCore][Prefab][JSON]") {
+    std::error_code ec;
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_prefab_roundtrip";
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    Scene scene;
+    Entity &crate = scene.CreateEntity("Crate");
+    crate.sprite = SpriteComponent{"crate.png", {255, 255, 255, 255}};
+    crate.prefabSource = "Prefabs/crate.gprefab.json";
+    const EntityId crateId = crate.id;
+
+    Entity &lid = scene.CreateEntity("Lid", crateId);
+    lid.transform.y = -18.0f;
+    const EntityId lidId = lid.id;
+
+    // Plain entities stay link-free.
+    Entity &floorEntity = scene.CreateEntity("Floor");
+    const EntityId floorId = floorEntity.id;
+
+    const auto scenePath = (dir / "scene.gscene.json").string();
+    std::string error;
+    REQUIRE(SceneSerializer::SaveToFile(scene, scenePath, &error));
+    INFO("scene save error: " << error);
+
+    Scene reloaded;
+    REQUIRE(SceneSerializer::LoadFromFile(scenePath, reloaded, &error));
+    INFO("scene load error: " << error);
+    REQUIRE(reloaded == scene);
+    REQUIRE(reloaded.FindEntity(crateId)->prefabSource == "Prefabs/crate.gprefab.json");
+    REQUIRE(reloaded.FindEntity(lidId)->prefabSource.empty());
+    REQUIRE(reloaded.FindEntity(floorId)->prefabSource.empty());
+
+    // A real prefab instance keeps its link through a scene round-trip.
+    const auto prefabPath = (dir / "Prefabs" / "crate.gprefab.json").string();
+    std::filesystem::create_directories(std::filesystem::path(prefabPath).parent_path(), ec);
+    REQUIRE(SceneSerializer::SavePrefabToFile(scene, crateId, prefabPath, &error));
+    INFO("prefab save error: " << error);
+
+    Scene runtimeScene;
+    EntityId instRoot = InvalidEntityId;
+    REQUIRE(SceneSerializer::InstantiatePrefabFromFile(prefabPath, runtimeScene, 64.0f, 32.0f,
+                                                       "Prefabs/crate.gprefab.json", &instRoot, nullptr, &error));
+    INFO("prefab instantiate error: " << error);
+    const auto instScenePath = (dir / "instance.gscene.json").string();
+    REQUIRE(SceneSerializer::SaveToFile(runtimeScene, instScenePath, &error));
+    Scene instReloaded;
+    REQUIRE(SceneSerializer::LoadFromFile(instScenePath, instReloaded, &error));
+    const Entity *instReloadedRoot = instReloaded.FindEntity(instRoot);
+    REQUIRE(instReloadedRoot);
+    REQUIRE(instReloadedRoot->prefabSource == "Prefabs/crate.gprefab.json");
+
+    // Revert restores the prefab's contents while keeping the instance's placement and ID.
+    PrefabData prefab;
+    REQUIRE(SceneSerializer::LoadPrefabFromFile(prefabPath, prefab, &error));
+    instReloaded.FindEntity(instRoot)->sprite->tint = {0, 0, 0, 255};
+    instReloaded.FindEntity(instRoot)->transform.x = 999.0f;
+    REQUIRE(SceneSerializer::RevertPrefabInstance(instReloaded, instRoot, prefab, &error));
+    INFO("prefab revert error: " << error);
+    const Entity *reverted = instReloaded.FindEntity(instRoot);
+    REQUIRE(reverted);
+    REQUIRE(Catch::Approx(reverted->transform.x) == 999.0);
+    REQUIRE(reverted->prefabSource == "Prefabs/crate.gprefab.json");
+    REQUIRE(reverted->sprite.has_value());
+    REQUIRE(reverted->sprite->tint == (ColorRGBA{255, 255, 255, 255}));
+    REQUIRE(instReloaded.GetChildIds(instRoot).size() == 1);
+
+    std::filesystem::remove_all(dir, ec);
+}

@@ -77,6 +77,12 @@ namespace Gorgon :: Editor {
         /// path for the selected entity. EditorApp routes this to AssetBrowserPanel::BeginPicker.
         std::function<void(bool isScript)> OnBrowseRequested;
 
+        /// Prefab actions for the selected entity: save it as a .gprefab.json, push the prefab's
+        /// current contents into this instance, or reset the instance to the prefab on disk.
+        std::function<void(EntityId)> OnSavePrefabRequested;
+        std::function<void(EntityId)> OnApplyPrefabRequested;
+        std::function<void(EntityId)> OnRevertPrefabRequested;
+
         /// Applies a picked asset path to the selected entity's sprite or script component,
         /// creating the component when it is missing. Used by the asset-browser picker.
         void SetPickedAsset(const std::string &path, bool isScript);
@@ -178,6 +184,14 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button    btnPickScript_{"..."};
         Gorgon::Widgets::Button    btnAddScript_{"+ Add Script"};
         Gorgon::Widgets::Button    btnRemoveScript_{"- Remove Script"};
+
+        // ---- Prefab ------------------------------------------------------------
+        Gorgon::Widgets::Label     lblPrefab_{"Prefab", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblPrefabSource_{"Source"};
+        Gorgon::Widgets::Label     lblPrefabPath_{""};
+        Gorgon::Widgets::Button    btnApplyPrefab_{"Apply"};
+        Gorgon::Widgets::Button    btnRevertPrefab_{"Revert"};
+        Gorgon::Widgets::Button    btnSavePrefab_{"Save as Prefab"};
 
         std::vector<Row> rows_;
         bool updating_ = false;

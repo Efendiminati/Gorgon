@@ -49,6 +49,7 @@ namespace {
     int RunAssetBrowserSelfTest();
     int RunMultiSelectSelfTest();
     int RunCopyPasteSelfTest();
+    int RunPrefabSelfTest();
 
     int RunSelfTest() {
         using namespace Gorgon::Editor;
@@ -226,7 +227,11 @@ namespace {
             return assetResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, round-trip, asset browser)\n";
+        if(const int prefabResult = RunPrefabSelfTest()) {
+            return prefabResult;
+        }
+
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, round-trip, asset browser)\n";
         return 0;
     }
 
@@ -536,6 +541,177 @@ namespace {
             return 1;
         }
 
+        return 0;
+    }
+
+    /// Prefabs: save a subtree to .gprefab.json, reload it, instantiate with fresh IDs at a
+    /// target position, verify the prefab link survives a scene round-trip, and revert.
+    int RunPrefabSelfTest() {
+        using namespace Gorgon::Editor;
+
+        std::error_code ec;
+        const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_prefab_selftest";
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+
+        Scene scene;
+        scene.settings.gridSize = 32;
+
+        Entity &ship = scene.CreateEntity("Ship");
+        ship.transform.x = 300.0f;
+        ship.transform.y = 200.0f;
+        ship.transform.rotation = 45.0f;
+        ship.sprite = SpriteComponent{"ship.png", {120, 200, 255, 255}};
+        const EntityId shipId = ship.id;
+
+        Entity &wing = scene.CreateEntity("WingL", shipId);
+        wing.transform.x = -20.0f;
+        const EntityId wingId = wing.id;
+
+        Entity &gun = scene.CreateEntity("Gun", wingId);
+        gun.transform.x = -8.0f;
+        gun.transform.y = 6.0f;
+        const EntityId gunId = gun.id;
+
+        scene.CreateEntity("Bystander");
+
+        const auto prefabPath = (dir / "ship.gprefab.json").string();
+        std::string error;
+        if(!SceneSerializer::SavePrefabToFile(scene, shipId, prefabPath, &error)) {
+            std::cerr << "FAIL: prefab save: " << error << "\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        PrefabData prefab;
+        if(!SceneSerializer::LoadPrefabFromFile(prefabPath, prefab, &error)) {
+            std::cerr << "FAIL: prefab load: " << error << "\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        if(!prefab.IsValid() || prefab.entities.size() != 3 || prefab.name != "Ship") {
+            std::cerr << "FAIL: prefab contents wrong (" << prefab.entities.size() << " entities)\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // Root is stored at the local origin; children keep their offsets.
+        const Entity *prefabRoot = nullptr;
+        for(const auto &e : prefab.entities) {
+            if(e.id == prefab.rootId) prefabRoot = &e;
+        }
+        if(!prefabRoot || !Approx(prefabRoot->transform.x, 0.0f) || !Approx(prefabRoot->transform.y, 0.0f) ||
+           !Approx(prefabRoot->transform.rotation, 45.0f)) {
+            std::cerr << "FAIL: prefab root transform not normalized\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // Instantiate into a fresh scene at a target position.
+        Scene target;
+        EntityId instRoot = InvalidEntityId;
+        std::vector<EntityId> created;
+        if(!SceneSerializer::InstantiatePrefab(prefab, target, 128.0f, -64.0f, "ship.gprefab.json",
+                                               &instRoot, &created, &error)) {
+            std::cerr << "FAIL: prefab instantiate: " << error << "\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        const Entity *instRootEntity = target.FindEntity(instRoot);
+        if(!instRootEntity || created.size() != 3 || target.GetEntityCount() != 3) {
+            std::cerr << "FAIL: prefab instance did not create the full subtree\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        if(!Approx(instRootEntity->transform.x, 128.0f) || !Approx(instRootEntity->transform.y, -64.0f)) {
+            std::cerr << "FAIL: prefab instance placed at ("
+                      << instRootEntity->transform.x << ", " << instRootEntity->transform.y << ")\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        if(instRootEntity->prefabSource != "ship.gprefab.json") {
+            std::cerr << "FAIL: prefab instance missing prefabSource (got '"
+                      << instRootEntity->prefabSource << "')\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // Subtree links are remapped onto the new IDs.
+        const auto instChildren = target.GetChildIds(instRoot);
+        if(instChildren.size() != 1) {
+            std::cerr << "FAIL: prefab instance root has " << instChildren.size() << " children\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        const auto instGrandchildren = target.GetChildIds(instChildren.front());
+        if(instGrandchildren.size() != 1) {
+            std::cerr << "FAIL: prefab instance child has " << instGrandchildren.size() << " children\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        const Entity *instGun = target.FindEntity(instGrandchildren.front());
+        if(!instGun || instGun->name != "Gun" || !Approx(instGun->transform.y, 6.0f)) {
+            std::cerr << "FAIL: prefab descendant transform not preserved\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // The prefab link survives a scene save/load round-trip.
+        const auto scenePath = (dir / "prefab_scene.gscene.json").string();
+        if(!SceneSerializer::SaveToFile(target, scenePath, &error) ||
+           !SceneSerializer::LoadFromFile(scenePath, target, &error)) {
+            std::cerr << "FAIL: prefab scene round-trip: " << error << "\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        Entity *roundTripped = target.FindEntity(instRoot);
+        if(!roundTripped || roundTripped->prefabSource != "ship.gprefab.json") {
+            std::cerr << "FAIL: prefabSource lost in scene round-trip\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // Revert restores the prefab contents but keeps placement, ID and link.
+        roundTripped->sprite->tint = {0, 0, 0, 255};
+        roundTripped->transform.y = 777.0f;
+        if(!SceneSerializer::RevertPrefabInstance(target, instRoot, prefab, &error)) {
+            std::cerr << "FAIL: prefab revert: " << error << "\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        const Entity *reverted = target.FindEntity(instRoot);
+        if(!reverted || !Approx(reverted->transform.y, 777.0f) ||
+           reverted->prefabSource != "ship.gprefab.json" ||
+           reverted->sprite->tint != (ColorRGBA{120, 200, 255, 255})) {
+            std::cerr << "FAIL: prefab revert did not restore contents while keeping placement\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        // The asset browser classifies .gprefab.json as a prefab asset.
+        if(GetAssetTypeForExtension("gprefab.json") != AssetType::Prefabs ||
+           GetAssetTypeForExtension("gprefab") != AssetType::Prefabs) {
+            std::cerr << "FAIL: .gprefab.json is not classified as a prefab asset\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        AssetLibrary library;
+        if(!library.SetRoot(dir.generic_string(), &error) ||
+           library.GetVisibleCount() != 1) {
+            std::cerr << "FAIL: asset browser did not list the prefab file ("
+                      << library.GetVisibleCount() << " entries)\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        library.SetFilter(AssetType::Prefabs);
+        if(library.GetVisibleCount() != 1 || library.GetVisible()[0].type != AssetType::Prefabs) {
+            std::cerr << "FAIL: Prefabs filter did not isolate the .gprefab.json file\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        std::filesystem::remove_all(dir, ec);
         return 0;
     }
 
