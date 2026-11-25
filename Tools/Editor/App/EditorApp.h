@@ -4,8 +4,10 @@
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "AssetBrowserPanel.h"
+#include "ConsolePanel.h"
 #include "HierarchyPanel.h"
 #include "InspectorPanel.h"
+#include "ScriptEditorPanel.h"
 #include "Viewport.h"
 
 #include <Gorgon/Input/Shortcuts.h>
@@ -29,6 +31,13 @@ namespace Gorgon :: Editor {
         Paused
     };
 
+    /// Panel that fills the bottom dock. Both live in the same window area; only the active one is
+    /// laid out inside it, so switching tabs never needs a re-creation of either panel.
+    enum class BottomTab {
+        Assets = 0,
+        Console
+    };
+
     class EditorApp {
     public:
         explicit EditorApp(Gorgon::UI::Window &window);
@@ -50,6 +59,23 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Panel &GetInspectorPanel() { return inspectorPanel_; }
         Gorgon::Widgets::Panel &GetAssetBrowserPanel() { return assetBrowser_.GetPanel(); }
         AssetBrowserPanel &GetAssetBrowser() { return assetBrowser_; }
+
+        // ---- Console & script editor ----------------------------------------
+        ConsolePanel &GetConsolePanel() { return console_; }
+        ScriptEditorPanel &GetScriptEditor() { return scriptEditor_; }
+
+        BottomTab GetBottomTab() const { return bottomTab_; }
+        /// Switches the bottom dock between the asset browser and the console.
+        void ShowBottomTab(BottomTab tab);
+
+        /// Opens the built-in .gs editor on `path`. A relative path is resolved against the scene's
+        /// asset folder (then the browser root), so a scene-stored script path works unchanged.
+        bool OpenScriptEditor(const std::string &path, std::string *outError = nullptr);
+
+        /// Writes one line to the console (the play session's log is the single sink, so it is
+        /// visible in the Console tab and survives Play being stopped).
+        void LogMessage(LogSeverity severity, const std::string &message,
+                        const std::string &source = std::string("Editor"));
 
         /// Inserts the asset selected in the browser into the scene at the viewport center.
         bool InsertSelectedAssetIntoScene(std::string *outError = nullptr);
@@ -125,6 +151,11 @@ namespace Gorgon :: Editor {
         void updateWindowTitle();
         void updateStatusText(float worldX, float worldY, float zoom);
         void updatePlayButtons();
+        void updateBottomTabButtons();
+        /// Console entries appear from frame ticks and from panel actions; push them into the panel.
+        void syncConsole();
+        /// Points the console at the play session's log and installs the script editor callbacks.
+        void setupScriptEditor();
 
         // Phase 5 helpers
         void setupShortcuts();
@@ -196,6 +227,8 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button btnUndo_{"Undo"};
         Gorgon::Widgets::Button btnRedo_{"Redo"};
         Gorgon::Widgets::Button btnResetView_{"Reset View"};
+        Gorgon::Widgets::Button btnAssetsTab_{"Assets"};
+        Gorgon::Widgets::Button btnConsoleTab_{"Console"};
         Gorgon::Widgets::Checkbox chkGridSnap_{"Grid Snap", true};
         Gorgon::Widgets::Label lblStatus_{"Ready"};
 
@@ -203,9 +236,15 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Panel hierarchyPanel_{Gorgon::Widgets::Registry::Panel_Left};
         Gorgon::Widgets::Panel inspectorPanel_{Gorgon::Widgets::Registry::Panel_Right};
         AssetBrowserPanel assetBrowser_;
+        ConsolePanel console_;
         Gorgon::Widgets::Layerbox viewportBox_{Gorgon::Widgets::Registry::Layerbox_Blank};
 
-        // The Asset Browser dock itself lives in AssetBrowserPanel (Phase 4).
+        // Compile-only session behind the script editor's "Check Syntax". Never started, so it owns
+        // no scene and its libraries are built and dropped inside CheckSyntax().
+        PlaySession compiler_;
+        // Overlays the viewport while open.
+        ScriptEditorPanel scriptEditor_;
+        BottomTab bottomTab_ = BottomTab::Assets;
 
         EditorViewport viewport_;
         std::unique_ptr<HierarchyPanel> hierarchy_;

@@ -16,6 +16,8 @@ add_library(GorgonEditorCore STATIC
     Core/ComponentSimulation.h
     Core/ComponentSimulation.cpp
     Core/InputState.h
+    Core/ScriptLog.h
+    Core/ScriptLog.cpp
     Core/PlaySession.h
     Core/PlaySession.cpp
     Core/SceneRuntime.h

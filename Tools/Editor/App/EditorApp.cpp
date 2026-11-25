@@ -15,6 +15,7 @@
 #include <iostream>
 #include <cstdlib>
 #include <sstream>
+#include <vector>
 
 namespace Gorgon :: Editor {
 
@@ -52,7 +53,10 @@ namespace Gorgon :: Editor {
         window_.Add(hierarchyPanel_);
         window_.Add(inspectorPanel_);
         assetBrowser_.Attach(window_);
+        console_.Attach(window_);
         window_.Add(viewportBox_);
+        // Added last so the script editor's window sits above the viewport it overlays.
+        scriptEditor_.Attach(window_);
 
         toolbarPanel_.EnableScroll(false, false);
         hierarchyPanel_.EnableScroll(true, false);
@@ -163,6 +167,13 @@ namespace Gorgon :: Editor {
                     Gorgon::UI::ShowMessage("Revert Prefab", err.empty() ? "Could not revert to the prefab." : err);
                 }
             };
+        if(inspector_)
+            inspector_->OnEditScriptRequested = [this](const std::string &path) {
+                std::string err;
+                if(!OpenScriptEditor(path, &err)) {
+                    Gorgon::UI::ShowMessage("Edit Script", err.empty() ? "Could not open the script." : err);
+                }
+            };
 
         // Keyboard preview for Space+left-drag pan and Shift multi-select
         {
@@ -189,6 +200,7 @@ namespace Gorgon :: Editor {
 
         populateSampleScene();
         setupAssetBrowser();
+        setupScriptEditor();
         if(hierarchy_)
             hierarchy_->Rebuild();
         if(inspector_)
@@ -324,7 +336,16 @@ namespace Gorgon :: Editor {
         shortcuts_.Set(Keys::Z, M::ShiftCtrl, [this]() { Redo(); });
         shortcuts_.Set(Keys::N, M::Ctrl, [this]() { NewSceneInteractive(); });
         shortcuts_.Set(Keys::O, M::Ctrl, [this]() { OpenSceneInteractive(); });
-        shortcuts_.Set(Keys::S, M::Ctrl, [this]() { onSaveClicked(); });
+        // Ctrl+S saves whatever the user is looking at: the open script when the script editor is
+        // up, the scene otherwise.
+        shortcuts_.Set(Keys::S, M::Ctrl, [this]() {
+            if(scriptEditor_.IsOpen()) {
+                scriptEditor_.SaveInteractive();
+                return;
+            }
+
+            onSaveClicked();
+        });
         shortcuts_.Set(Keys::S, M::ShiftCtrl, [this]() { onSaveAsClicked(); });
 
         // Entity shortcuts are meaningless while a widget is capturing keystrokes: typing a name
@@ -382,6 +403,8 @@ namespace Gorgon :: Editor {
         btnRedo_.SetWidth(Units(2.5));
         btnResetView_.SetWidth(Units(3.8));
         chkGridSnap_.SetWidth(Units(4.0));
+        btnAssetsTab_.SetWidth(Units(2.7));
+        btnConsoleTab_.SetWidth(Units(3.0));
         lblStatus_.SetWidth(Units(14.0));
 
         btnNew_.ClickEvent.Register(*this, &EditorApp::onNewClicked);
@@ -399,12 +422,16 @@ namespace Gorgon :: Editor {
         chkGridSnap_.ChangedEvent.Register([this]() {
             viewport_.SetGridSnap(chkGridSnap_.GetState());
         });
+        btnAssetsTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Assets); });
+        btnConsoleTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Console); });
 
         toolbarOrganizer_
             << btnNew_ << btnOpen_ << btnSave_ << btnSaveAs_
             << btnPlay_ << btnPause_ << btnStop_
             << btnUndo_ << btnRedo_
-            << btnResetView_ << chkGridSnap_ << lblStatus_;
+            << btnResetView_ << chkGridSnap_
+            // Bottom dock tabs: the asset browser and the script console share one dock row.
+            << btnAssetsTab_ << btnConsoleTab_ << lblStatus_;
     }
 
     void EditorApp::buildDockPlaceholders() {
@@ -441,7 +468,24 @@ namespace Gorgon :: Editor {
         inspectorPanel_.Move(Pixels(leftW + centerW, middleY));
         inspectorPanel_.Resize(Pixels(rightW, middleH));
 
-        assetBrowser_.Layout(0, middleY + middleH, sz.Width, sz.Height - (middleY + middleH));
+        // Bottom dock: the asset browser and the console share the row; only the active tab is
+        // laid out inside it. The inactive one is parked far outside the window instead of being
+        // hidden, because a hidden Layerbox keeps its layers attached and would still swallow the
+        // wheel over the visible panel.
+        const int bottomTop = middleY + middleH;
+        const int bottomHeight = std::max(0, sz.Height - bottomTop);
+        constexpr int kParkedX = -16384;
+        if(bottomTab_ == BottomTab::Console) {
+            assetBrowser_.Layout(kParkedX, bottomTop, sz.Width, bottomHeight);
+            console_.Layout(0, bottomTop, sz.Width, bottomHeight);
+        }
+        else {
+            console_.Layout(kParkedX, bottomTop, sz.Width, bottomHeight);
+            assetBrowser_.Layout(0, bottomTop, sz.Width, bottomHeight);
+        }
+
+        if(scriptEditor_.IsOpen())
+            scriptEditor_.Layout(leftW, middleY, centerW, middleH);
 
         if(hierarchy_)
             hierarchy_->Layout();
@@ -665,10 +709,13 @@ namespace Gorgon :: Editor {
     // ---- Phase 5: play-in-editor -------------------------------------------
 
     void EditorApp::onFrame() {
-        if(playMode_ != PlayMode::Playing)
-            return;
+        if(playMode_ == PlayMode::Playing)
+            TickPlay(float(Gorgon::Time::DeltaTime()) / 1000.0f);
 
-        TickPlay(float(Gorgon::Time::DeltaTime()) / 1000.0f);
+        // Script Log()/Print() output, compile failures and runtime errors arrive from the play tick
+        // and from panel actions; one version check per frame keeps the console current without
+        // rebuilding it when nothing was written.
+        syncConsole();
     }
 
     void EditorApp::TickPlay(float dt) {
@@ -742,6 +789,8 @@ namespace Gorgon :: Editor {
         viewport_.Redraw();
         updatePlayButtons();
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
+        // Compile failures and Start hook output happened just now: show them without waiting a frame.
+        syncConsole();
         return true;
     }
 
@@ -1056,6 +1105,16 @@ namespace Gorgon :: Editor {
 
     void EditorApp::setupAssetBrowser() {
         assetBrowser_.OnAssetActivated = [this](const AssetEntry &entry) {
+            // Double clicking a script opens it for editing; every other asset keeps the
+            // "add to the scene" behaviour.
+            if(!entry.isDirectory && entry.type == AssetType::Scripts) {
+                std::string error;
+                if(!OpenScriptEditor(entry.fullPath, &error)) {
+                    Gorgon::UI::ShowMessage("Edit Script", error.empty() ? "Could not open the script." : error);
+                }
+                return;
+            }
+
             std::string error;
             if(!insertAsset(entry, &error) && !error.empty()) {
                 Gorgon::UI::ShowMessage("Add to Scene", error);
@@ -1204,6 +1263,106 @@ namespace Gorgon :: Editor {
         recordEdit(res.attachedScript ? "Attach Script" : "Drop Asset");
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
         return true;
+    }
+
+    // ---- Console & script editor -------------------------------------------
+
+    void EditorApp::setupScriptEditor() {
+        // The console shows the play session's log: the same ring buffer that captures GScript
+        // Log()/Print(), compile failures and runtime errors, and that outlives Stop().
+        console_.SetSource(&play_.GetLog());
+        console_.OnCleared = [this]() {
+            LogMessage(LogSeverity::Info, "Console cleared", "Console");
+        };
+
+        // "Check Syntax" compiles through a PlaySession that is never started: it builds the same
+        // libraries a running script gets, but only compiles, so nothing the script contains runs.
+        scriptEditor_.OnCheckSyntax = [this](const std::string &source, const std::string &path,
+                                             std::string &error) {
+            const bool compiled = compiler_.CheckSyntax(source, path, &error);
+            const std::string name = path.empty() ? std::string("<buffer>") : path;
+            if(compiled)
+                LogMessage(LogSeverity::Info, "Syntax OK: " + name, "Script Editor");
+            else
+                LogMessage(LogSeverity::Error, "Syntax error in " + name + ": " + error, "Script Editor");
+
+            return compiled;
+        };
+
+        scriptEditor_.OnSaved = [this](const std::string &path) {
+            LogMessage(LogSeverity::Info, "Saved script " + path, "Script Editor");
+            assetBrowser_.Refresh();
+        };
+
+        scriptEditor_.OnOpened = [this](const std::string &path) {
+            LogMessage(LogSeverity::Info, "Editing script " + path, "Script Editor");
+        };
+
+        scriptEditor_.OnClosed = [this]() {
+            // Opening the editor disables scene editing (it covers the viewport); hand it back.
+            viewport_.SetEditEnabled(playMode_ == PlayMode::Stopped);
+            viewport_.Redraw();
+        };
+
+        updateBottomTabButtons();
+    }
+
+    void EditorApp::ShowBottomTab(BottomTab tab) {
+        if(bottomTab_ == tab)
+            return;
+
+        bottomTab_ = tab;
+        updateBottomTabButtons();
+        LayoutPanes();
+    }
+
+    void EditorApp::updateBottomTabButtons() {
+        btnAssetsTab_.SetText(bottomTab_ == BottomTab::Assets ? "[Assets]" : "Assets");
+        btnConsoleTab_.SetText(bottomTab_ == BottomTab::Console ? "[Console]" : "Console");
+    }
+
+    bool EditorApp::OpenScriptEditor(const std::string &path, std::string *outError) {
+        if(path.empty()) {
+            if(outError) *outError = "The entity has no script attached.";
+            return false;
+        }
+
+        // A scene stores script paths relative to the scene folder (an unsaved scene uses the
+        // asset browser root), not relative to the process working directory.
+        std::string resolved = path;
+        std::error_code ec;
+        if(!std::filesystem::path(path).is_absolute() && !std::filesystem::exists(path, ec)) {
+            std::vector<std::string> bases;
+            const std::string sceneBase = viewport_.GetAssetBaseDir();
+            if(!sceneBase.empty()) bases.push_back(sceneBase);
+            if(!assetBrowser_.GetRoot().empty()) bases.push_back(assetBrowser_.GetRoot());
+
+            for(const auto &base : bases) {
+                const auto candidate = (std::filesystem::path(base) / path).lexically_normal();
+                if(std::filesystem::exists(candidate, ec)) {
+                    resolved = candidate.generic_string();
+                    break;
+                }
+            }
+        }
+
+        if(!scriptEditor_.OpenFile(resolved, outError))
+            return false;
+
+        // The editor covers the viewport: a click must not move an entity underneath it.
+        viewport_.SetEditEnabled(false);
+        viewport_.ClearDropPreview();
+        LayoutPanes();
+        return true;
+    }
+
+    void EditorApp::LogMessage(LogSeverity severity, const std::string &message, const std::string &source) {
+        play_.Log(severity, message, source);
+        syncConsole();
+    }
+
+    void EditorApp::syncConsole() {
+        console_.Sync();
     }
 
     bool EditorApp::OnClosing() {

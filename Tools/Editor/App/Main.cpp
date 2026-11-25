@@ -1,7 +1,9 @@
 #include "Core/ComponentSimulation.h"
+#include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "Core/SceneRuntime.h"
 #include "Core/SceneSerializer.h"
+#include "Core/ScriptLog.h"
 #include "EditorApp.h"
 #include "EditorTheme.h"
 #include "Viewport.h"
@@ -54,6 +56,7 @@ namespace {
     int RunPrefabSelfTest();
     int RunInputSelfTest();
     int RunComponentsSelfTest();
+    int RunConsoleSelfTest();
 
     int RunSelfTest() {
         using namespace Gorgon::Editor;
@@ -243,7 +246,11 @@ namespace {
             return componentResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, round-trip, asset browser)\n";
+        if(const int consoleResult = RunConsoleSelfTest()) {
+            return consoleResult;
+        }
+
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, script console, syntax check, round-trip, asset browser)\n";
         return 0;
     }
 
@@ -1866,6 +1873,217 @@ namespace {
         return 0;
     }
 
+    /// Script console & script editor support, headless: the log ring buffer, the widget-free
+    /// filter/scroll view, capturing GScript Log()/Print() and compile/runtime failures, and the
+    /// compile-only "Check Syntax" path. The panel widgets themselves are exercised by --smoke,
+    /// which is the only mode that has a window and a theme.
+    int RunConsoleSelfTest() {
+        using namespace Gorgon::Editor;
+
+        // ---- 1. Ring buffer -------------------------------------------------
+        {
+            ScriptLog log(3);
+            log.Info("Player", "one");
+            log.Warn("Player", "two");
+            log.Error("Enemy", "three");
+
+            if(log.GetCount() != 3 || log.CountOf(LogSeverity::Error) != 1 ||
+               log.CountOf(LogSeverity::Warn) != 1 || log.CountOf(LogSeverity::Info) != 1) {
+                std::cerr << "FAIL: ScriptLog did not classify the three severities\n";
+                return 1;
+            }
+            if(log.GetEntries().front().message != "one" ||
+               log.GetEntries().front().time.size() != 8 ||
+               log.GetEntries().back().Format().find("ERROR") == std::string::npos ||
+               log.GetEntries().back().Format().find("Enemy: three") == std::string::npos) {
+                std::cerr << "FAIL: ScriptLog formatting/timestamp mismatch\n";
+                return 1;
+            }
+
+            // The fourth line pushes the oldest out: the buffer never grows past its capacity.
+            log.Info("Player", "four");
+            if(log.GetCount() != 3 || !log.GetLast() || log.GetLast()->message != "four" ||
+               log.FormatAll().find("one") != std::string::npos) {
+                std::cerr << "FAIL: ScriptLog is not a bounded ring buffer\n";
+                return 1;
+            }
+
+            log.Clear();
+            if(!log.IsEmpty()) {
+                std::cerr << "FAIL: ScriptLog::Clear left entries behind\n";
+                return 1;
+            }
+        }
+
+        // ---- 2. Console filter and scroll -----------------------------------
+        {
+            ScriptLog log;
+            log.Info("A", "info line");
+            log.Warn("A", "warn line");
+            log.Error("B", "error line");
+
+            ConsoleView view;
+            view.SetSource(&log);
+            if(view.GetLineCount() != 3 || view.GetLineText(0).find("info line") == std::string::npos) {
+                std::cerr << "FAIL: ConsoleView lost the unfiltered lines\n";
+                return 1;
+            }
+
+            view.SetErrorsOnly(true);
+            if(view.GetLineCount() != 2 || view.GetLineText(0).find("warn line") == std::string::npos) {
+                std::cerr << "FAIL: ConsoleView Errors filter did not keep warnings\n";
+                return 1;
+            }
+
+            view.SetErrorsOnly(false);
+            view.SetVisibleLines(1);
+            view.ScrollTo(99);
+            if(view.GetMaxScroll() != 2 || view.GetScrollOffset() != 2 || view.GetFirstLine() != 2) {
+                std::cerr << "FAIL: ConsoleView scroll range is wrong (max " << view.GetMaxScroll()
+                          << ", offset " << view.GetScrollOffset() << ")\n";
+                return 1;
+            }
+            view.ScrollBy(-5);
+            if(view.GetScrollOffset() != 0) {
+                std::cerr << "FAIL: ConsoleView did not clamp a negative scroll\n";
+                return 1;
+            }
+
+            if(view.GetStatusText().find("3 entries") == std::string::npos ||
+               view.GetStatusText().find("1 error") == std::string::npos) {
+                std::cerr << "FAIL: ConsoleView status text is wrong: " << view.GetStatusText() << "\n";
+                return 1;
+            }
+
+            if(!view.Sync() || view.Sync()) {
+                std::cerr << "FAIL: ConsoleView::Sync did not report exactly one change\n";
+                return 1;
+            }
+        }
+
+        std::error_code ec;
+        const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_console_selftest";
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+
+        {
+            std::ofstream out(dir / "talk.gs", std::ios::binary | std::ios::trunc);
+            if(!out.good()) {
+                std::cerr << "FAIL: could not write the console test script\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            out << "function Update(self, dt)\n"
+                   "    Log(\"hello from gs\")\n"
+                   "    Print(\"printed line\")\n"
+                   "    return 0\n"
+                   "end function\n";
+        }
+
+        // ---- 3. PlaySession captures Log/Print and failures ------------------
+        {
+            Scene scene;
+            Entity &talker = scene.CreateEntity("Talker");
+            talker.script = ScriptComponent{"talk.gs"};
+
+            Entity &broken = scene.CreateEntity("Broken");
+            broken.script = ScriptComponent{"broken.gs"};
+
+            PlaySession session;
+            std::string error;
+            // broken.gs does not exist -> a compile error, but talk.gs still runs.
+            if(!session.Start(scene, dir.generic_string(), &error)) {
+                std::cerr << "FAIL: console selftest could not start play: " << error << "\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            session.Tick(scene, 0.0f);
+
+            bool sawCompileError = false;
+            bool sawLog = false;
+            bool sawPrint = false;
+            for(const auto &entry : session.GetLog().GetEntries()) {
+                if(entry.severity == LogSeverity::Error &&
+                   entry.message.find("broken.gs") != std::string::npos &&
+                   entry.source.find("Broken") != std::string::npos) {
+                    sawCompileError = true;
+                }
+                if(entry.severity == LogSeverity::Info &&
+                   entry.source.find("Talker") != std::string::npos) {
+                    if(entry.message == "hello from gs")
+                        sawLog = true;
+                    if(entry.message == "printed line")
+                        sawPrint = true;
+                }
+            }
+
+            if(!sawCompileError || !sawLog || !sawPrint) {
+                std::cerr << "FAIL: console capture missing (compile " << sawCompileError
+                          << ", Log " << sawLog << ", Print " << sawPrint << ")\n"
+                          << session.GetLog().FormatAll();
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            session.Stop(scene);
+            if(session.GetLog().IsEmpty()) {
+                std::cerr << "FAIL: the console log did not survive Stop()\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            // A fresh session starts a fresh console.
+            if(!session.Start(scene, dir.generic_string(), &error) || session.GetLog().IsEmpty()) {
+                std::cerr << "FAIL: a second play session did not reset the console\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            session.Stop(scene);
+        }
+
+        // ---- 4. Compile-only syntax check -----------------------------------
+        {
+            PlaySession compiler;
+            std::string error;
+
+            const std::string good =
+                "function Update(self, dt)\n"
+                "    self.x = self.x + 10 * dt\n"
+                "    Log(\"compiled, never run\")\n"
+                "    return 0\n"
+                "end function\n";
+
+            if(!compiler.CheckSyntax(good, "good.gs", &error) || !error.empty()) {
+                std::cerr << "FAIL: CheckSyntax rejected a valid script: " << error << "\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+            if(!compiler.GetLog().IsEmpty() || !compiler.GetLastError().empty() || compiler.IsRunning()) {
+                std::cerr << "FAIL: CheckSyntax executed the script or left state behind\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            if(!compiler.CheckSyntax("x = 1\n", "partial.gs", &error)) {
+                std::cerr << "FAIL: CheckSyntax rejected a half written script: " << error << "\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+
+            if(compiler.CheckSyntax("function Update(self, dt)\n    if self.x == 1\n        self.x = 2\n"
+                                    "    end if\n    return 0\nend function\n", "badif.gs", &error) ||
+               error.empty()) {
+                std::cerr << "FAIL: CheckSyntax accepted a script with a parse error\n";
+                std::filesystem::remove_all(dir, ec);
+                return 1;
+            }
+        }
+
+        std::filesystem::remove_all(dir, ec);
+        return 0;
+    }
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -2310,6 +2528,163 @@ int main(int argc, char *argv[]) {
             std::filesystem::remove_all(assetDir, ec2);
         }
 
+        // ---- Console panel & built-in script editor -------------------------
+        {
+            using namespace Gorgon::Editor;
+
+            std::error_code cec;
+            const auto workDir = std::filesystem::temp_directory_path() / "gorgon_editor_smoke_console";
+            std::filesystem::remove_all(workDir, cec);
+            std::filesystem::create_directories(workDir, cec);
+
+            const auto scriptPath = (workDir / "talk.gs").generic_string();
+            {
+                std::ofstream out(scriptPath, std::ios::binary | std::ios::trunc);
+                if(!out.good()) {
+                    std::cerr << "FAIL: could not write the smoke console script\n";
+                    window.Close();
+                    return 1;
+                }
+                out << "function Update(self, dt)\n"
+                       "    Log(\"hello from the smoke test\")\n"
+                       "    return 0\n"
+                       "end function\n";
+            }
+
+            auto fail = [&](const std::string &message) -> int {
+                std::cerr << "FAIL: " << message << "\n";
+                window.Close();
+                return 1;
+            };
+
+            // -- Toggle the bottom dock to the console and log through it.
+            app.ShowBottomTab(BottomTab::Console);
+            Gorgon::NextFrame();
+            if(app.GetBottomTab() != BottomTab::Console)
+                return fail("ShowBottomTab(Console) did not switch the bottom dock");
+
+            app.LogMessage(LogSeverity::Info, "smoke console line", "Smoke");
+            Gorgon::NextFrame();
+
+            auto &consolePanel = app.GetConsolePanel();
+            if(consolePanel.GetLineCount() < 1)
+                return fail("the console panel did not show the logged line");
+            // The active tab is laid out inside the bottom dock; the inactive one is parked.
+            if(consolePanel.GetPanel().GetCurrentLocation().X < 0)
+                return fail("the console panel is parked off-screen instead of in the bottom dock");
+            if(consolePanel.GetListBox().GetCurrentSize().Width < 100 ||
+               consolePanel.GetListBox().GetCurrentSize().Height < 40)
+                return fail("the console log view has no room to draw in");
+            if(consolePanel.GetStatusText().find("entr") == std::string::npos)
+                return fail("the console status text is empty: " + consolePanel.GetStatusText());
+
+            // -- All/Errors filter: info is hidden, warnings and errors stay.
+            consolePanel.SetErrorsOnly(true);
+            const int filteredLines = consolePanel.GetLineCount();
+            app.LogMessage(LogSeverity::Info, "info while filtered", "Smoke");
+            app.LogMessage(LogSeverity::Error, "error while filtered", "Smoke");
+            Gorgon::NextFrame();
+            if(consolePanel.GetLineCount() != filteredLines + 1)
+                return fail("the Errors filter did not hide the info line and keep the error");
+            consolePanel.SetErrorsOnly(false);
+
+            // -- Clear empties the log (the panel then reports the clear itself).
+            consolePanel.Clear();
+            Gorgon::NextFrame();
+            if(consolePanel.GetLineCount() > 1)
+                return fail("Clear did not empty the console");
+            if(consolePanel.GetLineCount() == 1 &&
+               consolePanel.GetLineText(0).find("Console cleared") == std::string::npos)
+                return fail("Clear left an unexpected line behind: " + consolePanel.GetLineText(0));
+
+            // -- Script editor: open the file, edit it, check it, save it.
+            std::string openError;
+            if(!app.OpenScriptEditor(scriptPath, &openError))
+                return fail("OpenScriptEditor failed: " + openError);
+            Gorgon::NextFrame();
+
+            auto &editor = app.GetScriptEditor();
+            if(!editor.IsOpen())
+                return fail("the script editor did not open");
+            if(editor.GetText().find("hello from the smoke test") == std::string::npos)
+                return fail("the script editor did not load the file contents");
+
+            editor.SetText("function Update(self, dt)\n"
+                           "    Log(\"edited in the smoke test\")\n"
+                           "    return 0\n"
+                           "end function\n");
+            if(!editor.IsDirty())
+                return fail("editing the buffer did not mark the editor dirty");
+            if(!editor.CheckSyntax())
+                return fail("CheckSyntax rejected a valid buffer: " + editor.GetStatus());
+            if(editor.GetStatus().find("Syntax OK") == std::string::npos)
+                return fail("the editor did not report Syntax OK: " + editor.GetStatus());
+
+            // A parse error is reported by the editor and written to the console.
+            editor.SetText("function Update(self, dt)\n    if self.x == 1\n    end if\nend function\n");
+            if(editor.CheckSyntax())
+                return fail("CheckSyntax accepted a buffer with a parse error");
+            if(editor.GetStatus().find("Syntax error") == std::string::npos)
+                return fail("the editor did not report the syntax error: " + editor.GetStatus());
+
+            Gorgon::NextFrame();
+            bool sawSyntaxError = false;
+            for(int i = 0; i < consolePanel.GetLineCount(); ++i) {
+                if(consolePanel.GetLineText(i).find("Syntax error") != std::string::npos)
+                    sawSyntaxError = true;
+            }
+            if(!sawSyntaxError)
+                return fail("the syntax error never reached the console");
+
+            // -- Save writes the buffer back and clears the dirty flag.
+            editor.SetText("function Update(self, dt)\n"
+                           "    Log(\"saved from the smoke test\")\n"
+                           "    return 0\n"
+                           "end function\n");
+            std::string saveError;
+            if(!editor.Save(&saveError))
+                return fail("saving the script failed: " + saveError);
+            if(editor.IsDirty())
+                return fail("Save did not clear the dirty flag");
+            {
+                std::ifstream written(scriptPath, std::ios::binary);
+                std::stringstream contents;
+                contents << written.rdbuf();
+                if(contents.str().find("saved from the smoke test") == std::string::npos)
+                    return fail("Save did not write the buffer to disk");
+            }
+
+            // -- Double clicking a .gs in the asset browser opens it in the editor.
+            editor.Close();
+            app.ShowBottomTab(BottomTab::Assets);
+            Gorgon::NextFrame();
+
+            auto &browser = app.GetAssetBrowser();
+            browser.SetRoot(workDir.generic_string());
+            Gorgon::NextFrame();
+            if(browser.GetLibrary().GetVisibleCount() != 1)
+                return fail("the smoke script folder did not list exactly one asset");
+
+            if(app.GetAssetBrowser().GetPanel().GetCurrentLocation().X < 0)
+                return fail("switching back to Assets did not put the asset browser back in the dock");
+
+            const auto tile = browser.GetTileBounds(0);
+            const Gorgon::Geometry::Point tilePoint{tile.X + 6, tile.Y + 6};
+            browser.HandleMouseDown(tilePoint, Gorgon::Input::Mouse::Button::Left);
+            browser.HandleMouseDown(tilePoint, Gorgon::Input::Mouse::Button::Left);
+            Gorgon::NextFrame();
+
+            if(!app.GetScriptEditor().IsOpen())
+                return fail("double clicking a .gs did not open the script editor");
+            if(app.GetScriptEditor().GetText().find("saved from the smoke test") == std::string::npos)
+                return fail("the script editor opened the wrong file");
+
+            app.GetScriptEditor().Close();
+            app.ShowBottomTab(BottomTab::Console);
+            std::filesystem::remove_all(workDir, cec);
+            Gorgon::NextFrame();
+        }
+
         // Verify save/open round-trip through EditorApp in live window mode
         const auto tmpPath = (std::filesystem::temp_directory_path() / "gorgon_editor_smoke.gscene.json").string();
         std::string err;
@@ -2327,7 +2702,7 @@ int main(int argc, char *argv[]) {
             std::cerr << "FAIL: inspector edit did not persist through save/open\n";
             return 1;
         }
-        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + round-trip)\n";
+        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + round-trip)\n";
         return 0;
     }
 

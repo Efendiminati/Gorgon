@@ -106,6 +106,7 @@ namespace Gorgon :: Editor {
         panel_.Add(lblScriptPath_);
         panel_.Add(scriptPath_);
         panel_.Add(btnPickScript_);
+        panel_.Add(btnEditScript_);
         panel_.Add(btnAddScript_);
         panel_.Add(btnRemoveScript_);
 
@@ -251,6 +252,7 @@ namespace Gorgon :: Editor {
 
         sectionRow(lblScript_);
         pickRow(lblScriptPath_, scriptPath_, btnPickScript_);
+        fullRow(btnEditScript_);
         fullRow(btnAddScript_);
         fullRow(btnRemoveScript_);
 
@@ -501,6 +503,13 @@ namespace Gorgon :: Editor {
         });
         btnPickScript_.ClickEvent.Register([this]() {
             if(OnBrowseRequested) OnBrowseRequested(true);
+        });
+        btnEditScript_.ClickEvent.Register([this]() {
+            // Hand the path over exactly as the scene stores it; EditorApp resolves it against the
+            // scene folder / asset root, which the panel does not know about.
+            const Entity *entity = selectedEntity();
+            if(entity && entity->script && OnEditScriptRequested)
+                OnEditScriptRequested(entity->script->path);
         });
         btnAddCollider_.ClickEvent.Register([this]() { addCollider(); });
         btnRemoveCollider_.ClickEvent.Register([this]() { removeCollider(); });
@@ -809,6 +818,7 @@ namespace Gorgon :: Editor {
         lblScriptPath_.SetVisible(hasScript);
         scriptPath_.SetVisible(hasScript);
         btnPickScript_.SetVisible(hasScript);
+        btnEditScript_.SetVisible(hasScript);
         btnAddScript_.SetVisible(hasEntity && !hasScript);
         btnRemoveScript_.SetVisible(hasScript);
 

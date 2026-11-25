@@ -2554,3 +2554,293 @@ TEST_CASE("GScript tag and property helpers read and write entity metadata",
     session.Stop(scene);
     std::filesystem::remove_all(dir, ec);
 }
+TEST_CASE("ScriptLog keeps a bounded ring buffer and classifies severities", "[EditorCore][Console]") {
+    ScriptLog log(3);
+    REQUIRE(log.GetCapacity() == 3);
+    REQUIRE(log.IsEmpty());
+    REQUIRE(log.GetLast() == nullptr);
+
+    log.Info("Player", "one");
+    log.Warn("Player", "two");
+    log.Error("Enemy", "three");
+
+    REQUIRE(log.GetCount() == 3);
+    REQUIRE(log.CountOf(LogSeverity::Info) == 1);
+    REQUIRE(log.CountOf(LogSeverity::Warn) == 1);
+    REQUIRE(log.CountOf(LogSeverity::Error) == 1);
+
+    const auto &entries = log.GetEntries();
+    REQUIRE(entries[0].source == "Player");
+    REQUIRE(entries[0].severity == LogSeverity::Info);
+    REQUIRE(entries[2].message == "three");
+    // Timestamps are wall clock "HH:MM:SS", so every entry carries a usable one.
+    REQUIRE(entries[0].time.size() == 8);
+    REQUIRE(entries[0].time[2] == ':');
+    REQUIRE(entries[2].elapsed >= 0.0);
+
+    // Formatting pads the level and prefixes the source.
+    REQUIRE(entries[2].Format().find("ERROR") != std::string::npos);
+    REQUIRE(entries[2].Format().find("Enemy: three") != std::string::npos);
+    REQUIRE(LogEntry{}.Format().find("INFO ") != std::string::npos);
+
+    // The ring buffer drops the oldest line instead of growing.
+    log.Info("Player", "four");
+    REQUIRE(log.GetCount() == 3);
+    REQUIRE(log.GetLast() != nullptr);
+    REQUIRE(log.GetLast()->message == "four");
+    REQUIRE(log.FormatAll().find("one") == std::string::npos);
+    REQUIRE(log.FormatAll().find("four") != std::string::npos);
+
+    // Shrinking keeps the newest entries, clearing bumps the version so viewers notice.
+    const std::size_t beforeClear = log.GetVersion();
+    log.SetCapacity(1);
+    REQUIRE(log.GetCount() == 1);
+    REQUIRE(log.GetLast()->message == "four");
+
+    log.Clear();
+    REQUIRE(log.IsEmpty());
+    REQUIRE(log.GetVersion() > beforeClear);
+    REQUIRE(log.GetEntries().empty());
+}
+
+TEST_CASE("ConsoleView filters problems and clamps its scroll range", "[EditorCore][Console]") {
+    ScriptLog log;
+    log.Info("A", "info line");
+    log.Warn("A", "warn line");
+    log.Error("B", "error line");
+
+    ConsoleView view;
+    view.SetSource(&log);
+    REQUIRE(view.GetLineCount() == 3);
+    REQUIRE(view.GetLineText(0).find("info line") != std::string::npos);
+    REQUIRE(view.GetLineText(9).empty());
+
+    // "Errors" keeps warnings: a warning is a problem the user wants to see.
+    view.SetErrorsOnly(true);
+    REQUIRE(view.GetLineCount() == 2);
+    REQUIRE(view.GetLineText(0).find("warn line") != std::string::npos);
+    REQUIRE(view.GetLineText(1).find("error line") != std::string::npos);
+    REQUIRE(view.GetLineText(2).empty());
+
+    view.SetErrorsOnly(false);
+    view.SetVisibleLines(2);
+    REQUIRE(view.GetMaxScroll() == 1);
+
+    view.ScrollTo(99);
+    REQUIRE(view.GetScrollOffset() == 1);
+    REQUIRE(view.GetFirstLine() == 1);
+
+    view.ScrollBy(-5);
+    REQUIRE(view.GetScrollOffset() == 0);
+
+    view.ScrollToBottom();
+    REQUIRE(view.GetScrollOffset() == 1);
+
+    // The summary counts the whole log, not just the filtered lines.
+    REQUIRE(view.GetStatusText().find("3 entries") != std::string::npos);
+    REQUIRE(view.GetStatusText().find("1 error") != std::string::npos);
+    REQUIRE(view.GetStatusText().find("1 warning") != std::string::npos);
+
+    // Sync reports a change once per log mutation.
+    REQUIRE(view.Sync());
+    REQUIRE_FALSE(view.Sync());
+    log.Info("A", "another");
+    REQUIRE(view.Sync());
+    REQUIRE(view.GetStatusText().find("4 entries") != std::string::npos);
+}
+
+TEST_CASE("Play session console captures Log/Print, compile and runtime errors",
+          "[EditorCore][Play][Console]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_console_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // A healthy script that talks to the console.
+    {
+        std::ofstream out(dir / "talk.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Update(self, dt)\n"
+               "    Log(\"hello from gs\")\n"
+               "    Print(\"printed line\")\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    // A script that does not parse: `==` is never valid in GScript.
+    {
+        std::ofstream out(dir / "broken.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Update(self, dt)\n"
+               "    if(self.x == 1)\n"
+               "        self.x = 2\n"
+               "    end if\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    // A script that compiles but fails at runtime: a string cannot be stored into a float member.
+    {
+        std::ofstream out(dir / "throws.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Update(self, dt)\n"
+               "    self.x = \"not a number\"\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &talker = scene.CreateEntity("Talker");
+    talker.script = ScriptComponent{"talk.gs"};
+    const EntityId talkerId = talker.id;
+
+    Entity &broken = scene.CreateEntity("Broken");
+    broken.script = ScriptComponent{"broken.gs"};
+
+    Entity &thrower = scene.CreateEntity("Thrower");
+    thrower.script = ScriptComponent{"throws.gs"};
+    const EntityId throwerId = thrower.id;
+
+    PlaySession session;
+    std::string error;
+    REQUIRE(session.Start(scene, dir.generic_string(), &error));
+    REQUIRE(session.GetScriptCount() == 2); // talk.gs and throws.gs compiled, broken.gs did not
+
+    // The parse failure was captured with the entity it belongs to.
+    REQUIRE(session.GetLog().CountOf(LogSeverity::Error) >= 1);
+    bool sawCompileError = false;
+    for(const auto &entry : session.GetLog().GetEntries()) {
+        if(entry.severity == LogSeverity::Error && entry.source.find("Broken") != std::string::npos &&
+           entry.message.find("broken.gs") != std::string::npos) {
+            sawCompileError = true;
+        }
+    }
+    REQUIRE(sawCompileError);
+
+    // Log() and Print() land in the console, attributed to the running script.
+    session.Tick(scene, 0.0f);
+    INFO("console output:\n" << session.GetLog().FormatAll());
+
+    bool sawLog = false;
+    bool sawPrint = false;
+    for(const auto &entry : session.GetLog().GetEntries()) {
+        if(entry.severity != LogSeverity::Info)
+            continue;
+        if(entry.source.find("Talker") == std::string::npos)
+            continue;
+        if(entry.message == "hello from gs")
+            sawLog = true;
+        if(entry.message == "printed line")
+            sawPrint = true;
+    }
+    REQUIRE(sawLog);
+    REQUIRE(sawPrint);
+
+    // The runtime failure is an Error entry naming the throwing entity, and the entity kept its
+    // pre-frame transform (a failed script is not allowed to half-apply its move).
+    REQUIRE(session.GetLog().GetEntries().back().source.find("Thrower") != std::string::npos);
+    REQUIRE(session.GetLog().GetEntries().back().severity == LogSeverity::Error);
+    REQUIRE(session.GetLog().GetEntries().back().message.find("Script error") != std::string::npos);
+    REQUIRE(session.GetLastError().find("Script error") != std::string::npos);
+    REQUIRE(scene.FindEntity(throwerId)->transform.x == Catch::Approx(0.0f));
+
+    // The log survives Stop(): the editor reads failures after play ended.
+    const std::size_t beforeStop = session.GetLog().GetCount();
+    session.Stop(scene);
+    REQUIRE(session.GetLog().GetCount() >= beforeStop);
+    REQUIRE_FALSE(session.GetLog().IsEmpty());
+
+    // A new session starts a fresh console.
+    REQUIRE(session.Start(scene, dir.generic_string(), &error));
+    REQUIRE(session.GetLog().GetEntries().back().message.find("Play started") != std::string::npos);
+    for(const auto &entry : session.GetLog().GetEntries())
+        REQUIRE(entry.message.find("hello from gs") == std::string::npos);
+
+    session.Stop(scene);
+
+    // The editor can write its own lines into the same log.
+    session.Log(LogSeverity::Warn, "check this", "Editor");
+    REQUIRE(session.GetLog().GetLast()->source == "Editor");
+    REQUIRE(session.GetLog().GetLast()->severity == LogSeverity::Warn);
+    session.ClearLog();
+    REQUIRE(session.GetLog().IsEmpty());
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Play session CheckSyntax compiles a buffer without executing it",
+          "[EditorCore][Play][Console]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_syntax_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    PlaySession session;
+    std::string error;
+
+    const std::string good =
+        "function Update(self, dt)\n"
+        "    self.x = self.x + 10 * dt\n"
+        "    Log(\"never runs here\")\n"
+        "    return 0\n"
+        "end function\n";
+
+    REQUIRE(session.CheckSyntax(good, "good.gs", &error));
+    REQUIRE(error.empty());
+
+    // Compiling is not running: no console line, no error, no session.
+    REQUIRE(session.GetLog().IsEmpty());
+    REQUIRE(session.GetLastError().empty());
+    REQUIRE_FALSE(session.IsRunning());
+
+    // A half written script still checks: the prologue only registers the hooks that exist.
+    REQUIRE(session.CheckSyntax("x = 1\n", "partial.gs", &error));
+    REQUIRE(error.empty());
+
+    // A parse error is reported with the compiler message.
+    const std::string broken =
+        "function Update(self, dt)\n"
+        "    if(self.x == 1)\n"
+        "        self.x = 2\n"
+        "    end if\n"
+        "    return 0\n"
+        "end function\n";
+    REQUIRE_FALSE(session.CheckSyntax(broken, "broken.gs", &error));
+    REQUIRE_FALSE(error.empty());
+
+    // A missing paren on `if` is a parse error inside a function body, so the check looks past the
+    // top level statement and into Update.
+    REQUIRE_FALSE(session.CheckSyntax("function Update(self, dt)\n    if self.x == 1\n        self.x = 2\n"
+                                      "    end if\n    return 0\nend function\n",
+                                      "badif.gs", &error));
+    REQUIRE_FALSE(error.empty());
+
+    // Checking must not leave the libraries behind: a real play session still starts.
+    {
+        std::ofstream out(dir / "spin.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Update(self, dt)\n"
+               "    self.x = self.x + 5\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &spinner = scene.CreateEntity("Spinner");
+    spinner.script = ScriptComponent{"spin.gs"};
+    const EntityId spinId = spinner.id;
+
+    std::string startError;
+    REQUIRE(session.Start(scene, dir.generic_string(), &startError));
+    INFO("start error: " << startError);
+    session.Tick(scene, 0.1f);
+    REQUIRE(scene.FindEntity(spinId)->transform.x == Catch::Approx(5.0f));
+
+    // A check while a session is running leaves that session's libraries alone.
+    REQUIRE(session.CheckSyntax(good, "good.gs", &error));
+    session.Tick(scene, 0.1f);
+    REQUIRE(scene.FindEntity(spinId)->transform.x == Catch::Approx(10.0f));
+
+    session.Stop(scene);
+    std::filesystem::remove_all(dir, ec);
+}

@@ -5,6 +5,7 @@
 #include "InputState.h"
 #include "RuntimeCamera.h"
 #include "Scene.h"
+#include "ScriptLog.h"
 
 #include <memory>
 #include <string>
@@ -38,7 +39,8 @@ namespace Gorgon :: Editor {
      *
      * Scripts are compiled against these libraries:
      *   - EditorPlay: EntityTransform with writable x, y, rotation, scaleX, scaleY, plus the
-     *     RegisterUpdate/RegisterStart/RegisterDestroy registration helpers.
+     *     RegisterUpdate/RegisterStart/RegisterDestroy registration helpers and Log()/Print(), which
+     *     append a line to the console (GetLog()).
      *   - Input (bring it in with `using Input`): IsKeyDown(name), IsKeyPressed(name),
      *     IsKeyReleased(name), IsMouseDown(button), MouseX() and MouseY(). The state they read is
      *     whatever was pushed into GetInput() before Tick(); pressed/released are edge flags that
@@ -139,7 +141,38 @@ namespace Gorgon :: Editor {
         /// Accumulated script output (echo and friends), for diagnostics and tests.
         const std::string &GetOutput() const;
 
+        // ---- Script console -------------------------------------------------
+        /// The console ring buffer: every script Log()/Print() call, compile failure, runtime
+        /// error and warning, each with a timestamp, a severity and the entity/script it came from.
+        /// It survives Stop() so a failure can still be read after play ended, and it is cleared
+        /// when a new session starts.
+        ScriptLog &GetLog();
+        const ScriptLog &GetLog() const;
+
+        /// Empties the console log.
+        void ClearLog();
+
+        /// Writes one line to the console log from the host side (the editor's own messages).
+        /// `source` defaults to "Editor"; pass e.g. "Script Editor" to say where it came from.
+        void Log(LogSeverity severity, const std::string &message,
+                 const std::string &source = std::string("Editor"));
+
+        /**
+         * Compiles `source` against the same libraries a play script is given (EditorPlay, Input,
+         * Physics, Scene, Audio) without executing a single statement, so a script editor can offer
+         * "Check Syntax" on an unsaved buffer. The registration prologue is only appended for the
+         * hooks the source actually defines, so checking a half-written script does not fail on a
+         * missing Update. Returns true when it compiles; on failure `outError` carries the compiler
+         * message and the return value is false. Nothing is added to the console log.
+         */
+        bool CheckSyntax(const std::string &source, const std::string &displayPath = std::string(),
+                         std::string *outError = nullptr);
+
     private:
+        /// Builds the EditorPlay/Input/Physics/Scene/Audio libraries once. Called by Start() and by
+        /// CheckSyntax(), which needs the same symbol table to compile an unsaved script.
+        void buildLibraries();
+
         struct Impl;
         std::unique_ptr<Impl> impl_;
     };

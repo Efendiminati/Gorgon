@@ -5,6 +5,10 @@ add_executable(GorgonEditor
     EditorTheme.cpp
     AssetBrowserPanel.h
     AssetBrowserPanel.cpp
+    ConsolePanel.h
+    ConsolePanel.cpp
+    ScriptEditorPanel.h
+    ScriptEditorPanel.cpp
     Viewport.h
     Viewport.cpp
     HierarchyPanel.h

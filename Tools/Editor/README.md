@@ -64,7 +64,7 @@ scene path and a `*` while there are unsaved changes.
 | Mouse wheel | Zoom around the cursor (10%–1600%) |
 | `Ctrl+N` | New scene (asks before discarding unsaved changes) |
 | `Ctrl+O` | Open scene file |
-| `Ctrl+S` / `Ctrl+Shift+S` | Save / Save As |
+| `Ctrl+S` / `Ctrl+Shift+S` | Save / Save As (saves the open script instead while the script editor is up) |
 | `Ctrl+Z` / `Ctrl+Y` / `Ctrl+Shift+Z` | Undo / Redo |
 | `Ctrl+D` | Duplicate the selected entity (with its subtree) |
 | `Delete` | Delete the selected entity (with its subtree) |
@@ -87,7 +87,22 @@ Panels:
   open the asset browser as a picker for sprite and script fields.
 - **Asset browser** — scans the project folder, filters by All/Images/Audio/Fonts/Scripts/Prefabs/Resources,
   has a search box and image thumbnails. Single click selects, double click (or *Add to Scene*)
-  inserts: images become sprite entities, `.gs` files attach a `ScriptComponent`.
+  inserts: images become sprite entities, prefabs are instantiated, and a `.gs` file is opened in the
+  built-in script editor.
+- **Console** — shares the bottom dock with the asset browser (`Assets` / `Console` toolbar buttons).
+  Shows every GScript `Log()`/`Print()` line, every compile failure and every runtime error with a
+  timestamp, a severity (Info / Warn / Error) and the entity/script it came from, colour coded, with
+  an *Errors only* filter and a *Clear* button. See [Script console](#script-console).
+
+### Script editor
+
+`Edit Script` in the Details panel, or double clicking a `.gs` file in the asset browser, opens the
+built-in editor over the viewport: a multi-line text area with **Save**, **Check Syntax** and
+**Close**. `Ctrl+S` saves the open script instead of the scene. **Check Syntax** compiles the buffer
+through the same scripting libraries Play uses, without executing a single statement, so a broken
+script is reported in the console instead of half-running. Saving writes the file in place; the
+scene is marked dirty only by edits to the scene itself, so reopening a scene reloads the script
+from disk.
 
 ### Play mode
 
@@ -282,6 +297,48 @@ function Update(self, dt)
     return 0
 end function
 ```
+
+## Script console
+
+The console is the debugging surface for scripts. Three things land in it:
+
+1. **Script output** — `Log(message)` and `Print(message)` (aliases) append one line each. They take
+   a string and are safe to call every frame.
+2. **Compile failures** — a script that cannot be read, does not parse, or does not define
+   `Update(self, dt)` is reported as an `ERROR` naming the entity and file, and the rest of the
+   scene still plays.
+3. **Runtime failures** — an exception thrown by `Update`, `Start`, `OnDestroy` or a collision hook
+   is reported once, attributed to the entity, and that script stops being ticked (the entity keeps
+   its last good transform instead of being dragged around by a half-applied frame).
+
+```
+function Update(self, dt)
+    Log("tick")
+    return 0
+end function
+```
+
+Entries live in a ring buffer (`ScriptLog`, 500 lines by default) with a wall clock timestamp,
+a severity and the source label (`Player (spin.gs)`). The buffer belongs to the play session: a new
+Play clears it, and it survives **Stop**, so a failure is still readable after play ended.
+`ConsoleView` is the widget-free filter/scroll model behind the panel — hosts and tests can use it
+without a window:
+
+```cpp
+Gorgon::Editor::PlaySession play;
+// ... Start()/Tick() ...
+for(const auto &entry : play.GetLog().GetEntries())
+    std::cout << entry.Format() << "\n";
+```
+
+### Checking a script without playing it
+
+`PlaySession::CheckSyntax(source, path, &error)` compiles a string against the same libraries a
+running script gets (EditorPlay, Input, Physics, Scene, Audio) using
+`VirtualMachine::CompileCurrent()`, so it validates the whole file — function bodies included —
+without executing anything. The registration prologue is appended only for the hooks the source
+actually defines, so a half-written script is checked on its own merits rather than failing on a
+missing `Update`. This is exactly what the editor's **Check Syntax** button calls.
 
 ## Script input (keyboard and mouse)
 
@@ -599,14 +656,21 @@ scripts and writes `%TEMP%\gorgon_editor_demo_report.txt` with the resulting tra
 ```bat
 ctest --test-dir build/WindowsTesting -C Release -R EditorCore --output-on-failure
 
-GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, JSON round-trip, asset browser
-GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor
+GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, console, syntax check, round-trip
+GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor
 EditorDemo.exe --selftest        rem SceneRuntime: load, path resolution, script ticking
 ```
 
 The Catch2 suite covers the script runtime too: `[Lifecycle]` (Start → Update → OnDestroy order,
 including a destroyed entity's hook and the Play-stop hooks), `[Scene]` (name lookup, spawn, deferred
-destroy, camera, SpawnPrefab) and `[Audio]` (sound calls are recorded with no device present).
+destroy, camera, SpawnPrefab), `[Audio]` (sound calls are recorded with no device present) and
+`[Console]` (ring buffer, filter/scroll view, `Log()`/`Print()` capture, compile and runtime error
+attribution, compile-only `CheckSyntax`).
+
+The panel widgets need a window and the widget theme, so they are covered by `--smoke` rather than
+the headless `--selftest`: it opens the console tab, checks the All/Errors filter and Clear, then
+opens a real `.gs` through the asset browser, edits it, checks its syntax (good and broken), saves it
+back to disk and verifies the console received the outcome.
 
 ## Source layout
 

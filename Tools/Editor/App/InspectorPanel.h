@@ -77,6 +77,10 @@ namespace Gorgon :: Editor {
         /// path for the selected entity. EditorApp routes this to AssetBrowserPanel::BeginPicker.
         std::function<void(bool isScript)> OnBrowseRequested;
 
+        /// Fired by the script section's "Edit Script" button with the selected entity's script path
+        /// (as stored in the scene, so the host resolves it against the scene folder).
+        std::function<void(const std::string &path)> OnEditScriptRequested;
+
         /// Prefab actions for the selected entity: save it as a .gprefab.json, push the prefab's
         /// current contents into this instance, or reset the instance to the prefab on disk.
         std::function<void(EntityId)> OnSavePrefabRequested;
@@ -198,6 +202,7 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Label     lblScriptPath_{"Path"};
         Gorgon::Widgets::Textbox   scriptPath_;
         Gorgon::Widgets::Button    btnPickScript_{"..."};
+        Gorgon::Widgets::Button    btnEditScript_{"Edit Script"};
         Gorgon::Widgets::Button    btnAddScript_{"+ Add Script"};
         Gorgon::Widgets::Button    btnRemoveScript_{"- Remove Script"};
 

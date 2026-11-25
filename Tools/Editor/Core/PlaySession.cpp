@@ -33,6 +33,12 @@ namespace Gorgon :: Editor {
         std::istringstream input;
         mutable std::string output;
 
+        // Console ring buffer the editor's ConsolePanel shows. Lives with the session so it
+        // outlives Stop(), which is when a compile or runtime failure is most worth reading.
+        Editor::ScriptLog console;
+        // Bytes of `log` (script echo output) already turned into console entries.
+        std::size_t outputDrained = 0;
+
         // Keyboard/mouse state the Input library reads. Lives here so every VM sees one state.
         Editor::InputState inputState;
 
@@ -88,6 +94,18 @@ namespace Gorgon :: Editor {
 
         std::vector<std::unique_ptr<ScriptState>> scripts;
         ScriptState *compiling = nullptr;
+        /// Script whose Update/hook is executing right now, so Log()/Print() and runtime errors can
+        /// be attributed to the entity and file they came from.
+        ScriptState *executing = nullptr;
+
+        /// Sets `executing` for the duration of one script call and clears it on every exit path,
+        /// so an exception cannot leave a pointer to a dead script behind.
+        struct ExecGuard {
+            ExecGuard(ScriptState *&slot, ScriptState *value) : slot(slot) { slot = value; }
+            ~ExecGuard() { slot = nullptr; }
+
+            ScriptState *&slot;
+        };
 
         // Work the running scripts queued while a VM was executing: entities whose scripts still
         // have to be compiled (spawned this tick) and entities to remove at the end of the tick.
@@ -106,6 +124,20 @@ namespace Gorgon :: Editor {
         void ResetQueues();
         void StepCollisions(Scene &scene);
         void DispatchPair(Scene &scene, const CollisionPair &pair, bool entered);
+
+        /// "Player (spin.gs)" style console label for an entity/script pair. Falls back to the bare
+        /// file name or the entity name when only one of them is known.
+        std::string LabelFor(EntityId id, const std::string &path) const;
+        std::string LabelFor(const ScriptState &state) const;
+
+        /// Turns whatever a script wrote to the VM output stream into console entries.
+        void DrainScriptOutput(const ScriptState *state);
+
+        /// Records an error in both lastError and the console log.
+        void NoteError(const std::string &message, const std::string &source);
+
+        /// Console line written by the GScript Log()/Print() functions.
+        void WriteConsole(const std::string &message);
 
         /// Calls a collision hook with (self, otherId), writes any transform change back, and drops
         /// the hook when the script throws so a broken handler is not retried every frame.
@@ -283,6 +315,72 @@ namespace Gorgon :: Editor {
         pendingDestroy.clear();
     }
 
+    std::string PlaySession::Impl::LabelFor(EntityId id, const std::string &path) const {
+        std::string entity;
+        if(scene) {
+            if(const Entity *found = scene->FindEntity(id))
+                entity = found->name;
+        }
+
+        std::string script = path;
+        const auto slash = script.find_last_of("/\\");
+        if(slash != std::string::npos)
+            script = script.substr(slash + 1);
+
+        if(entity.empty() && script.empty())
+            return "Script";
+
+        if(entity.empty())
+            return script;
+
+        if(script.empty())
+            return entity;
+
+        return entity + " (" + script + ")";
+    }
+
+    std::string PlaySession::Impl::LabelFor(const ScriptState &state) const {
+        return LabelFor(state.entityId, state.path);
+    }
+
+    void PlaySession::Impl::DrainScriptOutput(const ScriptState *state) {
+        const std::string all = log.str();
+        if(all.size() <= outputDrained) {
+            // A VM reset can truncate the stream; resynchronize instead of reading past the end.
+            if(all.size() < outputDrained)
+                outputDrained = all.size();
+            return;
+        }
+
+        const std::string fresh = all.substr(outputDrained);
+        outputDrained = all.size();
+
+        const std::string label = state ? LabelFor(*state) : std::string("Script");
+
+        std::istringstream lines(fresh);
+        std::string line;
+        while(std::getline(lines, line)) {
+            if(line.empty())
+                continue;
+
+            console.Add(LogSeverity::Info, label, line);
+        }
+    }
+
+    void PlaySession::Impl::NoteError(const std::string &message, const std::string &source) {
+        lastError = message;
+        console.Add(LogSeverity::Error, source, message);
+    }
+
+    void PlaySession::Impl::WriteConsole(const std::string &message) {
+        // A Log() call inside Update belongs to the running script; one at compile time (top level
+        // of the file) belongs to the script being compiled.
+        const std::string label = executing ? LabelFor(*executing)
+                               : (compiling ? LabelFor(*compiling) : std::string("Script"));
+
+        console.Add(LogSeverity::Info, label, message);
+    }
+
     void PlaySession::Impl::FireSelfHook(Scene &scene, ScriptState &state,
                                         const Gorgon::Scripting::Function *hook) {
         if(!hook || !state.vm)
@@ -298,6 +396,7 @@ namespace Gorgon :: Editor {
             // optional: after another script's VM is destroyed that pointer is dangling and the
             // Data constructor dereferences freed memory.
             state.vm->Activate();
+            ExecGuard guard(executing, &state);
             state.values = ReadTransform(*entity);
             Gorgon::Scripting::Data self(entityType, &state.values, true, false);
             state.vm->ExecuteFunction(hook, {self}, false);
@@ -307,11 +406,17 @@ namespace Gorgon :: Editor {
                 WriteTransform(state.values, *after);
         }
         catch(const std::exception &ex) {
-            lastError = std::string("Script lifecycle error: ") + ex.what();
+            NoteError(std::string("Script lifecycle error: ") + ex.what(), LabelFor(state));
+            DrainScriptOutput(&state);
+            return;
         }
         catch(...) {
-            lastError = "Script lifecycle error";
+            NoteError("Script lifecycle error", LabelFor(state));
+            DrainScriptOutput(&state);
+            return;
         }
+
+        DrainScriptOutput(&state);
     }
 
     bool PlaySession::Impl::CompileEntity(EntityId entityId) {
@@ -333,14 +438,15 @@ namespace Gorgon :: Editor {
         state->values = values;
 
         const std::string full = ResolveAsset(baseDir, path);
+        const std::string label = LabelFor(entityId, path);
 
         std::string code = ReadTextFile(full);
         if(code.empty()) {
-            lastError = "Script could not be read: " + full;
+            NoteError("Script could not be read: " + full, label);
             return false;
         }
         if(!DefinesUpdate(code)) {
-            lastError = full + " does not define Update(self, dt)";
+            NoteError(full + " does not define Update(self, dt)", label);
             return false;
         }
 
@@ -383,20 +489,22 @@ namespace Gorgon :: Editor {
             state->vm->Begin(input_);
             state->vm->Run();
             compiling = nullptr;
+            // Anything the script printed at compile time (top level of the file) is console output.
+            DrainScriptOutput(state.get());
         }
         catch(const std::exception &ex) {
             compiling = nullptr;
-            lastError = std::string("Script error in ") + full + ": " + ex.what();
+            NoteError(std::string("Script error in ") + full + ": " + ex.what(), label);
             return false;
         }
         catch(...) {
             compiling = nullptr;
-            lastError = "Script error in " + full;
+            NoteError("Script error in " + full, label);
             return false;
         }
 
         if(!state->update) {
-            lastError = full + " did not register an Update function";
+            NoteError(full + " did not register an Update function", label);
             return false;
         }
 
@@ -620,6 +728,7 @@ namespace Gorgon :: Editor {
         try {
             // See FireSelfHook: the VM has to be the thread's active one before any Data is built.
             state.vm->Activate();
+            ExecGuard guard(executing, &state);
             state.values = ReadTransform(*entity);
             Gorgon::Scripting::Data self(entityType, &state.values, true, false);
             Gorgon::Scripting::Data other(Gorgon::Scripting::Types::Int(), int(otherId));
@@ -630,13 +739,19 @@ namespace Gorgon :: Editor {
                 WriteTransform(state.values, *after);
         }
         catch(const std::exception &ex) {
-            lastError = std::string("Script hook error: ") + ex.what();
+            NoteError(std::string("Script hook error: ") + ex.what(), LabelFor(state));
             hook = nullptr;
+            DrainScriptOutput(&state);
+            return;
         }
         catch(...) {
-            lastError = "Script hook error";
+            NoteError("Script hook error", LabelFor(state));
             hook = nullptr;
+            DrainScriptOutput(&state);
+            return;
         }
+
+        DrainScriptOutput(&state);
     }
 
     void PlaySession::Impl::DispatchPair(Scene &scene, const CollisionPair &pair, bool entered) {
@@ -743,29 +858,13 @@ namespace Gorgon :: Editor {
 
     PlaySession::~PlaySession() = default;
 
-    bool PlaySession::Start(Scene &scene, const std::string &baseDir, std::string *outError) {
-        // A previous session must restore its snapshot before a new one is taken.
-        Stop(scene);
-
-        // Built-in types (Float, Function, ...) are created by the scripting initializer, which
-        // is idempotent and also runs from Gorgon::Initialize.
-        Gorgon::Scripting::Initialize();
-
+    void PlaySession::buildLibraries() {
         auto &impl = *impl_;
-        impl.lastError.clear();
-        impl.snapshot = scene;
-        impl.running = true;
-        // A key pressed while editing must not fire IsKeyPressed() on the first play frame.
-        impl.inputState.ClearEdges();
-        impl.scene = &scene;
-        impl.baseDir = baseDir;
-        impl.ResetCollisionState();
-        impl.ResetQueues();
-        // Component state (live particles, "audio already fired") belongs to one play session.
-        impl.components.Reset();
-        impl.components.SetSoundSink([this](const std::string &asset) {
-            impl_->PlaySound(asset);
-        });
+
+        // Already built for this session: Start() builds once, CheckSyntax() builds for a
+        // compile-only pass and tears the libraries down again when no session is running.
+        if(impl.library)
+            return;
 
         impl.library = std::unique_ptr<Gorgon::Scripting::Library>(
             new Gorgon::Scripting::Library("EditorPlay", "Play-in-editor script bindings")
@@ -863,6 +962,49 @@ namespace Gorgon :: Editor {
                             Gorgon::Scripting::Parameter(
                                 "Handler", "Function to call every frame", Gorgon::Scripting::Types::Function(),
                                 Gorgon::Scripting::ConstTag
+                            )
+                        }
+                    )
+                }
+            ),
+            // Console output. Log and Print are the same call under two names, so a script author
+            // can write whichever reads better; both append one line to the editor console with the
+            // entity/script it came from. Called as a statement like any other GScript function.
+            new Gorgon::Scripting::Function(
+                "Log",
+                "Writes one line to the editor console.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [this](std::string message) -> int {
+                            impl_->WriteConsole(message);
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter(
+                                "Message", "Text to show in the console",
+                                Gorgon::Scripting::Types::String()
+                            )
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "Print",
+                "Alias of Log: writes one line to the editor console.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [this](std::string message) -> int {
+                            impl_->WriteConsole(message);
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter(
+                                "Message", "Text to show in the console",
+                                Gorgon::Scripting::Types::String()
                             )
                         }
                     )
@@ -1517,7 +1659,43 @@ namespace Gorgon :: Editor {
                 }
             )
         });
+    }
 
+    bool PlaySession::Start(Scene &scene, const std::string &baseDir, std::string *outError) {
+        // A previous session must restore its snapshot before a new one is taken.
+        Stop(scene);
+
+        // Built-in types (Float, Function, ...) are created by the scripting initializer, which
+        // is idempotent and also runs from Gorgon::Initialize.
+        Gorgon::Scripting::Initialize();
+
+        auto &impl = *impl_;
+        impl.lastError.clear();
+        // Every play session starts a fresh console: the previous lines are stale by then, and the
+        // VM output stream still holds whatever the last session's scripts printed.
+        impl.console.Clear();
+        impl.log.str(std::string());
+        impl.log.clear();
+        impl.outputDrained = 0;
+        impl.snapshot = scene;
+        impl.running = true;
+        // A key pressed while editing must not fire IsKeyPressed() on the first play frame.
+        impl.inputState.ClearEdges();
+        impl.scene = &scene;
+        impl.baseDir = baseDir;
+        impl.ResetCollisionState();
+        impl.ResetQueues();
+        // Component state (live particles, "audio already fired") belongs to one play session.
+        impl.components.Reset();
+        impl.components.SetSoundSink([this](const std::string &asset) {
+            impl_->PlaySound(asset);
+        });
+
+        // Every library a play script may bring in with `using` (EditorPlay, Input, Physics,
+        // Scene, Audio) is built once per session. CheckSyntax() builds the same set for a
+        // compile-only pass, so the editor's syntax check resolves exactly the symbols a running
+        // script sees.
+        buildLibraries();
 
         // Compile everything the scene starts with. CompileEntity reports its own failures into
         // lastError; one broken script must not stop the rest from running.
@@ -1543,6 +1721,7 @@ namespace Gorgon :: Editor {
                 ? std::string("No entity has an attached script that defines Update(self, dt).")
                 : impl.lastError;
             impl.lastError = message;
+            impl.console.Add(LogSeverity::Error, "PlaySession", message);
             if(outError)
                 *outError = message;
             // Nothing to run: restore immediately so play never leaves a half state behind.
@@ -1550,6 +1729,12 @@ namespace Gorgon :: Editor {
             impl.lastError = message;
             return false;
         }
+
+        // A console that shows only problems is hard to trust: say that play is running and how
+        // many scripts it compiled.
+        impl.console.Add(LogSeverity::Info, "PlaySession",
+            "Play started: " + std::to_string(impl.scripts.size()) +
+            (impl.scripts.size() == 1 ? " script running" : " scripts running"));
 
         if(outError)
             outError->clear();
@@ -1580,24 +1765,28 @@ namespace Gorgon :: Editor {
                 // The script may run after a destroyed script's VM was the active one; bind ours
                 // before a reference Data is built for it (see FireSelfHook).
                 state->vm->Activate();
+                Impl::ExecGuard guard(impl.executing, state.get());
                 Gorgon::Scripting::Data self(impl.entityType, &state->values, true, false);
                 Gorgon::Scripting::Data delta(Gorgon::Scripting::Types::Float(), dt);
                 state->vm->ExecuteFunction(state->update, {self, delta}, false);
             }
             catch(const std::exception &ex) {
-                impl.lastError = std::string("Script error: ") + ex.what();
+                impl.NoteError(std::string("Script error in ") + impl.LabelFor(*state) + ": " + ex.what(),
+                               impl.LabelFor(*state));
                 // Do not keep calling a broken script every frame.
                 state->update = nullptr;
                 // Spawning inside the failing frame may have reallocated the scene: re-resolve.
                 if(Entity *after = scene.FindEntity(state->entityId))
                     after->transform = original;
+                impl.DrainScriptOutput(state.get());
                 continue;
             }
             catch(...) {
-                impl.lastError = "Script error";
+                impl.NoteError("Script error in " + impl.LabelFor(*state), impl.LabelFor(*state));
                 state->update = nullptr;
                 if(Entity *after = scene.FindEntity(state->entityId))
                     after->transform = original;
+                impl.DrainScriptOutput(state.get());
                 continue;
             }
 
@@ -1605,6 +1794,9 @@ namespace Gorgon :: Editor {
             // write through the pointer taken before the call.
             if(Entity *after = scene.FindEntity(state->entityId))
                 WriteTransform(state->values, *after);
+
+            // Whatever the script Log()ged or printed belongs to this frame's console output.
+            impl.DrainScriptOutput(state.get());
         }
 
         // Spawns are compiled and started, destroys run their OnDestroy hooks and remove the
@@ -1677,6 +1869,10 @@ namespace Gorgon :: Editor {
         if(impl.running)
             scene = impl.snapshot;
 
+        if(impl.running)
+            impl.console.Add(LogSeverity::Info, "PlaySession", "Play stopped");
+
+        impl.executing = nullptr;
         impl.running = false;
     }
 
@@ -1764,6 +1960,108 @@ namespace Gorgon :: Editor {
         // ostringstream::str() returns by value, so cache it for the reference accessor.
         impl_->output = impl_->log.str();
         return impl_->output;
+    }
+
+    ScriptLog &PlaySession::GetLog() {
+        return impl_->console;
+    }
+
+    const ScriptLog &PlaySession::GetLog() const {
+        return impl_->console;
+    }
+
+    void PlaySession::ClearLog() {
+        impl_->console.Clear();
+    }
+
+    void PlaySession::Log(LogSeverity severity, const std::string &message, const std::string &source) {
+        impl_->console.Add(severity, source, message);
+    }
+
+    bool PlaySession::CheckSyntax(const std::string &source, const std::string &displayPath,
+                                  std::string *outError) {
+        Gorgon::Scripting::Initialize();
+
+        auto &impl = *impl_;
+        if(outError)
+            outError->clear();
+
+        // A check that leaves the session's own libraries behind would leak them into the next
+        // Start(); only build them here when no session owns them.
+        const bool builtHere = !impl.library;
+        buildLibraries();
+
+        std::string error;
+        bool compiled = true;
+
+        try {
+            std::string code = source;
+
+            // Mirror CompileEntity's prologue, minus the registration lines for entry points the
+            // source does not define: a half written script must fail on its own syntax, not on a
+            // missing Update.
+            std::string prologue = "\nusing EditorPlay\nusing Input\nusing Physics\nusing Scene\nusing Audio\n";
+            if(DefinesUpdate(code))
+                prologue += "RegisterUpdate(Update)\n";
+            if(DefinesFunction(code, "Start"))
+                prologue += "RegisterStart(Start)\n";
+            if(DefinesFunction(code, "OnDestroy"))
+                prologue += "RegisterDestroy(OnDestroy)\n";
+            if(DefinesFunction(code, "OnCollisionEnter"))
+                prologue += "RegisterCollisionEnter(OnCollisionEnter)\n";
+            if(DefinesFunction(code, "OnCollisionExit"))
+                prologue += "RegisterCollisionExit(OnCollisionExit)\n";
+            if(DefinesFunction(code, "OnTriggerEnter"))
+                prologue += "RegisterTriggerEnter(OnTriggerEnter)\n";
+            if(DefinesFunction(code, "OnTriggerExit"))
+                prologue += "RegisterTriggerExit(OnTriggerExit)\n";
+            code += prologue;
+
+            const std::string name = displayPath.empty() ? std::string("<editor>") : displayPath;
+            std::istringstream stream(code);
+            Gorgon::Scripting::StreamInput input(stream, Gorgon::Scripting::InputProvider::Programming, name);
+
+            Gorgon::Scripting::VirtualMachine vm(true, impl.log, impl.input);
+            vm.AddLibrary(*impl.library);
+            vm.AddLibrary(*impl.inputLibrary);
+            vm.AddLibrary(*impl.physicsLibrary);
+            if(impl.sceneLibrary)
+                vm.AddLibrary(*impl.sceneLibrary);
+            if(impl.audioLibrary)
+                vm.AddLibrary(*impl.audioLibrary);
+
+            // Begin() creates (and activates) the top level scope; CompileCurrent() then compiles
+            // every instruction of it — which includes function bodies — without executing any of
+            // them, so nothing the script contains can have a side effect.
+            vm.Begin(input);
+            vm.CompileCurrent();
+        }
+        catch(const std::exception &ex) {
+            compiled = false;
+            error = ex.what();
+        }
+        catch(...) {
+            compiled = false;
+            error = "Unknown compiler error";
+        }
+
+        if(builtHere) {
+            // Nothing owns these libraries: drop them with the session's other play state.
+            impl.entityType = nullptr;
+            impl.audioLibrary.reset();
+            impl.sceneLibrary.reset();
+            impl.physicsLibrary.reset();
+            impl.inputLibrary.reset();
+            impl.library.reset();
+        }
+
+        if(!compiled && error.empty())
+            error = "The script did not compile.";
+
+        if(outError)
+            *outError = error;
+
+        return compiled;
     }
 
 } // namespace Gorgon::Editor
