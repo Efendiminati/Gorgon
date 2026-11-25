@@ -64,6 +64,7 @@ namespace {
     int RunComponentsSelfTest();
     int RunConsoleSelfTest();
     int RunHotReloadSelfTest();
+    int RunUserInterfaceSelfTest();
 
     int RunSelfTest() {
         using namespace Gorgon::Editor;
@@ -265,7 +266,11 @@ namespace {
             return lightingResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, script console, syntax check, hot-reload, 2D lighting, round-trip, asset browser)\n";
+        if(const int uiResult = RunUserInterfaceSelfTest()) {
+            return uiResult;
+        }
+
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, script console, syntax check, hot-reload, 2D lighting, in-game UI, round-trip, asset browser)\n";
         return 0;
     }
 
@@ -2334,6 +2339,196 @@ namespace {
     /// 2D lighting without a window: a lightmap is pure arithmetic, so a headless run can prove it
     /// brightens towards its light, cuts off past the radius and at a spot's cone edge, casts a
     /// shadow from a collider, and does nothing at all for a scene without lights.
+
+    /// In-game UI: anchor math, the click/hover state machine, the UI script library driving a real
+    /// .gs headlessly, and a JSON round-trip. Needs no window.
+    int RunUserInterfaceSelfTest() {
+        using namespace Gorgon::Editor;
+
+        Scene scene;
+        Entity &button = scene.CreateEntity("SelftestButton");
+        button.ui = UIElementComponent{};
+        button.ui->kind = UIElementKind::Button;
+        button.ui->id = "go";
+        button.ui->text = "Go";
+        button.ui->width = 160.0f;
+        button.ui->height = 48.0f;
+        button.ui->anchorH = UIAnchorH::Right;
+        button.ui->anchorV = UIAnchorV::Bottom;
+        button.ui->x = 20.0f;
+        button.ui->y = 20.0f;
+        const EntityId buttonId = button.id;
+
+        Entity &label = scene.CreateEntity("SelftestLabel");
+        label.ui = UIElementComponent{};
+        label.ui->kind = UIElementKind::Label;
+        label.ui->id = "score";
+        label.ui->text = "Score";
+        const EntityId labelId = label.id;
+
+        // A corner button hangs off the bottom-right corner and keeps its gap when the view resizes.
+        UserInterface ui;
+        ui.Layout(scene, 800, 600);
+        if(ui.GetWidgetCount() != 2) {
+            std::cerr << "FAIL: the UI laid out " << ui.GetWidgetCount() << " widgets instead of 2\n";
+            return 1;
+        }
+        const auto *buttonWidget = ui.GetWidget("go");
+        if(!buttonWidget || !Approx(buttonWidget->rect.Right(), 780.0f) ||
+           !Approx(buttonWidget->rect.Bottom(), 580.0f)) {
+            std::cerr << "FAIL: the right/bottom anchored button is not in its corner\n";
+            return 1;
+        }
+        ui.Layout(scene, 1280, 720);
+        buttonWidget = ui.GetWidget("go");
+        if(!buttonWidget || !Approx(buttonWidget->rect.Right(), 1260.0f) ||
+           !Approx(buttonWidget->rect.Bottom(), 700.0f)) {
+            std::cerr << "FAIL: the anchored button moved when the view was resized\n";
+            return 1;
+        }
+        const auto *labelWidget = ui.GetWidget("score");
+        if(!labelWidget || !Approx(labelWidget->rect.x, 24.0f) || !Approx(labelWidget->rect.y, 24.0f)) {
+            std::cerr << "FAIL: the top-left label is not at its offset\n";
+            return 1;
+        }
+
+        // Click state: hover, press, one click on the release, nothing on the frame after it.
+        const float cx = buttonWidget->rect.CenterX();
+        const float cy = buttonWidget->rect.CenterY();
+        ui.UpdateInput(0.0f, 0.0f, false);
+        if(ui.CountHovered() != 0) {
+            std::cerr << "FAIL: a widget reported hover with the pointer in the corner\n";
+            return 1;
+        }
+        ui.UpdateInput(cx, cy, true);
+        if(!ui.IsHovered("go") || !ui.IsPressed("go") || ui.CountClicked() != 0) {
+            std::cerr << "FAIL: press state is wrong on the button-down frame\n";
+            return 1;
+        }
+        ui.UpdateInput(cx, cy, false);
+        if(ui.CountClicked() != 1 || !ui.IsClicked("go") || ui.IsPressed("go")) {
+            std::cerr << "FAIL: the release did not produce exactly one click\n";
+            return 1;
+        }
+        ui.UpdateInput(cx, cy, false);
+        if(ui.CountClicked() != 0) {
+            std::cerr << "FAIL: the click lasted more than one frame\n";
+            return 1;
+        }
+
+        // A real script drives the same button through the UI library: two clicks, two increments.
+        const auto dir = std::filesystem::temp_directory_path() / "gorgon_ui_selftest";
+        std::error_code ec;
+        std::filesystem::remove_all(dir, ec);
+        std::filesystem::create_directories(dir, ec);
+        {
+            std::ofstream out(dir / "menu.gs", std::ios::binary | std::ios::trunc);
+            out << "using UI\n"
+                   "hits = 0\n"
+                   "function Update(self, dt)\n"
+                   "    c = UI_IsClicked(\"go\")\n"
+                   "    if(c > 0)\n"
+                   "        hits = hits + 1\n"
+                   "    end if\n"
+                   "    self.x = hits\n"
+                   "    return 0\n"
+                   "end function\n";
+        }
+
+        Scene scriptScene;
+        Entity &scriptButton = scriptScene.CreateEntity("ScriptButton");
+        scriptButton.ui = UIElementComponent{};
+        scriptButton.ui->id = "go";
+        const EntityId driverId = scriptScene.CreateEntity("Driver").id;
+        scriptScene.FindEntity(driverId)->script = ScriptComponent{"menu.gs"};
+
+        PlaySession session;
+        std::string error;
+        if(!session.Start(scriptScene, dir.generic_string(), &error)) {
+            std::cerr << "FAIL: the UI script did not start: " << error << "\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+
+        UserInterface &sessionUI = session.GetUserInterface();
+        sessionUI.Layout(scriptScene, 800, 600);
+        const auto *scriptWidget = sessionUI.GetWidget("go");
+        if(!scriptWidget) {
+            std::cerr << "FAIL: the session UI has no widget for the scripted button\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        const float sx = scriptWidget->rect.CenterX();
+        const float sy = scriptWidget->rect.CenterY();
+
+        sessionUI.UpdateInput(sx, sy, true);
+        session.Tick(scriptScene, 0.0f);
+        sessionUI.UpdateInput(sx, sy, false);
+        session.Tick(scriptScene, 0.0f);
+        sessionUI.UpdateInput(sx, sy, false);
+        session.Tick(scriptScene, 0.0f);
+        sessionUI.UpdateInput(sx, sy, true);
+        session.Tick(scriptScene, 0.0f);
+        sessionUI.UpdateInput(sx, sy, false);
+        session.Tick(scriptScene, 0.0f);
+
+        if(!Approx(scriptScene.FindEntity(driverId)->transform.x, 2.0f)) {
+            std::cerr << "FAIL: the script counted "
+                      << scriptScene.FindEntity(driverId)->transform.x
+                      << " clicks instead of 2\n";
+            std::filesystem::remove_all(dir, ec);
+            return 1;
+        }
+        session.Stop(scriptScene);
+        std::filesystem::remove_all(dir, ec);
+
+        // The component survives a scene file: a UI element is authored data, not runtime state.
+        Scene reloaded;
+        const auto path = std::filesystem::temp_directory_path() / "gorgon_ui_selftest.gscene.json";
+        if(!SceneSerializer::SaveToFile(scene, path.generic_string(), &error) ||
+           !SceneSerializer::LoadFromFile(path.generic_string(), reloaded, &error)) {
+            std::cerr << "FAIL: UI round-trip failed: " << error << "\n";
+            std::filesystem::remove(path);
+            return 1;
+        }
+        std::filesystem::remove(path);
+
+        const Entity *reloadedButton = reloaded.FindEntity(buttonId);
+        const Entity *reloadedLabel = reloaded.FindEntity(labelId);
+        if(!reloadedButton || !reloadedButton->ui || reloadedButton->ui->id != "go" ||
+           reloadedButton->ui->kind != UIElementKind::Button ||
+           reloadedButton->ui->anchorH != UIAnchorH::Right) {
+            std::cerr << "FAIL: the button did not survive save/load\n";
+            return 1;
+        }
+        if(!reloadedLabel || !reloadedLabel->ui || reloadedLabel->ui->kind != UIElementKind::Label) {
+            std::cerr << "FAIL: the label did not survive save/load\n";
+            return 1;
+        }
+
+        // The exported scene lays out exactly like the authored one.
+        SceneRuntime runtime;
+        if(!runtime.LoadFromScene(reloaded, std::string(), &error)) {
+            std::cerr << "FAIL: the reloaded UI scene did not load in the runtime\n";
+            return 1;
+        }
+        runtime.SetViewSize(800, 600);
+        runtime.Update(0.0f);
+        Gorgon::Graphics::Layer layer;
+        runtime.Render(layer, 800, 600);
+        if(runtime.GetUserInterface().GetWidgetCount() != 2) {
+            std::cerr << "FAIL: the runtime laid out "
+                      << runtime.GetUserInterface().GetWidgetCount() << " widgets instead of 2\n";
+            return 1;
+        }
+        if(runtime.GetUserInterface().GetLastDrawnQuadCount() < 2) {
+            std::cerr << "FAIL: the runtime drew nothing for the UI\n";
+            return 1;
+        }
+
+        return 0;
+    }
+
     int RunLightingSelfTest() {
         using namespace Gorgon::Editor;
 
@@ -3567,6 +3762,99 @@ int main(int argc, char *argv[]) {
             Gorgon::NextFrame();
         }
 
+
+        // ---- Phase 9: in-game UI (viewport overlay, click-to-select) ---------
+        {
+            using namespace Gorgon::Editor;
+
+            auto fail = [&](const std::string &message) {
+                std::cerr << "FAIL: " << message << "\n";
+                window.Close();
+                return 1;
+            };
+
+            // A scene without a UI element draws no overlay at all.
+            app.GetViewport().ClearSelection(false);
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+            if(app.GetViewport().WasUserInterfaceDrawn() || app.GetViewport().GetUIWidgetCount() != 0)
+                return fail("a scene without UI elements drew the overlay");
+
+            // Add a button and a label straight into the scene, then redraw: the overlay has to
+            // show both, anchored to the viewport the designer is looking at.
+            Entity &uiButton = scene.CreateEntity("SmokeUIButton");
+            uiButton.ui = UIElementComponent{};
+            uiButton.ui->kind = UIElementKind::Button;
+            uiButton.ui->id = "smoke";
+            uiButton.ui->text = "Press";
+            uiButton.ui->anchorH = UIAnchorH::Right;
+            uiButton.ui->anchorV = UIAnchorV::Bottom;
+            uiButton.ui->x = 24.0f;
+            uiButton.ui->y = 24.0f;
+            uiButton.ui->width = 150.0f;
+            uiButton.ui->height = 44.0f;
+            const EntityId uiButtonId = uiButton.id;
+
+            Entity &uiLabel = scene.CreateEntity("SmokeUILabel");
+            uiLabel.ui = UIElementComponent{};
+            uiLabel.ui->kind = UIElementKind::Label;
+            uiLabel.ui->id = "smokeLabel";
+            uiLabel.ui->text = "Health";
+            const EntityId uiLabelId = uiLabel.id;
+
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+
+            if(!app.GetViewport().WasUserInterfaceDrawn())
+                return fail("the UI overlay was not drawn for a scene with UI elements");
+            if(app.GetViewport().GetUIWidgetCount() != 2)
+                return fail("the UI overlay did not lay out the button and the label");
+
+            const auto viewSize = app.GetViewport().GetViewportSize();
+            const auto *buttonWidget = app.GetViewport().GetUserInterface().GetWidget("smoke");
+            const auto *labelWidget = app.GetViewport().GetUserInterface().GetWidget("smokeLabel");
+            if(!buttonWidget || !labelWidget)
+                return fail("the laid out widgets are not addressable by their script id");
+            if(uiButtonId != buttonWidget->entity || uiLabelId != labelWidget->entity)
+                return fail("a widget is bound to the wrong entity");
+            if(std::abs(buttonWidget->rect.Right() - (float(viewSize.Width) - 24.0f)) > 1.0f ||
+               std::abs(buttonWidget->rect.Bottom() - (float(viewSize.Height) - 24.0f)) > 1.0f)
+                return fail("the corner button is not anchored to the viewport corner");
+            if(std::abs(labelWidget->rect.x - 24.0f) > 1.0f ||
+               std::abs(labelWidget->rect.y - 24.0f) > 1.0f)
+                return fail("the label is not anchored to the top-left corner");
+
+            // Clicking the button with the real viewport handlers selects the entity that owns it,
+            // which is how a UI element is picked while authoring.
+            app.GetViewport().SetSelectedEntity(picked, true);
+            const Gorgon::Geometry::Point press{
+                int(buttonWidget->rect.CenterX()), int(buttonWidget->rect.CenterY())};
+            app.GetViewport().HandleMouseDown(press, Gorgon::Input::Mouse::Button::Left);
+            app.GetViewport().HandleMouseUp(press, Gorgon::Input::Mouse::Button::Left);
+            Gorgon::NextFrame();
+            if(app.GetViewport().GetSelectedEntity() != uiButtonId)
+                return fail("clicking the UI button did not select its entity");
+
+            // Selecting it previews the element outline (the widget is still drawn, still one pass).
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+            if(app.GetViewport().GetUIWidgetCount() != 2)
+                return fail("the selected UI element was not laid out");
+
+            // Removing them restores the plain scene: no widgets, no overlay.
+            scene.RemoveEntity(uiButtonId, true);
+            scene.RemoveEntity(uiLabelId, true);
+            app.GetViewport().ClearSelection(false);
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+            if(app.GetViewport().WasUserInterfaceDrawn() || app.GetViewport().GetUIWidgetCount() != 0)
+                return fail("the scene was not restored after removing the UI elements");
+
+            app.GetViewport().SetSelectedEntity(picked, true);
+            app.GetCommandStack().Clear();
+            Gorgon::NextFrame();
+        }
+
         // Verify save/open round-trip through EditorApp in live window mode
         const auto tmpPath = (std::filesystem::temp_directory_path() / "gorgon_editor_smoke.gscene.json").string();
         std::string err;
@@ -3584,7 +3872,7 @@ int main(int argc, char *argv[]) {
             std::cerr << "FAIL: inspector edit did not persist through save/open\n";
             return 1;
         }
-        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + tilemap paint + animation timeline + 2D lighting + round-trip)\n";
+        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + tilemap paint + animation timeline + 2D lighting + in-game UI + round-trip)\n";
         return 0;
     }
 

@@ -33,6 +33,8 @@ namespace Gorgon :: Editor {
         std::optional<TilemapComponent> tilemap;
         std::optional<ParticleComponent> particles;
         std::optional<Light2DComponent> light;
+        /// In-game UI widget (button / label / panel) drawn in screen space by the runtime.
+        std::optional<UIElementComponent> ui;
         std::string prefabSource;
 
         bool HasTag(const std::string &tag) const {
@@ -63,6 +65,7 @@ namespace Gorgon :: Editor {
                    tilemap == other.tilemap &&
                    particles == other.particles &&
                    light == other.light &&
+                   ui == other.ui &&
                    prefabSource == other.prefabSource;
         }
 

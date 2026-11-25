@@ -129,7 +129,8 @@ namespace Gorgon :: Editor {
             Camera,
             Tilemap,
             Particles,
-            Light
+            Light,
+            UIElement
         };
 
         void registerComponentEvents();
@@ -297,6 +298,36 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Checkbox  chkLightShadows_{"Cast Shadows", false};
         Gorgon::Widgets::Button    btnAddLight_{"+ Add Light"};
         Gorgon::Widgets::Button    btnRemoveLight_{"- Remove Light"};
+
+        // ---- In-game UI element -------------------------------------------------
+        Gorgon::Widgets::Label     lblUI_{"UI Element", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblUIKind_{"Kind"};
+        Gorgon::Widgets::DropdownList<std::string> uiKind_;
+        Gorgon::Widgets::Label     lblUIId_{"Script Id"};
+        Gorgon::Widgets::Textbox   uiId_{""};
+        Gorgon::Widgets::Label     lblUIText_{"Text"};
+        Gorgon::Widgets::Textbox   uiText_{""};
+        Gorgon::Widgets::Label     lblUIFontSize_{"Font Size"};
+        Gorgon::Widgets::Numberbox uiFontSize_{18.0f};
+        Gorgon::Widgets::Label     lblUIOffset_{"Offset"};
+        Gorgon::Widgets::Pointfbox uiOffset_;
+        Gorgon::Widgets::Label     lblUISize_{"Size"};
+        Gorgon::Widgets::Pointfbox uiSize_;
+        Gorgon::Widgets::Label     lblUIAnchorH_{"Anchor H"};
+        Gorgon::Widgets::DropdownList<std::string> uiAnchorH_;
+        Gorgon::Widgets::Label     lblUIAnchorV_{"Anchor V"};
+        Gorgon::Widgets::DropdownList<std::string> uiAnchorV_;
+        Gorgon::Widgets::Label     lblUITextColor_{"Text Colour"};
+        Gorgon::Widgets::ColorPicker uiTextColor_;
+        Gorgon::Widgets::Label     lblUIBackground_{"Background"};
+        Gorgon::Widgets::ColorPicker uiBackground_;
+        Gorgon::Widgets::Label     lblUIHover_{"Hover"};
+        Gorgon::Widgets::ColorPicker uiHover_;
+        Gorgon::Widgets::Label     lblUIPressed_{"Pressed"};
+        Gorgon::Widgets::ColorPicker uiPressed_;
+        Gorgon::Widgets::Checkbox  chkUIVisible_{"Visible", true};
+        Gorgon::Widgets::Button    btnAddUI_{"+ Add UI Element"};
+        Gorgon::Widgets::Button    btnRemoveUI_{"- Remove UI Element"};
 
         std::vector<Row> rows_;
         bool updating_ = false;

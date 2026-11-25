@@ -122,6 +122,13 @@ namespace Gorgon :: Editor {
         Lightmap lightmap;
         LightmapTexture lightmapTexture;
 
+        // In-game UI: laid out from the live scene once per Update() (so scripts query the state of
+        // the frame they are running in) and drawn in screen space above the world.
+        UserInterface ui;
+        UserInterface::FontProvider uiFontProvider;
+        int viewWidth = 0;
+        int viewHeight = 0;
+
         std::string lastError;
         bool loaded = false;
 
@@ -132,6 +139,28 @@ namespace Gorgon :: Editor {
             componentSounds.clear();
             lightmap.Reset();
             lightmapTexture.Clear();
+            ui.Reset();
+        }
+
+        /// Lays the UI out for the current view size and advances one frame of pointer state from
+        /// the caller's InputState. Screen pixels, not world units: the UI lives in screen space.
+        void updateUserInterface() {
+            if(!(viewWidth > 0 && viewHeight > 0)) {
+                ui.Reset();
+                return;
+            }
+
+            ui.Layout(scene, viewWidth, viewHeight);
+            ui.UpdateInput(input.mouseScreenX, input.mouseScreenY, input.IsMouseDown("left"));
+        }
+
+        /// True when any visible entity of the scene carries a UI element.
+        bool sceneHasUI() const {
+            for(const auto &entity : scene.GetEntities()) {
+                if(entity.ui.has_value() && entity.visible && entity.ui->visible)
+                    return true;
+            }
+            return false;
         }
 
         /// The first active CameraComponent drives the projection when a scene carries one.
@@ -182,6 +211,8 @@ namespace Gorgon :: Editor {
             // The session writes the camera through this pointer, so a script's SetCameraPos/
             // SetCameraZoom changes what Render() shows on the next frame.
             play->SetCamera(&camera);
+            // Scripts see the same UI state the runtime draws, so UI_IsClicked matches the screen.
+            play->SetUserInterface(&ui);
             // Seed the session with the caller's held state. Start() drops the edge flags, so a key
             // pressed before the scripts ran does not read as freshly pressed on frame one.
             play->GetInput() = input;
@@ -356,11 +387,15 @@ namespace Gorgon :: Editor {
     void SceneRuntime::Update(float dt) {
         auto &impl = *impl_;
 
-        // A scriptless scene still animates its sprites, particles and play-on-start audio.
-        if(!impl.loaded || !impl.play) {
-            if(!impl.loaded)
-                return;
+        if(!impl.loaded)
+            return;
 
+        // The UI is laid out and hit-tested *before* the scripts run, so a script's UI_IsClicked
+        // already reports this frame's click instead of the previous one.
+        impl.updateUserInterface();
+
+        // A scriptless scene still animates its sprites, particles and play-on-start audio.
+        if(!impl.play) {
             impl.components.Step(impl.scene, dt);
             impl.applyCameraComponent();
             return;
@@ -401,6 +436,10 @@ namespace Gorgon :: Editor {
 
         if(viewWidth <= 0 || viewHeight <= 0)
             return;
+
+        // The size the host draws with is the size the UI is anchored to.
+        impl.viewWidth = viewWidth;
+        impl.viewHeight = viewHeight;
 
         const float viewW = float(viewWidth);
         const float viewH = float(viewHeight);
@@ -558,7 +597,9 @@ namespace Gorgon :: Editor {
                         target.Draw(corners[0], corners[1], corners[2], corners[3],
                                     Gorgon::Graphics::RGBAf(0.85f, 0.85f, 0.95f, 0.35f));
                 }
-                else {
+                else if(!entity->ui.has_value()) {
+                    // A UI element lives in screen space; an entity that only carries one must not
+                    // also appear as a placeholder box in the world.
                     const auto fill = FallbackColorForEntity(*entity);
                     target.Draw(corners[0], corners[1], corners[2], corners[3], fill);
                 }
@@ -664,6 +705,19 @@ namespace Gorgon :: Editor {
         }
         else {
             impl.lightmap.Reset();
+        }
+
+        // ---- In-game UI ---------------------------------------------------------
+        // Screen space, above the world and the lightmap, laid out for the size we just drew with.
+        // A scene without a UI element skips the pass entirely; the layout is redone here (not
+        // reused from Update) so the rects always match the size on screen, and the pointer state
+        // survives the re-layout.
+        if(impl.options.drawUI && impl.sceneHasUI()) {
+            impl.ui.Layout(impl.scene, viewWidth, viewHeight);
+            impl.ui.Render(target, impl.textPrinter, impl.uiFontProvider);
+        }
+        else {
+            impl.ui.ResetDrawCount();
         }
     }
 
@@ -795,6 +849,31 @@ namespace Gorgon :: Editor {
 
     void SceneRuntime::SetTextPrinter(const Gorgon::Graphics::StyledPrinter *printer) {
         impl_->textPrinter = printer;
+    }
+
+    void SceneRuntime::SetViewSize(int width, int height) {
+        impl_->viewWidth = std::max(0, width);
+        impl_->viewHeight = std::max(0, height);
+    }
+
+    int SceneRuntime::GetViewWidth() const {
+        return impl_->viewWidth;
+    }
+
+    int SceneRuntime::GetViewHeight() const {
+        return impl_->viewHeight;
+    }
+
+    UserInterface &SceneRuntime::GetUserInterface() {
+        return impl_->ui;
+    }
+
+    const UserInterface &SceneRuntime::GetUserInterface() const {
+        return impl_->ui;
+    }
+
+    void SceneRuntime::SetUIFontProvider(UserInterface::FontProvider provider) {
+        impl_->uiFontProvider = std::move(provider);
     }
 
     int SceneRuntime::GetLoadedSpriteCount() const {

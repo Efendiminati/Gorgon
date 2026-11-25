@@ -5,6 +5,7 @@
 #include "Lightmap.h"
 #include "RuntimeCamera.h"
 #include "Scene.h"
+#include "UserInterface.h"
 
 #include <Gorgon/Graphics/Layer.h>
 #include <Gorgon/Graphics/Font.h>
@@ -27,6 +28,9 @@ namespace Gorgon :: Editor {
         /// Colour unlit areas fall back to. Opaque black is "darkness"; a tinted ambient keeps the
         /// scene readable outside every light.
         ColorRGBA lightAmbient{0, 0, 0, 255};
+        /// Draw the scene's in-game UI (UIElementComponents) in screen space over the world. A
+        /// scene without a UI element skips the pass, so nothing is laid out or drawn.
+        bool drawUI = true;
     };
 
     /**
@@ -105,8 +109,28 @@ namespace Gorgon :: Editor {
         const InputState &GetInput() const;
 
         /// Draws the scene into target, using the target's own size for the camera projection.
+        /// The in-game UI is drawn last, above the world and the lightmap.
         void Render(Gorgon::Graphics::Layer &target);
         void Render(Gorgon::Graphics::Layer &target, int viewWidth, int viewHeight);
+
+        /**
+         * Size of the view the UI is laid out for, in pixels. Update() uses it to hit-test the
+         * pointer against the widgets, so a host sets it once and again whenever the window is
+         * resized; Render() also records the size it drew with. Without it (0x0) nothing is
+         * laid out and UI_IsClicked/UI_IsHovered stay 0.
+         */
+        void SetViewSize(int width, int height);
+        int GetViewWidth() const;
+        int GetViewHeight() const;
+
+        /// The runtime's UI layer: widgets laid out from the live scene, pointer state and drawing.
+        /// Exposed so a host (or a test) can read the widget rects and the click state.
+        UserInterface &GetUserInterface();
+        const UserInterface &GetUserInterface() const;
+
+        /// Supplies a printer per font size for UI text (a host with real fonts). Without one the
+        /// UI uses SetTextPrinter()'s single printer, and without that a placeholder bar.
+        void SetUIFontProvider(UserInterface::FontProvider provider);
 
         Scene &GetScene();
         const Scene &GetScene() const;

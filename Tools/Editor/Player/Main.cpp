@@ -1,7 +1,9 @@
 #include <Gorgon/EntryPoint.h>
 #include <Gorgon/Main.h>
+#include <Gorgon/OS.h>
 #include <Gorgon/Time.h>
 #include <Gorgon/Window.h>
+#include <Gorgon/Graphics/FreeType.h>
 #include <Gorgon/Graphics/Layer.h>
 #include <Gorgon/Input/Layer.h>
 
@@ -10,10 +12,13 @@
 #include "Core/SceneRuntime.h"
 
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <memory>
 #include <string>
 #include <thread>
 #include <vector>
@@ -79,6 +84,57 @@ namespace {
         return false;
     }
 
+    /**
+     * Fonts for the in-game UI, loaded on demand from the system font the player already needs for
+     * entity text. One FreeType atlas per pixel size (a UI element stores its own font size), each
+     * wrapped in the StyledPrinter the runtime renders with. Nothing here touches Gorgon::Widgets:
+     * the player must not pull editor chrome in with it.
+     *
+     * A system with no usable font is not fatal — `Get()` returns nullptr and the UI falls back to
+     * placeholder text bars, exactly like a headless run.
+     */
+    class UIFonts {
+    public:
+        void Initialize() {
+            const auto [font, found] = Gorgon::OS::GetFont();
+            if(!found || font.Filename.empty())
+                return;
+
+            filename_ = font.Filename;
+        }
+
+        bool HasFonts() const { return !filename_.empty(); }
+
+        const Gorgon::Graphics::StyledPrinter *Get(float pixelSize) {
+            if(filename_.empty())
+                return nullptr;
+
+            const int size = int(std::lround(pixelSize));
+            const int clamped = size < 8 ? 8 : (size > 96 ? 96 : size);
+
+            const auto it = printers_.find(clamped);
+            if(it != printers_.end())
+                return it->second.get();
+
+            auto renderer = std::make_unique<Gorgon::Graphics::FreeType>();
+            if(!renderer->LoadFile(filename_, clamped))
+                return nullptr;
+
+            auto printer = std::make_unique<Gorgon::Graphics::StyledPrinter>(*renderer);
+            const auto *result = printer.get();
+            // The atlas has to outlive the printer that points at it: renderers_ is declared first,
+            // so it is destroyed last.
+            renderers_[clamped] = std::move(renderer);
+            printers_[clamped] = std::move(printer);
+            return result;
+        }
+
+    private:
+        std::string filename_;
+        std::map<int, std::unique_ptr<Gorgon::Graphics::FreeType>> renderers_;
+        std::map<int, std::unique_ptr<Gorgon::Graphics::StyledPrinter>> printers_;
+    };
+
     struct LoadedGame {
         Gorgon::Editor::GameManifest manifest;
         std::string scenePath;
@@ -130,6 +186,12 @@ namespace {
         const int entities = scene.GetEntityCount();
         const int scripts = runtime.GetScriptCount();
 
+        // The UI is laid out for the manifest's window size, so a bundle whose scene carries a
+        // button or a label proves the canvas survives the export (no assets involved).
+        runtime.SetViewSize(game.manifest.width, game.manifest.height);
+        runtime.Update(0.0f);
+        const int widgets = runtime.GetUserInterface().GetWidgetCount();
+
         // Snapshot the transforms, run half a second of updates and check the scene stayed usable.
         std::size_t moved = 0;
         for(int frame = 0; frame < 30; ++frame)
@@ -156,12 +218,14 @@ namespace {
                        << "scene=" << game.scenePath << "\n"
                        << "entities=" << entities << "\n"
                        << "scripts=" << scripts << "\n"
+                       << "uiWidgets=" << widgets << "\n"
                        << "frames=30\n";
             }
         }
 
         std::cout << "GorgonPlayer --selftest PASSED (" << entities << " entities, " << scripts
-                  << " running scripts, " << moved << " scripted, 30 frames)\n";
+                  << " running scripts, " << moved << " scripted, " << widgets
+                  << " UI widgets, 30 frames)\n";
         return 0;
     }
 
@@ -196,6 +260,15 @@ int Main(const std::vector<std::string> &args) {
         return 1;
     }
     runtime.CenterCamera(width, height);
+    runtime.SetViewSize(width, height);
+
+    // Fonts for the in-game UI (and for TextComponent entities): one atlas per authored size, from
+    // the system font. Gorgon::Widgets is deliberately not involved — the player must not link the
+    // editor's widget toolkit.
+    UIFonts fonts;
+    fonts.Initialize();
+    runtime.SetTextPrinter(fonts.Get(16.0f));
+    runtime.SetUIFontProvider([&fonts](float size) { return fonts.Get(size); });
 
     Gorgon::Graphics::Layer sceneLayer;
     window.Add(sceneLayer);
@@ -233,10 +306,13 @@ int Main(const std::vector<std::string> &args) {
     while(!window.IsClosed() && (frameLimit <= 0 || frame < frameLimit)) {
         const auto frameStart = std::chrono::steady_clock::now();
 
-        // Feed the pointer in world units, then step the scripts and draw.
+        // Feed the pointer in world units (scripts) and in screen pixels (the UI), then step the
+        // scripts and draw.
         const auto world = runtime.GetCamera().ScreenToWorld(
             float(mousePosition.X), float(mousePosition.Y), float(width), float(height));
         runtime.GetInput().SetMousePosition(world.X, world.Y);
+        runtime.GetInput().SetMouseScreenPosition(float(mousePosition.X), float(mousePosition.Y));
+        runtime.SetViewSize(width, height);
 
         runtime.Update(float(kFrameSeconds));
 

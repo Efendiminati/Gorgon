@@ -310,6 +310,121 @@ namespace Gorgon :: Editor {
         return false;
     }
 
+    enum class UIElementKind {
+        Panel = 0,
+        Label,
+        Button
+    };
+
+    inline std::string UIElementKindToString(UIElementKind kind) {
+        switch(kind) {
+            case UIElementKind::Label:  return "label";
+            case UIElementKind::Panel:  return "panel";
+            case UIElementKind::Button:
+            default:                    return "button";
+        }
+    }
+
+    inline bool UIElementKindFromString(const std::string &str, UIElementKind &out) {
+        if(str == "panel")  { out = UIElementKind::Panel;  return true; }
+        if(str == "label")  { out = UIElementKind::Label;  return true; }
+        if(str == "button") { out = UIElementKind::Button; return true; }
+        return false;
+    }
+
+    /// Horizontal anchor of a screen-space UI element: which point of the screen the element's
+    /// own left/centre/right edge is pinned to. `x` is measured outwards from that edge.
+    enum class UIAnchorH {
+        Left = 0,
+        Center,
+        Right
+    };
+
+    /// Vertical counterpart of UIAnchorH (top / middle / bottom).
+    enum class UIAnchorV {
+        Top = 0,
+        Middle,
+        Bottom
+    };
+
+    inline std::string UIAnchorHToString(UIAnchorH value) {
+        switch(value) {
+            case UIAnchorH::Center: return "center";
+            case UIAnchorH::Right:  return "right";
+            case UIAnchorH::Left:
+            default:                return "left";
+        }
+    }
+
+    inline bool UIAnchorHFromString(const std::string &str, UIAnchorH &out) {
+        if(str == "left")   { out = UIAnchorH::Left;   return true; }
+        if(str == "center" || str == "centre") { out = UIAnchorH::Center; return true; }
+        if(str == "right")  { out = UIAnchorH::Right;  return true; }
+        return false;
+    }
+
+    inline std::string UIAnchorVToString(UIAnchorV value) {
+        switch(value) {
+            case UIAnchorV::Middle: return "middle";
+            case UIAnchorV::Bottom: return "bottom";
+            case UIAnchorV::Top:
+            default:                return "top";
+        }
+    }
+
+    inline bool UIAnchorVFromString(const std::string &str, UIAnchorV &out) {
+        if(str == "top")    { out = UIAnchorV::Top;    return true; }
+        if(str == "middle" || str == "center" || str == "centre") { out = UIAnchorV::Middle; return true; }
+        if(str == "bottom") { out = UIAnchorV::Bottom; return true; }
+        return false;
+    }
+
+    /// One widget of the in-game UI: a button, a label or a panel drawn in **screen space**, above
+    /// the world, by the runtime's UserInterface layer.
+    ///
+    /// The element is anchored rather than placed at a fixed pixel, so a UI stays put when the
+    /// window is resized: `anchorH`/`anchorV` pick which edge of the screen the element hangs off
+    /// and `x`/`y` are the gap from that edge, in pixels. An element anchored to the right/bottom
+    /// therefore keeps its distance to that corner at every window size.
+    ///
+    /// `id` is the handle scripts use (`using UI` → `UI_IsClicked(id)`, `UI_SetText(id, ...)`); it
+    /// is free-form and only has to be unique among the elements a script talks to. `visible` is
+    /// authored here and can be toggled at runtime with `UI_SetVisible`, so an element can start
+    /// hidden and be revealed by a script.
+    struct UIElementComponent {
+        UIElementKind kind = UIElementKind::Button;
+        std::string id;
+        float x = 24.0f;          // gap from the anchor point, in screen pixels
+        float y = 24.0f;
+        float width = 200.0f;
+        float height = 56.0f;
+        UIAnchorH anchorH = UIAnchorH::Left;
+        UIAnchorV anchorV = UIAnchorV::Top;
+        std::string text = "Button";
+        float fontSize = 18.0f;
+        ColorRGBA textColor{255, 255, 255, 255};
+        ColorRGBA background{40, 44, 56, 225};
+        /// Button only: the fill while the pointer is over it / while it is held down.
+        ColorRGBA hoverBackground{70, 120, 200, 240};
+        ColorRGBA pressedBackground{36, 78, 150, 250};
+        bool visible = true;
+
+        bool operator==(const UIElementComponent &other) const {
+            return kind == other.kind && id == other.id &&
+                   x == other.x && y == other.y &&
+                   width == other.width && height == other.height &&
+                   anchorH == other.anchorH && anchorV == other.anchorV &&
+                   text == other.text && fontSize == other.fontSize &&
+                   textColor == other.textColor && background == other.background &&
+                   hoverBackground == other.hoverBackground &&
+                   pressedBackground == other.pressedBackground &&
+                   visible == other.visible;
+        }
+        bool operator!=(const UIElementComponent &other) const {
+            return !(*this == other);
+        }
+    };
+
     /// A 2D light placed at the entity's world position. The runtime multiplies a lightmap built
     /// from every light in the scene over the rendered scene; a scene without lights pays nothing.
     ///

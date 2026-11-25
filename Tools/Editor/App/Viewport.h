@@ -3,6 +3,7 @@
 #include "Core/Scene.h"
 #include "Core/Lightmap.h"
 #include "Core/TilemapPainter.h"
+#include "Core/UserInterface.h"
 
 #include <Gorgon/Geometry/Point.h>
 #include <Gorgon/Geometry/Size.h>
@@ -248,6 +249,25 @@ namespace Gorgon :: Editor {
         /// The map the last Redraw() built. Inactive when nothing was lit.
         const Lightmap &GetLightmap() const { return lightmap_; }
 
+        // ---- In-game UI preview -------------------------------------------------
+        /// The UI layer the viewport previews. It is the same UserInterface type the runtime and the
+        /// player use (no Gorgon::Widgets involved), so what you author is what the game draws.
+        UserInterface &GetUserInterface() { return uiPreview_; }
+        const UserInterface &GetUserInterface() const { return uiPreview_; }
+
+        /// Widgets the last Redraw() laid out and drew (0 for a scene without UI elements).
+        int GetUIWidgetCount() const { return uiWidgetCount_; }
+        /// True when the last Redraw() actually drew the UI overlay.
+        bool WasUserInterfaceDrawn() const { return uiDrawn_; }
+
+        /// Lays the UI out for the current viewport and advances its pointer state from the
+        /// viewport's own mouse. During play the host calls this before ticking the scripts so
+        /// `UI_IsClicked` matches the frame they run in; Redraw() calls it while authoring.
+        void UpdateUserInterfaceInput();
+
+        /// Id of the entity whose UI button is under a viewport pixel, InvalidEntityId when none.
+        EntityId HitTestUserInterface(float sx, float sy) const;
+
         /// Hit-testing & interaction helpers (also directly testable in --selftest)
         EntityId HitTestEntity(float sx, float sy) const;
         std::vector<EntityId> HitTestMarquee(float sx1, float sy1, float sx2, float sy2) const;
@@ -322,6 +342,9 @@ namespace Gorgon :: Editor {
         void drawTileTool(float viewW, float viewH);
         /// Recomputes paletteLayout_ for the current viewport size and tileset.
         void updatePaletteLayout(float viewW, float viewH) const;
+        /// Draws the scene's UI elements in screen space over everything else (panels, labels,
+        /// buttons), which is what makes a UI visible while authoring.
+        void drawUserInterface(float viewW, float viewH);
         /// Paints the current stroke from the previous cell to (col, row). Returns cells changed.
         int paintTileStrokeTo(int col, int row);
         /// Disarms the tool when the selection stops being paintable.
@@ -383,6 +406,11 @@ namespace Gorgon :: Editor {
         LightmapTexture lightmapTexture_;
         int lightGizmoCount_ = 0;
         bool lightmapDrawn_ = false;
+
+        // ---- In-game UI preview state -----------------------------------------
+        UserInterface uiPreview_;
+        int uiWidgetCount_ = 0;
+        bool uiDrawn_ = false;
 
         // ---- Tilemap painting state -------------------------------------------
         bool tileToolActive_ = false;

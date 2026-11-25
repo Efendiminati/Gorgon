@@ -165,6 +165,12 @@ namespace Gorgon :: Editor {
         float mouseX = 0.0f;
         float mouseY = 0.0f;
 
+        /// The same pointer in **screen** pixels (origin in the top-left corner of the view). The
+        /// in-game UI works in screen space, so the host reports both forms: world units for the
+        /// `Input` library, pixels for UserInterface.
+        float mouseScreenX = 0.0f;
+        float mouseScreenY = 0.0f;
+
         // ---- feeding ---------------------------------------------------------
 
         /// Records a key going down or up. Only a real transition produces an edge flag.
@@ -198,6 +204,12 @@ namespace Gorgon :: Editor {
         void SetMousePosition(float worldX, float worldY) {
             mouseX = worldX;
             mouseY = worldY;
+        }
+
+        /// Reports the pointer in screen pixels, which is what the in-game UI hit-tests against.
+        void SetMouseScreenPosition(float screenX, float screenY) {
+            mouseScreenX = screenX;
+            mouseScreenY = screenY;
         }
 
         // ---- queries ---------------------------------------------------------
@@ -239,6 +251,8 @@ namespace Gorgon :: Editor {
             buttonsDown_.clear();
             mouseX = 0.0f;
             mouseY = 0.0f;
+            mouseScreenX = 0.0f;
+            mouseScreenY = 0.0f;
         }
 
         const std::set<std::string> &GetKeysDown() const { return keysDown_; }

@@ -849,6 +849,10 @@ namespace Gorgon :: Editor {
         playInput_.SetMouseButtonDown("Right", viewport_.IsMouseButtonDown(Btn::Right));
         playInput_.SetMouseButtonDown("Middle", viewport_.IsMouseButtonDown(Btn::Middle));
 
+        // The UI hit-tests screen pixels, and its state has to be fresh *before* the scripts run so
+        // UI_IsClicked reports the frame the script is in.
+        viewport_.UpdateUserInterfaceInput();
+
         play_.GetInput() = playInput_;
     }
 
@@ -884,6 +888,9 @@ namespace Gorgon :: Editor {
         viewport_.SetEditEnabled(false);
         // The viewport reads live particle state from the running session.
         viewport_.SetPlaySession(&play_);
+        // Scripts and the screen share one UI: the viewport owns the UserInterface that draws the
+        // overlay, and the session reads its click/hover state.
+        play_.SetUserInterface(&viewport_.GetUserInterface());
         // Play owns the scene: the timeline's own playhead and preview step aside.
         timeline_.SetScenePlaying(true);
         viewport_.Redraw();

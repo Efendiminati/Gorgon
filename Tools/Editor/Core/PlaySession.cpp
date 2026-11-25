@@ -1,5 +1,6 @@
 #include "Core/PlaySession.h"
 #include "Core/FileWatcher.h"
+#include "Core/UserInterface.h"
 
 #include "SceneSerializer.h"
 
@@ -58,6 +59,12 @@ namespace Gorgon :: Editor {
         RuntimeCamera *camera = &ownedCamera;
         bool cameraChanged = false;
 
+        // In-game UI the UI library reads click/hover state from. Points at the host's UserInterface
+        // (installed with SetUserInterface()) or at ownedUI; a host that renders the UI hands its own
+        // in so scripts and the screen agree on which button is under the pointer.
+        UserInterface ownedUI;
+        UserInterface *ui = &ownedUI;
+
         // Every path passed to Audio::PlaySound(), and the play voices behind them.
         std::vector<std::string> playedSounds;
 #ifdef GORGON_AUDIO_SUPPORT
@@ -70,6 +77,7 @@ namespace Gorgon :: Editor {
         std::unique_ptr<Gorgon::Scripting::Library> inputLibrary;
         std::unique_ptr<Gorgon::Scripting::Library> physicsLibrary;
         std::unique_ptr<Gorgon::Scripting::Library> sceneLibrary;
+        std::unique_ptr<Gorgon::Scripting::Library> uiLibrary;
         std::unique_ptr<Gorgon::Scripting::Library> audioLibrary;
         Gorgon::Scripting::MappedReferenceType<ScriptTransform> *entityType = nullptr;
 
@@ -460,6 +468,8 @@ namespace Gorgon :: Editor {
             state->vm->AddLibrary(*physicsLibrary);
             if(sceneLibrary)
                 state->vm->AddLibrary(*sceneLibrary);
+            if(uiLibrary)
+                state->vm->AddLibrary(*uiLibrary);
             if(audioLibrary)
                 state->vm->AddLibrary(*audioLibrary);
 
@@ -468,7 +478,7 @@ namespace Gorgon :: Editor {
             // collision hooks are optional, so each one is only registered when the source defines
             // it; registering a name that does not exist would fail the compile.
             std::string prologue =
-                "\nusing EditorPlay\nusing Input\nusing Physics\nusing Scene\nusing Audio\n"
+                "\nusing EditorPlay\nusing Input\nusing Physics\nusing Scene\nusing Audio\nusing UI\n"
                 "RegisterUpdate(Update)\n";
             if(DefinesFunction(code, "Start"))
                 prologue += "RegisterStart(Start)\n";
@@ -1858,6 +1868,118 @@ namespace Gorgon :: Editor {
             )
         });
 
+        // ---- UI library ------------------------------------------------------
+        // Opt in with `using UI`. Every function takes the widget's authored `id` (the
+        // UIElementComponent's script handle), so a script can drive a canvas of buttons, labels and
+        // panels without knowing entity ids. SetText/SetVisible write the live scene's component, so
+        // the change is what the UI layer draws on the next frame and what a host can save;
+        // IsClicked/IsHovered read the state the host's UserInterface computed for this frame.
+        // Every function returns a value, like the rest of the script API: 1 when the call did
+        // something / when the query is true, 0 otherwise.
+        impl.uiLibrary = std::unique_ptr<Gorgon::Scripting::Library>(
+            new Gorgon::Scripting::Library("UI", "In-game UI widgets: text, visibility, clicks and hover")
+        );
+
+        // Resolves a widget id to the entity that carries it. Empty ids and unknown ids yield null.
+        auto findWidgetEntity = [session](const std::string &id) -> Entity * {
+            if(id.empty() || !session->scene)
+                return nullptr;
+
+            // GetEntities() is the const view (the scene owns a vector); FindEntity() is the
+            // mutable handle the setters write through.
+            for(const auto &entity : session->scene->GetEntities()) {
+                if(entity.ui.has_value() && entity.ui->id == id)
+                    return session->scene->FindEntity(entity.id);
+            }
+            return nullptr;
+        };
+
+        impl.uiLibrary->AddMembers({
+            new Gorgon::Scripting::Function(
+                "UI_SetText",
+                "Replaces the text of the UI element with this id and returns 1, or 0 when no "
+                "element carries the id.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [findWidgetEntity](std::string id, std::string text) -> int {
+                            Entity *entity = findWidgetEntity(id);
+                            if(!entity || !entity->ui)
+                                return 0;
+                            entity->ui->text = text;
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Id", "Script id of the UI element",
+                                                        Gorgon::Scripting::Types::String()),
+                            Gorgon::Scripting::Parameter("Text", "New text",
+                                                        Gorgon::Scripting::Types::String())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "UI_SetVisible",
+                "Shows (1) or hides (0) the UI element with this id and returns 1, or 0 when no "
+                "element carries the id.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [findWidgetEntity](std::string id, int visible) -> int {
+                            Entity *entity = findWidgetEntity(id);
+                            if(!entity || !entity->ui)
+                                return 0;
+                            entity->ui->visible = visible != 0;
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Id", "Script id of the UI element",
+                                                        Gorgon::Scripting::Types::String()),
+                            Gorgon::Scripting::Parameter("Visible", "1 shows, 0 hides",
+                                                        Gorgon::Scripting::Types::Int())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "UI_IsClicked",
+                "1 on the frame the button with this id was clicked (primary button released over "
+                "it), 0 on every other frame and for unknown ids. One shot: a single frame only.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](std::string id) -> int {
+                            if(!session->ui)
+                                return 0;
+                            return session->ui->IsClicked(id) ? 1 : 0;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {Gorgon::Scripting::Parameter("Id", "Script id of the UI element",
+                                                     Gorgon::Scripting::Types::String())}
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "UI_IsHovered",
+                "1 while the pointer is over the button with this id, 0 otherwise or for unknown ids.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](std::string id) -> int {
+                            if(!session->ui)
+                                return 0;
+                            return session->ui->IsHovered(id) ? 1 : 0;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {Gorgon::Scripting::Parameter("Id", "Script id of the UI element",
+                                                     Gorgon::Scripting::Types::String())}
+                    )
+                }
+            )
+        });
+
         // ---- Audio library ---------------------------------------------------
         // Opt in with `using Audio`. PlaySound() resolves the path against the scene, plays it on a
         // pooled voice when Gorgon::Audio has a device, and records the path either way.
@@ -2074,6 +2196,7 @@ namespace Gorgon :: Editor {
         impl.compiling = nullptr;
         impl.entityType = nullptr;
         impl.audioLibrary.reset();
+        impl.uiLibrary.reset();
         impl.sceneLibrary.reset();
         impl.physicsLibrary.reset();
         impl.inputLibrary.reset();
@@ -2122,6 +2245,18 @@ namespace Gorgon :: Editor {
 
     void PlaySession::SetCamera(RuntimeCamera *camera) {
         impl_->camera = camera ? camera : &impl_->ownedCamera;
+    }
+
+    UserInterface &PlaySession::GetUserInterface() {
+        return *impl_->ui;
+    }
+
+    const UserInterface &PlaySession::GetUserInterface() const {
+        return *impl_->ui;
+    }
+
+    void PlaySession::SetUserInterface(UserInterface *ui) {
+        impl_->ui = ui ? ui : &impl_->ownedUI;
     }
 
     bool PlaySession::ConsumeCameraChange() {
@@ -2282,7 +2417,7 @@ namespace Gorgon :: Editor {
             // Mirror CompileEntity's prologue, minus the registration lines for entry points the
             // source does not define: a half written script must fail on its own syntax, not on a
             // missing Update.
-            std::string prologue = "\nusing EditorPlay\nusing Input\nusing Physics\nusing Scene\nusing Audio\n";
+            std::string prologue = "\nusing EditorPlay\nusing Input\nusing Physics\nusing Scene\nusing Audio\nusing UI\n";
             if(DefinesUpdate(code))
                 prologue += "RegisterUpdate(Update)\n";
             if(DefinesFunction(code, "Start"))
@@ -2309,8 +2444,10 @@ namespace Gorgon :: Editor {
             vm.AddLibrary(*impl.physicsLibrary);
             if(impl.sceneLibrary)
                 vm.AddLibrary(*impl.sceneLibrary);
-            if(impl.audioLibrary)
-                vm.AddLibrary(*impl.audioLibrary);
+                if(impl.uiLibrary)
+                    vm.AddLibrary(*impl.uiLibrary);
+                if(impl.audioLibrary)
+                    vm.AddLibrary(*impl.audioLibrary);
 
             // Begin() creates (and activates) the top level scope; CompileCurrent() then compiles
             // every instruction of it — which includes function bodies — without executing any of
@@ -2331,6 +2468,7 @@ namespace Gorgon :: Editor {
             // Nothing owns these libraries: drop them with the session's other play state.
             impl.entityType = nullptr;
             impl.audioLibrary.reset();
+            impl.uiLibrary.reset();
             impl.sceneLibrary.reset();
             impl.physicsLibrary.reset();
             impl.inputLibrary.reset();

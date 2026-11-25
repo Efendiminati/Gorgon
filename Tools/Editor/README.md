@@ -233,6 +233,46 @@ unit tests build and sample it without a graphics context. Only the texture uplo
 composite need one. A scene with **no lights skips the entire pass** — nothing is allocated, uploaded
 or drawn, so an unlit scene costs and looks exactly as it did before lighting existed.
 
+### In-game UI
+
+Add a **UI Element** component in the Inspector to put a widget on the game's screen: a **Button**, a
+**Label** or a **Panel**. UI elements live in *screen space* — pixels from the top-left of the
+window, in front of the world and in front of the lightmap — and are drawn by `UserInterface`
+(`Core/UserInterface.h`), the same class the viewport previews with and the exported player runs.
+Nothing in that path touches `Gorgon::Widgets`, so what you author is exactly what the game draws.
+
+| Field | Meaning |
+| --- | --- |
+| *Kind* | **Button** (hit-testable), **Label** (text only) or **Panel** (fill only, no text) |
+| *Script Id* | Handle scripts use: `UI_IsClicked("start")`. Free-form; unique among the elements a script talks to |
+| *Text* | Caption of a button or label |
+| *Font Size* | Pixel height of the text; the player loads one atlas per size |
+| *Offset* | Gap from the anchor edge, in pixels |
+| *Size* | Width and height of the widget, in pixels |
+| *Anchor H* / *Anchor V* | Screen edge the element hangs off: **Left**/**Centre**/**Right** and **Top**/**Middle**/**Bottom** |
+| *Text Colour*, *Background* | Base colours |
+| *Hover*, *Pressed* | Button only: the fill while the pointer is over it / while it is held down |
+| *Visible* | Authored visibility; `UI_SetVisible` toggles it at runtime |
+
+Anchors replace fixed pixels so a UI stays put when the window is resized: the element is pinned to
+the edge its anchors name and the offset is the gap from that edge, so a bottom-right button keeps
+its distance to the bottom-right corner at every window size. For the centre anchors the offset
+shifts the element off-centre instead (positive moves right/down), so a centred button stays centred.
+The Inspector's *Add UI Element* / *Remove* pair attaches and detaches the component.
+
+While authoring, the viewport draws the scene's UI in its overlay every frame, so a canvas is visible
+without starting Play; clicking a widget selects the entity that owns it, and the selected element
+gets an outline. A scene with no UI elements draws no overlay at all — nothing is laid out and the
+frame costs exactly what it did before.
+
+Only **buttons** are hit-tested, and draw order is panels first, then labels, then buttons (scene
+order within each kind), so a button always sits on top of the panel it was placed on and the
+topmost button wins a click. A button reports three states: hover (pointer over it), press (primary
+button held down over the button it was pressed on — dragging off pops it back up) and **click**,
+which is true for exactly one frame: the frame the primary button is released over the button it was
+pressed on. `UI_IsClicked` reads that frame, so a click can drive several scripts without any of
+them having to clear a flag.
+
 ### Script editor
 
 `Edit Script` in the Details panel, or double clicking a `.gs` file in the asset browser, opens the
@@ -348,6 +388,7 @@ unchanged, and each one is only written back when an entity carries it.
 | `tilemap` | renderer | One quad per cell, textured from `tilesetAsset` (row-major with `tilesetCols` columns) or coloured per tile index when there is no tileset. |
 | `particles` | step | CPU emitter: `emitRate` particles per second, each living `lifetime` seconds and moving `speed` units/s from the emitter origin, coloured from `startColor` to `endColor`. Live particles live in the runtime, never in the scene file. |
 | `light` | renderer | A 2D light at the entity's world position: `point` or `spot`, with colour, radius, intensity, cone angle/direction and a `castShadows` flag. The runtime composites a lightmap built from every light in the scene; a scene without lights skips the pass. |
+| `ui` | renderer + input | One in-game widget — `button`, `label` or `panel` — drawn in screen space above the world: anchored rect, text, colours and a script `id`. Buttons report hover / press / a one-frame click. A scene without UI elements skips the pass. |
 
 Tags and properties are plain entity metadata: the inspector edits tags as a comma-separated list,
 and scripts read/write both through `using Scene`:
@@ -418,6 +459,41 @@ The whole `light` object is written only for entities that carry the component, 
 before lighting existed loads and saves byte identical. `radius`, `intensity`, `coneAngle`,
 `direction` and `castShadows` all fall back to the defaults above when missing, so a hand-written
 light only needs the fields it cares about.
+
+#### UI element (`ui`)
+
+```json
+"ui": {
+  "kind": "button", "id": "start", "text": "Start",
+  "x": 24.0, "y": 24.0, "w": 200.0, "h": 56.0,
+  "anchorH": "right", "anchorV": "bottom",
+  "fontSize": 18.0,
+  "textColor": [255, 255, 255, 255],
+  "background": [40, 44, 56, 225],
+  "hoverBackground": [70, 120, 200, 240],
+  "pressedBackground": [36, 78, 150, 250],
+  "visible": true
+}
+```
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `kind` | string | `"button"` | `"button"`, `"label"` or `"panel"`; any other value makes the scene fail to load. |
+| `id` | string | `""` | Script handle. An empty id still draws and still shows hover/press, it just cannot be addressed by a script. |
+| `text` | string | `"Button"` | Caption of a button or label; a panel ignores it. |
+| `x`, `y` | float | `24.0` | Gap from the anchor edge in screen pixels (for a centre anchor, the shift off centre). |
+| `w`, `h` | float | `200.0`, `56.0` | Widget size in screen pixels, clamped to at least 0. |
+| `anchorH` | string | `"left"` | `"left"`, `"center"`/`"centre"` or `"right"`. |
+| `anchorV` | string | `"top"` | `"top"`, `"middle"`/`"center"`/`"centre"` or `"bottom"`. |
+| `fontSize` | float | `18.0` | Pixel height of the text, clamped to at least 1. |
+| `textColor`, `background`, `hoverBackground`, `pressedBackground` | `[r, g, b, a]` | white on a dark fill; hover brighter, pressed darker | Alpha is honoured, so a translucent panel is a valid backdrop. |
+| `visible` | bool | `true` | Authored visibility; `UI_SetVisible` changes it at runtime. |
+
+The whole `ui` object is written only for entities that carry the component, so a scene written
+before the UI existed loads and saves byte identical, and every field falls back to its default, so a
+hand-written element only needs the fields it cares about (`kind` included — an unknown value is the
+only thing that is rejected rather than defaulted). A UI element needs no asset: a scene made only of
+buttons, labels and panels exports and runs on its own.
 
 ### Prefabs (`.gprefab.json`)
 
@@ -577,17 +653,20 @@ speed = 0.0
 
 function Update(self, dt)
     # held key: continuous movement
-    if IsKeyDown("d") then
+    down = IsKeyDown("d")
+    if(down > 0)
         self.x = self.x + 200 * dt
     end if
 
     # edge: fire once per press
-    if IsKeyPressed("Space") then
+    pressed = IsKeyPressed("Space")
+    if(pressed > 0)
         speed = 600.0
     end if
 
     # mouse: follow the pointer while the left button is held
-    if IsMouseDown("Left") then
+    held = IsMouseDown("Left")
+    if(held > 0)
         self.x = MouseX()
         self.y = MouseY()
     end if
@@ -595,6 +674,10 @@ function Update(self, dt)
     return 0
 end function
 ```
+
+GScript conditions take a **comparison**, so store the result first and compare it (`if(down > 0)`).
+`if IsKeyDown("d") then` is rejected with `Unexpected token`: a block form is `if(...)` … `end if`,
+with no `then`.
 
 ### Feeding the input state
 
@@ -820,6 +903,47 @@ result is converted), so `self.rotation = PlaySound("hit.wav")` plays the sound 
 result in a script variable first (`v = PlaySound(...)` then `self.rotation = v`) or just ignore the
 return value.
 
+### In-game UI (`using UI`)
+
+Scripts drive the scene's UI elements by their authored **Script Id**, so a canvas of buttons, labels
+and panels needs no entity ids in the script.
+
+| Function | Returns | Meaning |
+| --- | --- | --- |
+| `UI_SetText(id, text)` | Int | `1` after replacing the element's text, `0` when no element carries the id |
+| `UI_SetVisible(id, visible)` | Int | `1` after showing (`1`) / hiding (`0`) the element, `0` for an unknown id |
+| `UI_IsClicked(id)` | Int | `1` on the frame the button was clicked, `0` on every other frame and for unknown ids |
+| `UI_IsHovered(id)` | Int | `1` while the pointer is over the button, `0` otherwise |
+
+Every call returns a value, like the rest of the script API: `1` when it did something or the query
+is true, `0` otherwise, so `if(UI_IsClicked("start"))` needs no guard. `SetText` and `SetVisible`
+write the live scene's component, so the change is what the UI draws next frame *and* what the host
+sees if it saves the scene; `IsClicked`/`IsHovered` read the state the host computed for the frame
+the script runs in.
+
+`UI_IsClicked` is **one shot**: it is true for a single frame — the frame the primary button is
+released over the button it was pressed on — and false afterwards, no matter how many scripts ask.
+A press that is dragged off the button and released elsewhere is not a click.
+
+```
+using UI
+
+function Update(self, dt)
+    if(UI_IsClicked("start"))
+        UI_SetText("status", "Playing")
+        UI_SetVisible("menu", 0)
+    end if
+    if(UI_IsHovered("start"))
+        UI_SetText("status", "Ready")
+    end if
+    return 0
+end function
+```
+
+Queries need a view size: a host lays the UI out for the window it renders into
+(`SceneRuntime::SetViewSize(w, h)`, which is also refreshed by every `Render`). Without one nothing
+is laid out and `UI_IsClicked`/`UI_IsHovered` stay `0`.
+
 ## Loading a scene in a Gorgon game
 
 `SceneRuntime` is the only class a game needs; it lives in `GorgonEditorCore`
@@ -837,8 +961,13 @@ if(!runtime.Load("Scene/DemoScene.gscene.json"))
 Gorgon::Graphics::Layer layer;
 window.Add(layer);
 runtime.CenterCamera(960, 600);                   // frame the whole scene (optional)
+runtime.SetViewSize(960, 600);                    // size the in-game UI is laid out for
 
 while(running) {
+    // The UI hit-tests in screen pixels; scripts get world units. Report both.
+    runtime.GetInput().SetMouseScreenPosition(float(mouse.X), float(mouse.Y));
+    runtime.GetInput().SetMousePosition(worldX, worldY);
+
     runtime.Update(Gorgon::Time::DeltaTime() / 1000.0f);   // steps every Update(self, dt)
     layer.Clear();                                          // Render() does not clear
     runtime.Render(layer);
@@ -856,8 +985,11 @@ API summary:
 | `Render(layer)` / `Render(layer, w, h)` | Draw background, visible entities and (optionally) collider wireframes into a layer you own. Uses the layer's target size for the camera unless a size is given. |
 | `GetScene()` | The live `Scene` (usable with the editor's model API, e.g. `FindEntity`, `GetWorldTransform`). |
 | `GetCamera()` / `SetCamera()` / `CenterCamera(w, h)` | `RuntimeCamera` with `panX`, `panY` (world point at the viewport centre) and `zoom` (pixels per world unit). |
-| `GetRenderOptions()` | `drawBackground`, `drawEntities`, `drawColliders` (debug wireframes), `drawLighting` (composite the lightmap; free for a scene without lights) and `lightAmbient` (the colour unlit areas fall back to). |
+| `GetRenderOptions()` | `drawBackground`, `drawEntities`, `drawColliders` (debug wireframes), `drawLighting` (composite the lightmap; free for a scene without lights), `lightAmbient` (the colour unlit areas fall back to) and `drawUI` (draw the scene's in-game UI over the world; free for a scene without UI elements). |
 | `GetLightmap()` | The map the last `Render()` composited, inactive when the scene has no lights or lighting is off. Lets a host or a test assert its samples. |
+| `SetViewSize(w, h)` / `GetViewWidth()`, `GetViewHeight()` | The view the in-game UI is laid out and hit-tested for, in pixels; a host sets it once and again on resize (every `Render` also records the size it drew with). At `0x0` nothing is laid out and the UI script queries stay `0`. |
+| `GetUserInterface()` | The runtime's `UserInterface`: the laid-out widgets with their rects and hover/press/click state, plus `Render()` for hosts that draw the UI themselves. |
+| `SetUIFontProvider(fn)` | Resolve a printer per authored font size (the player loads one FreeType atlas per size). Without it the UI uses `SetTextPrinter()`'s printer, and without that a placeholder text bar. |
 | `ResolveAssetPath(path)` | Resolve a scene-relative sprite/script path against the base dir. |
 | `SetBaseDir(dir)` | Re-root relative paths (re-resolves sprites and restarts scripts). |
 | `GetScriptCount()`, `GetLoadedSpriteCount()`, `GetLastError()`, `IsLoaded()`, `Unload()` | Diagnostics. |
@@ -960,8 +1092,8 @@ writes the manifest, scene and assets and warns about the missing executable.
 ```bat
 ctest --test-dir build/WindowsTesting -C Release -R EditorCore --output-on-failure
 
-GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, console, syntax check, 2D lighting, round-trip
-GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor, tile painting, animation timeline, lighting toggle/gizmos
+GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, console, syntax check, 2D lighting, in-game UI, round-trip
+GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor, tile painting, animation timeline, lighting toggle/gizmos, UI overlay
 EditorDemo.exe --selftest        rem SceneRuntime: load, path resolution, script ticking
 GorgonPlayer.exe --selftest      rem exported bundle: game.json, scene load, 30 scripted frames
 ```
@@ -1006,6 +1138,21 @@ lightmap was composited and is non-uniform, turns the *Lights* toggle off and ba
 preview followed both ways while the gizmo stayed), makes it a shadow-casting spot, then removes the
 light and restores the unlit scene.
 
+`[UI]` covers the in-game UI without a window: the component's defaults and its kind / anchor
+codecs, anchor math at several view sizes (a corner button keeps its gap to the corner when the view
+grows from 800x600 to 1024x768 while a top-left label does not move), a JSON round-trip that also
+proves an entity without a UI element writes no `ui` key, hover / press / one-frame-click
+transitions (press on the button, drag off and release is not a click, a second real click is a
+second click), a real script driving `UI_IsClicked`/`UI_IsHovered` across frames (a click is counted
+on the release frame only), `UI_SetText`/`UI_SetVisible` writing the live scene, a `SceneRuntime`
+render smoke (two widgets laid out and at least four quads drawn, `drawUI = false` drawing none, a
+UI-less scene skipping the pass), and a UI-only scene exporting with **no asset at all** and
+reloading from the bundle. The `--selftest` UI phase runs the same model headless — including the
+one-frame click and a two-click script — and the `--smoke` UI phase drives the real viewport: it
+asserts a UI-less scene draws no overlay, adds a corner-anchored button and a label, checks they are
+laid out at the viewport's corners and addressable by script id, clicks the button to select its
+entity, then removes both and confirms the plain scene is back.
+
 `[Export]` covers the packager without a window: asset collection across every component plus nested
 prefabs, the `game.json` codec (defaults, invalid input, missing `startScene`) and a real export of
 `Examples/EditorDemo/Scene/DemoScene.gscene.json` that asserts the bundle layout (`game.json`, scene,
@@ -1031,7 +1178,8 @@ Tools/Editor/
                          CommandStack, PlaySession, SceneRuntime, FileWatcher,
                          TilemapPainter (grid geometry, stroke math, palette layout),
                          AnimTimeline (frame model, per-frame durations, strip layout, playhead),
-                         Lightmap (light grid, falloff, cone, shadows, GPU overlay texture)
+                         Lightmap (light grid, falloff, cone, shadows, GPU overlay texture),
+                         UserInterface (screen-space UI widgets, anchor math, click/hover state, renderer)
   App/                   EditorApp (window shell), Viewport, HierarchyPanel,
                          InspectorPanel, AssetBrowserPanel, TimelinePanel, EditorTheme, Main
   Player/                GorgonPlayer entry point (exported game runtime)

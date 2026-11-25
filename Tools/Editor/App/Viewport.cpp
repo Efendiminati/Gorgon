@@ -1017,6 +1017,17 @@ namespace Gorgon :: Editor {
 
         dragStartWorld_ = camera_.ScreenToWorld(sx, sy, viewW, viewH);
 
+        // The UI overlay is drawn over the world, so a click that lands on a button selects the
+        // entity that owns it rather than whatever sits under it in the world. UI elements have no
+        // drag handles (they are anchored in screen space), so this never starts a drag.
+        if(const EntityId uiHit = HitTestUserInterface(sx, sy); uiHit != InvalidEntityId) {
+            if(isShiftDown())
+                ToggleEntitySelection(uiHit, true);
+            else
+                SetSelectedEntity(uiHit, true);
+            return;
+        }
+
         // Check gizmo handles on single selection first
         const GizmoHandle handle = HitTestGizmo(sx, sy);
         if(handle != GizmoHandle::None) {
@@ -1577,7 +1588,9 @@ namespace Gorgon :: Editor {
                     drewContent = true;
             }
 
-            if(!drewContent) {
+            // An entity that only carries a UI element has no world presence: its widget is drawn
+            // in screen space by drawUserInterface(), so no placeholder box is drawn for it here.
+            if(!drewContent && !e->ui.has_value()) {
                 const auto fill = FallbackColorForEntity(*e);
                 gfxLayer_.Draw(sc[0], sc[1], sc[2], sc[3], fill);
                 drawRectOutline(sc, 1.5f, Gorgon::Graphics::RGBAf(1.0f, 1.0f, 1.0f, 0.35f));
@@ -1624,6 +1637,70 @@ namespace Gorgon :: Editor {
         lightmapTexture_.Upload(lightmap_);
         lightmapTexture_.Draw(gfxLayer_, viewW, viewH);
         lightmapDrawn_ = true;
+    }
+
+    EntityId EditorViewport::HitTestUserInterface(float sx, float sy) const {
+        const UIWidgetState *widget = uiPreview_.HitTest(sx, sy);
+        return widget ? widget->entity : InvalidEntityId;
+    }
+
+    void EditorViewport::UpdateUserInterfaceInput() {
+        const auto sz = GetViewportSize();
+        if(sz.Width <= 0 || sz.Height <= 0) {
+            uiPreview_.Reset();
+            uiWidgetCount_ = 0;
+            return;
+        }
+
+        uiPreview_.Layout(scene_, sz.Width, sz.Height);
+        uiWidgetCount_ = uiPreview_.GetWidgetCount();
+        uiPreview_.UpdateInput(static_cast<float>(lastMouse_.X), static_cast<float>(lastMouse_.Y),
+                              mouseDown_[0]);
+    }
+
+    void EditorViewport::drawUserInterface(float viewW, float viewH) {
+        uiWidgetCount_ = 0;
+        uiDrawn_ = false;
+
+        if(viewW <= 0.0f || viewH <= 0.0f)
+            return;
+
+        uiPreview_.Layout(scene_, int(viewW), int(viewH));
+        uiWidgetCount_ = uiPreview_.GetWidgetCount();
+        if(uiWidgetCount_ == 0) {
+            uiPreview_.Reset();
+            return;
+        }
+
+        // While authoring the viewport feeds the pointer itself, so hover and pressed colours show
+        // up as you design. During play the host drives the same object (before the scripts tick),
+        // and re-feeding here would report a second, stale frame.
+        if(!playSession_)
+            uiPreview_.UpdateInput(static_cast<float>(lastMouse_.X), static_cast<float>(lastMouse_.Y),
+                                  mouseDown_[0]);
+
+        const Gorgon::Graphics::StyledPrinter *printer = nullptr;
+        try {
+            printer = &Gorgon::Widgets::Registry::Active().Printer(Gorgon::Graphics::NamedFont::Info);
+        }
+        catch(...) {
+            // No theme (headless): the layer still renders placeholder text bars.
+            printer = nullptr;
+        }
+
+        uiPreview_.Render(gfxLayer_, printer);
+        uiDrawn_ = true;
+
+        // The selected element gets a bright outline, so selecting a UI entity in the hierarchy or
+        // by clicking its button shows exactly which widget belongs to it.
+        if(const Entity *selected = scene_.FindEntity(selectedEntity_); selected && selected->ui) {
+            const auto rect = ComputeUIElementRect(*selected->ui, viewW, viewH);
+            const auto outline = Gorgon::Graphics::RGBAf(1.0f, 0.85f, 0.25f, 0.95f);
+            drawLine(rect.x, rect.y, rect.Right(), rect.y, 1.5f, outline);
+            drawLine(rect.Right(), rect.y, rect.Right(), rect.Bottom(), 1.5f, outline);
+            drawLine(rect.Right(), rect.Bottom(), rect.x, rect.Bottom(), 1.5f, outline);
+            drawLine(rect.x, rect.Bottom(), rect.x, rect.y, 1.5f, outline);
+        }
     }
 
     void EditorViewport::drawLightGizmos(float viewW, float viewH) {
@@ -1975,6 +2052,9 @@ namespace Gorgon :: Editor {
 
         // 5b. Light gizmos sit above the darkness: a designer always sees where the lights are.
         drawLightGizmos(viewW, viewH);
+
+        // 5c. The in-game UI, in screen space above the world (and above the darkness, like a HUD).
+        drawUserInterface(viewW, viewH);
 
         // 6. CameraComponent frustum wireframe
         drawCameraFrustum(viewW, viewH);

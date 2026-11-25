@@ -238,6 +238,27 @@ namespace Gorgon :: Editor {
                 eObj.Set("light", std::move(o));
             }
 
+            if(e.ui.has_value()) {
+                const auto &u = *e.ui;
+                JSON::Value o;
+                o.Set("kind", UIElementKindToString(u.kind));
+                o.Set("id", u.id);
+                o.Set("text", u.text);
+                o.Set("fontSize", static_cast<double>(u.fontSize));
+                o.Set("x", static_cast<double>(u.x));
+                o.Set("y", static_cast<double>(u.y));
+                o.Set("w", static_cast<double>(u.width));
+                o.Set("h", static_cast<double>(u.height));
+                o.Set("anchorH", UIAnchorHToString(u.anchorH));
+                o.Set("anchorV", UIAnchorVToString(u.anchorV));
+                o.Set("textColor", colorToJson(u.textColor));
+                o.Set("background", colorToJson(u.background));
+                o.Set("hoverBackground", colorToJson(u.hoverBackground));
+                o.Set("pressedBackground", colorToJson(u.pressedBackground));
+                o.Set("visible", u.visible);
+                eObj.Set("ui", std::move(o));
+            }
+
             // Written only when non-empty, so scenes that carry neither stay byte identical.
             if(!e.tags.empty()) {
                 JSON::Array tagArr;
@@ -579,6 +600,58 @@ namespace Gorgon :: Editor {
                 e.light = comp;
             }
 
+            if(eObj.Has("ui") && !eObj["ui"].IsNull()) {
+                const auto &o = eObj["ui"];
+                if(!o.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'ui' must be an object");
+                    return false;
+                }
+                UIElementComponent comp;
+                const std::string kindName = getStringField(o, "kind", "button");
+                if(!UIElementKindFromString(kindName, comp.kind)) {
+                    setError(outError, "Entity " + std::to_string(rawId) +
+                                        " has an unknown ui kind '" + kindName + "'");
+                    return false;
+                }
+                comp.id = getStringField(o, "id", "");
+                comp.text = getStringField(o, "text", comp.text);
+                comp.fontSize = std::max(1.0f, getFloatField(o, "fontSize", comp.fontSize));
+                comp.x = getFloatField(o, "x", comp.x);
+                comp.y = getFloatField(o, "y", comp.y);
+                comp.width = std::max(0.0f, getFloatField(o, "w", comp.width));
+                comp.height = std::max(0.0f, getFloatField(o, "h", comp.height));
+
+                const std::string anchorH = getStringField(o, "anchorH", "left");
+                if(!UIAnchorHFromString(anchorH, comp.anchorH)) {
+                    setError(outError, "Entity " + std::to_string(rawId) +
+                                        " has an unknown ui anchorH '" + anchorH + "'");
+                    return false;
+                }
+                const std::string anchorV = getStringField(o, "anchorV", "top");
+                if(!UIAnchorVFromString(anchorV, comp.anchorV)) {
+                    setError(outError, "Entity " + std::to_string(rawId) +
+                                        " has an unknown ui anchorV '" + anchorV + "'");
+                    return false;
+                }
+
+                const std::pair<const char *, ColorRGBA *> colors[] = {
+                    {"textColor", &comp.textColor},
+                    {"background", &comp.background},
+                    {"hoverBackground", &comp.hoverBackground},
+                    {"pressedBackground", &comp.pressedBackground},
+                };
+                for(const auto &entry : colors) {
+                    if(o.Has(entry.first) && !o[entry.first].IsNull()) {
+                        if(!colorFromJson(o[entry.first], *entry.second, outError,
+                                          std::string("ui.") + entry.first))
+                            return false;
+                    }
+                }
+
+                comp.visible = getBoolField(o, "visible", true);
+                e.ui = comp;
+            }
+
             e.prefabSource = getStringField(eObj, "prefabSource", "");
 
             return true;
@@ -600,6 +673,7 @@ namespace Gorgon :: Editor {
             dst.tilemap = src.tilemap;
             dst.particles = src.particles;
             dst.light = src.light;
+            dst.ui = src.ui;
         }
 
         std::string makeUniqueEntityName(const std::string &desired, std::unordered_set<std::string> &usedNames) {

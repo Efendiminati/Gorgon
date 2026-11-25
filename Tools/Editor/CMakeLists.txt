@@ -22,6 +22,8 @@ add_library(GorgonEditorCore STATIC
     Core/Lightmap.h
     Core/Lightmap.cpp
     Core/InputState.h
+    Core/UserInterface.h
+    Core/UserInterface.cpp
     Core/ScriptLog.h
     Core/ScriptLog.cpp
     Core/FileWatcher.h

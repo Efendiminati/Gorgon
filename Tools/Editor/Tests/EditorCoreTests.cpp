@@ -4123,3 +4123,638 @@ TEST_CASE("Shadow casters darken what is behind them and are capped per light", 
     REQUIRE(capped.GetShadowCasterCount() == 8);
     REQUIRE(Lightmap::MaxShadowCasters == 16);
 }
+
+// ---- In-game UI -----------------------------------------------------------
+
+namespace {
+    /// Adds an entity carrying a UI element; the scene stores entities in a vector, so the id is
+    /// what callers keep (a reference would dangle on the next CreateEntity).
+    EntityId AddUIElement(Scene &scene, const std::string &name, UIElementKind kind,
+                          const std::string &id) {
+        Entity &entity = scene.CreateEntity(name);
+        UIElementComponent element;
+        element.kind = kind;
+        element.id = id;
+        element.text = name;
+        entity.ui = element;
+        return entity.id;
+    }
+}
+
+TEST_CASE("UIElementComponent carries usable defaults and codecs", "[EditorCore][UI]") {
+    UIElementComponent element;
+
+    // A freshly added element is a visible button in the top-left corner, so it shows up the moment
+    // it is added instead of being an invisible no-op.
+    REQUIRE(element.kind == UIElementKind::Button);
+    REQUIRE(element.id.empty());
+    REQUIRE(element.text == "Button");
+    REQUIRE(element.fontSize == Catch::Approx(18.0f));
+    REQUIRE(element.anchorH == UIAnchorH::Left);
+    REQUIRE(element.anchorV == UIAnchorV::Top);
+    REQUIRE(element.visible);
+    REQUIRE(element.width > 0.0f);
+    REQUIRE(element.height > 0.0f);
+    REQUIRE(element.textColor.a == 255);
+    REQUIRE(element.background.a > 0);
+
+    // Kind round-trips through the string the scene file stores.
+    for(auto kind : {UIElementKind::Panel, UIElementKind::Label, UIElementKind::Button}) {
+        UIElementKind parsed = UIElementKind::Panel;
+        REQUIRE(UIElementKindFromString(UIElementKindToString(kind), parsed));
+        REQUIRE(parsed == kind);
+    }
+    UIElementKind unknown = UIElementKind::Label;
+    REQUIRE_FALSE(UIElementKindFromString("slider", unknown));
+    REQUIRE(unknown == UIElementKind::Label);
+
+    for(auto anchor : {UIAnchorH::Left, UIAnchorH::Center, UIAnchorH::Right}) {
+        UIAnchorH parsed = UIAnchorH::Left;
+        REQUIRE(UIAnchorHFromString(UIAnchorHToString(anchor), parsed));
+        REQUIRE(parsed == anchor);
+    }
+    for(auto anchor : {UIAnchorV::Top, UIAnchorV::Middle, UIAnchorV::Bottom}) {
+        UIAnchorV parsed = UIAnchorV::Top;
+        REQUIRE(UIAnchorVFromString(UIAnchorVToString(anchor), parsed));
+        REQUIRE(parsed == anchor);
+    }
+    // "centre" is accepted as a spelling of the centre anchor.
+    UIAnchorH centre = UIAnchorH::Left;
+    REQUIRE(UIAnchorHFromString("centre", centre));
+    REQUIRE(centre == UIAnchorH::Center);
+}
+
+TEST_CASE("UI anchors pin an element to its edge when the view is resized", "[EditorCore][UI]") {
+    UIElementComponent element;
+    element.width = 200.0f;
+    element.height = 56.0f;
+    element.x = 24.0f;
+    element.y = 24.0f;
+
+    // Top-left: the offset is the distance from the top-left corner at every size.
+    element.anchorH = UIAnchorH::Left;
+    element.anchorV = UIAnchorV::Top;
+    for(const auto size : {std::pair<int, int>{640, 480}, {1280, 720}, {1920, 1080}}) {
+        const auto rect = ComputeUIElementRect(element, float(size.first), float(size.second));
+        REQUIRE(rect.x == Catch::Approx(24.0f));
+        REQUIRE(rect.y == Catch::Approx(24.0f));
+        REQUIRE(rect.width == Catch::Approx(200.0f));
+        REQUIRE(rect.height == Catch::Approx(56.0f));
+    }
+
+    // Centred: the element stays centred, and the offset shifts it off centre by exactly its value.
+    element.anchorH = UIAnchorH::Center;
+    element.anchorV = UIAnchorV::Middle;
+    element.x = 0.0f;
+    element.y = 0.0f;
+    for(const auto size : {std::pair<int, int>{640, 480}, {1280, 720}, {1920, 1080}}) {
+        const auto rect = ComputeUIElementRect(element, float(size.first), float(size.second));
+        REQUIRE(rect.CenterX() == Catch::Approx(float(size.first) * 0.5f));
+        REQUIRE(rect.CenterY() == Catch::Approx(float(size.second) * 0.5f));
+    }
+    element.x = 30.0f;
+    element.y = -20.0f;
+    {
+        const auto rect = ComputeUIElementRect(element, 800.0f, 600.0f);
+        REQUIRE(rect.CenterX() == Catch::Approx(430.0f));
+        REQUIRE(rect.CenterY() == Catch::Approx(280.0f));
+    }
+
+    // Right/bottom: the gap to the corner survives a resize, which is what makes a HUD corner
+    // button stay in its corner.
+    element.anchorH = UIAnchorH::Right;
+    element.anchorV = UIAnchorV::Bottom;
+    element.x = 24.0f;
+    element.y = 16.0f;
+    for(const auto size : {std::pair<int, int>{640, 480}, {1280, 720}, {1920, 1080}}) {
+        const auto rect = ComputeUIElementRect(element, float(size.first), float(size.second));
+        REQUIRE(rect.Right() == Catch::Approx(float(size.first) - 24.0f));
+        REQUIRE(rect.Bottom() == Catch::Approx(float(size.second) - 16.0f));
+    }
+
+    // A zero-sized view (before the first resize event) still yields finite numbers.
+    const auto zero = ComputeUIElementRect(element, 0.0f, 0.0f);
+    REQUIRE(std::isfinite(zero.x));
+    REQUIRE(std::isfinite(zero.y));
+
+    // Containment is half open, so neighbouring widgets never both claim a pixel column.
+    const UIScreenRect box{10.0f, 10.0f, 20.0f, 20.0f};
+    REQUIRE(box.Contains(10.0f, 10.0f));
+    REQUIRE(box.Contains(29.9f, 29.9f));
+    REQUIRE_FALSE(box.Contains(30.0f, 10.0f));
+    REQUIRE_FALSE(box.Contains(10.0f, 30.0f));
+}
+
+TEST_CASE("A UI element survives a JSON round-trip and a plain entity writes none", "[EditorCore][UI]") {
+    Scene scene;
+    EntityId buttonId = AddUIElement(scene, "Start", UIElementKind::Button, "start");
+    EntityId labelId = AddUIElement(scene, "Title", UIElementKind::Label, "title");
+    scene.CreateEntity("Plain");
+
+    {
+        Entity *button = scene.FindEntity(buttonId);
+        REQUIRE(button != nullptr);
+        auto &element = *button->ui;
+        element.text = "Play";
+        element.fontSize = 24.0f;
+        element.x = 40.0f;
+        element.y = 12.0f;
+        element.width = 180.0f;
+        element.height = 48.0f;
+        element.anchorH = UIAnchorH::Right;
+        element.anchorV = UIAnchorV::Bottom;
+        element.textColor = ColorRGBA{250, 250, 250, 255};
+        element.background = ColorRGBA{10, 20, 30, 200};
+        element.hoverBackground = ColorRGBA{60, 90, 140, 220};
+        element.pressedBackground = ColorRGBA{20, 40, 70, 255};
+        element.visible = false;
+    }
+    {
+        Entity *label = scene.FindEntity(labelId);
+        REQUIRE(label != nullptr);
+        label->ui->kind = UIElementKind::Label;
+        label->ui->text = "Hello";
+    }
+
+    const auto path = std::filesystem::temp_directory_path() / "gorgon_ui_roundtrip.gscene.json";
+    std::string error;
+    REQUIRE(SceneSerializer::SaveToFile(scene, path.generic_string(), &error));
+
+    Scene loaded;
+    REQUIRE(SceneSerializer::LoadFromFile(path.generic_string(), loaded, &error));
+
+    const Entity *reloaded = loaded.FindEntity(buttonId);
+    REQUIRE(reloaded != nullptr);
+    REQUIRE(reloaded->ui.has_value());
+    REQUIRE(reloaded->ui->kind == UIElementKind::Button);
+    REQUIRE(reloaded->ui->id == "start");
+    REQUIRE(reloaded->ui->text == "Play");
+    REQUIRE(reloaded->ui->fontSize == Catch::Approx(24.0f));
+    REQUIRE(reloaded->ui->x == Catch::Approx(40.0f));
+    REQUIRE(reloaded->ui->y == Catch::Approx(12.0f));
+    REQUIRE(reloaded->ui->width == Catch::Approx(180.0f));
+    REQUIRE(reloaded->ui->height == Catch::Approx(48.0f));
+    REQUIRE(reloaded->ui->anchorH == UIAnchorH::Right);
+    REQUIRE(reloaded->ui->anchorV == UIAnchorV::Bottom);
+    REQUIRE(reloaded->ui->textColor == (ColorRGBA{250, 250, 250, 255}));
+    REQUIRE(reloaded->ui->background == (ColorRGBA{10, 20, 30, 200}));
+    REQUIRE(reloaded->ui->hoverBackground == (ColorRGBA{60, 90, 140, 220}));
+    REQUIRE(reloaded->ui->pressedBackground == (ColorRGBA{20, 40, 70, 255}));
+    REQUIRE_FALSE(reloaded->ui->visible);
+
+    const Entity *reloadedLabel = loaded.FindEntity(labelId);
+    REQUIRE(reloadedLabel != nullptr);
+    REQUIRE(reloadedLabel->ui.has_value());
+    REQUIRE(reloadedLabel->ui->kind == UIElementKind::Label);
+    REQUIRE(reloadedLabel->ui->text == "Hello");
+    REQUIRE(reloadedLabel->ui->anchorH == UIAnchorH::Left);
+
+    // An entity without the component writes no `ui` key at all, so older scenes stay untouched.
+    for(const auto &entity : loaded.GetEntities()) {
+        if(entity.name == "Plain")
+            REQUIRE_FALSE(entity.ui.has_value());
+    }
+    {
+        std::ifstream in(path, std::ios::binary);
+        std::string text((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        REQUIRE(text.find("\"ui\"") != std::string::npos);
+    }
+    std::filesystem::remove(path);
+
+    // A hand-written element only needs the fields it cares about; the rest fall back to defaults.
+    Scene minimal;
+    const auto minimalPath = std::filesystem::temp_directory_path() / "gorgon_ui_minimal.gscene.json";
+    {
+        std::ofstream out(minimalPath, std::ios::binary | std::ios::trunc);
+        out << "{\"schemaVersion\":1,\"name\":\"Min\",\"entities\":[{\"id\":1,\"name\":\"B\","
+               "\"ui\":{\"kind\":\"button\"}}]}";
+    }
+    REQUIRE(SceneSerializer::LoadFromFile(minimalPath.generic_string(), minimal, &error));
+    REQUIRE(minimal.GetEntityCount() == 1);
+    const Entity *minimalEntity = minimal.FindEntity(1);
+    REQUIRE(minimalEntity != nullptr);
+    REQUIRE(minimalEntity->ui.has_value());
+    REQUIRE(minimalEntity->ui->kind == UIElementKind::Button);
+    REQUIRE(minimalEntity->ui->anchorH == UIAnchorH::Left);
+    REQUIRE(minimalEntity->ui->anchorV == UIAnchorV::Top);
+    REQUIRE(minimalEntity->ui->visible);
+    std::filesystem::remove(minimalPath);
+
+    // An unknown kind is rejected instead of silently becoming something else.
+    Scene broken;
+    const auto brokenPath = std::filesystem::temp_directory_path() / "gorgon_ui_broken.gscene.json";
+    {
+        std::ofstream out(brokenPath, std::ios::binary | std::ios::trunc);
+        out << "{\"schemaVersion\":1,\"entities\":[{\"id\":1,\"name\":\"B\","
+               "\"ui\":{\"kind\":\"slider\"}}]}";
+    }
+    REQUIRE_FALSE(SceneSerializer::LoadFromFile(brokenPath.generic_string(), broken, &error));
+    REQUIRE(error.find("unknown ui kind") != std::string::npos);
+    std::filesystem::remove(brokenPath);
+}
+
+TEST_CASE("Buttons report hover, press and a one-frame click", "[EditorCore][UI]") {
+    Scene scene;
+    EntityId buttonId = AddUIElement(scene, "Start", UIElementKind::Button, "start");
+    EntityId panelId = AddUIElement(scene, "Backdrop", UIElementKind::Panel, "backdrop");
+    AddUIElement(scene, "Caption", UIElementKind::Label, "caption");
+
+    {
+        Entity *panel = scene.FindEntity(panelId);
+        panel->ui->x = 0.0f;
+        panel->ui->y = 0.0f;
+        panel->ui->width = 400.0f;
+        panel->ui->height = 300.0f;
+    }
+
+    UserInterface ui;
+    ui.Layout(scene, 800, 600);
+
+    // Panels draw first, then labels, then buttons, so a button always sits on top of the panel it
+    // was dropped on. The layout order is also the hit-test order read backwards.
+    REQUIRE(ui.GetWidgetCount() == 3);
+    REQUIRE(ui.GetWidgets()[0].kind == UIElementKind::Panel);
+    REQUIRE(ui.GetWidgets()[1].kind == UIElementKind::Label);
+    REQUIRE(ui.GetWidgets()[2].kind == UIElementKind::Button);
+
+    const auto *button = ui.GetWidget("start");
+    REQUIRE(button != nullptr);
+    REQUIRE(button->entity == buttonId);
+    const float cx = button->rect.CenterX();
+    const float cy = button->rect.CenterY();
+
+    // Nothing hovered while the pointer is outside every widget.
+    ui.UpdateInput(700.0f, 550.0f, false);
+    REQUIRE_FALSE(ui.IsHovered("start"));
+    REQUIRE(ui.CountHovered() == 0);
+
+    // Inside the button: hovered, not pressed, not clicked.
+    ui.UpdateInput(cx, cy, false);
+    REQUIRE(ui.IsHovered("start"));
+    REQUIRE_FALSE(ui.IsPressed("start"));
+    REQUIRE_FALSE(ui.IsClicked("start"));
+
+    // Button down over the widget: pressed for as long as it is held.
+    ui.UpdateInput(cx, cy, true);
+    REQUIRE(ui.IsHovered("start"));
+    REQUIRE(ui.IsPressed("start"));
+    REQUIRE_FALSE(ui.IsClicked("start"));
+    ui.UpdateInput(cx, cy, true);
+    REQUIRE(ui.IsPressed("start"));
+    REQUIRE_FALSE(ui.IsClicked("start"));
+
+    // Release over the widget: exactly one click, reported for a single frame.
+    ui.UpdateInput(cx, cy, false);
+    REQUIRE(ui.IsClicked("start"));
+    REQUIRE_FALSE(ui.IsPressed("start"));
+    REQUIRE(ui.CountClicked() == 1);
+    ui.UpdateInput(cx, cy, false);
+    REQUIRE_FALSE(ui.IsClicked("start"));
+    REQUIRE(ui.CountClicked() == 0);
+
+    // A press that is dragged off the button and released elsewhere is not a click.
+    ui.UpdateInput(cx, cy, true);
+    REQUIRE(ui.IsPressed("start"));
+    ui.UpdateInput(700.0f, 550.0f, true);
+    REQUIRE_FALSE(ui.IsPressed("start"));
+    REQUIRE_FALSE(ui.IsHovered("start"));
+    ui.UpdateInput(700.0f, 550.0f, false);
+    REQUIRE_FALSE(ui.IsClicked("start"));
+
+    // Only buttons are hit-testable: a click on the panel never reports a click and never steals
+    // the button that sits on it.
+    REQUIRE(ui.HitTest(10.0f, 10.0f) == nullptr);
+    ui.UpdateInput(10.0f, 10.0f, true);
+    ui.UpdateInput(10.0f, 10.0f, false);
+    REQUIRE(ui.CountClicked() == 0);
+    REQUIRE_FALSE(ui.IsClicked("backdrop"));
+    REQUIRE_FALSE(ui.IsClicked("caption"));
+
+    // Two buttons overlapping: the topmost (later in the draw order) wins the pointer.
+    EntityId topId = AddUIElement(scene, "Top", UIElementKind::Button, "top");
+    {
+        Entity *top = scene.FindEntity(topId);
+        top->ui->x = 0.0f;
+        top->ui->y = 0.0f;
+        top->ui->width = 200.0f;
+        top->ui->height = 60.0f;
+    }
+    {
+        Entity *button2 = scene.FindEntity(buttonId);
+        button2->ui->x = 0.0f;
+        button2->ui->y = 0.0f;
+        button2->ui->width = 200.0f;
+        button2->ui->height = 60.0f;
+    }
+    ui.Layout(scene, 800, 600);
+    const auto *topWidget = ui.GetWidget("top");
+    REQUIRE(topWidget != nullptr);
+    ui.UpdateInput(20.0f, 20.0f, false);
+    REQUIRE(ui.HitTest(20.0f, 20.0f) == topWidget);
+    REQUIRE(ui.IsHovered("top"));
+    REQUIRE_FALSE(ui.IsHovered("start"));
+
+    // A hidden element is not laid out at all.
+    scene.FindEntity(topId)->ui->visible = false;
+    ui.Layout(scene, 800, 600);
+    REQUIRE(ui.GetWidget("top") == nullptr);
+    REQUIRE(ui.GetWidgetCount() == 3);
+    ui.UpdateInput(20.0f, 20.0f, false);
+    REQUIRE(ui.IsHovered("start"));
+
+    // An element without an id draws but cannot be addressed.
+    scene.FindEntity(topId)->ui->id.clear();
+    scene.FindEntity(topId)->ui->visible = true;
+    ui.Layout(scene, 800, 600);
+    REQUIRE(ui.GetWidget("") == nullptr);
+    REQUIRE(ui.GetWidgetCount() == 4);
+}
+
+TEST_CASE("UI_IsClicked is true only on the frame of the press release", "[EditorCore][UI][Script]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_ui_script_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // The script counts what the UI library reports, so an assertion on self.x/self.y is an
+    // assertion on the click and hover state itself.
+    {
+        std::ofstream out(dir / "menu.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using UI\n"
+               "clicks = 0\n"
+               "hovers = 0\n"
+               "function Update(self, dt)\n"
+               "    c = UI_IsClicked(\"go\")\n"
+               "    h = UI_IsHovered(\"go\")\n"
+               // GScript wants a comparison in a condition, not a bare identifier, and the
+               // block form is `if(...)` / `end if` without a `then`.
+               "    if(c > 0)\n"
+               "        clicks = clicks + 1\n"
+               "    end if\n"
+               "    if(h > 0)\n"
+               "        hovers = hovers + 1\n"
+               "    end if\n"
+               "    self.x = clicks\n"
+               "    self.y = hovers\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    EntityId buttonId = AddUIElement(scene, "Go", UIElementKind::Button, "go");
+    EntityId driverId = scene.CreateEntity("Driver").id;
+    scene.FindEntity(driverId)->script = ScriptComponent{"menu.gs"};
+
+    PlaySession session;
+    std::string error;
+    const bool started = session.Start(scene, dir.generic_string(), &error);
+    INFO("play start error: " << error);
+    REQUIRE(started);
+    REQUIRE(session.GetScriptCount() == 1);
+    (void)buttonId;
+
+    // The session owns a UserInterface; here we lay it out and drive it by hand, which is exactly
+    // what a host (the player, play-in-editor) does with its own instance.
+    UserInterface &ui = session.GetUserInterface();
+    ui.Layout(scene, 800, 600);
+    const auto *widget = ui.GetWidget("go");
+    REQUIRE(widget != nullptr);
+    const float cx = widget->rect.CenterX();
+    const float cy = widget->rect.CenterY();
+
+    const auto clicks = [&]() { return scene.FindEntity(driverId)->transform.x; };
+    const auto hovers = [&]() { return scene.FindEntity(driverId)->transform.y; };
+
+    // Frame 1: pointer away from the button, nothing down.
+    ui.UpdateInput(700.0f, 500.0f, false);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(clicks()) == 0.0);
+    REQUIRE(Catch::Approx(hovers()) == 0.0);
+
+    // Frames 2-4: hovered (and held), but the click only exists on the release frame.
+    ui.UpdateInput(cx, cy, false);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(clicks()) == 0.0);
+    REQUIRE(Catch::Approx(hovers()) == 1.0);
+
+    ui.UpdateInput(cx, cy, true);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(clicks()) == 0.0);
+    REQUIRE(Catch::Approx(hovers()) == 2.0);
+
+    ui.UpdateInput(cx, cy, true);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(clicks()) == 0.0);
+    REQUIRE(Catch::Approx(hovers()) == 3.0);
+
+    // Release: one click.
+    ui.UpdateInput(cx, cy, false);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(clicks()) == 1.0);
+    REQUIRE(Catch::Approx(hovers()) == 4.0);
+
+    // The next frame is a fresh one even though the state did not change: no second click.
+    ui.UpdateInput(cx, cy, false);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(clicks()) == 1.0);
+    REQUIRE(Catch::Approx(hovers()) == 5.0);
+
+    // A press on the button released away from it is not a click either.
+    ui.UpdateInput(cx, cy, true);
+    session.Tick(scene, 0.0f);
+    ui.UpdateInput(700.0f, 500.0f, false);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(clicks()) == 1.0);
+    REQUIRE(Catch::Approx(hovers()) == 6.0);
+
+    // A second real click is a second click.
+    ui.UpdateInput(cx, cy, true);
+    session.Tick(scene, 0.0f);
+    ui.UpdateInput(cx, cy, false);
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(clicks()) == 2.0);
+
+    // Unknown ids are safe no-ops.
+    REQUIRE_FALSE(ui.IsClicked("nope"));
+    REQUIRE_FALSE(ui.IsHovered(""));
+
+    session.Stop(scene);
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("UI_SetText and UI_SetVisible drive the live scene", "[EditorCore][UI][Script]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_ui_setters_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    {
+        std::ofstream out(dir / "settle.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using UI\n"
+               "function Update(self, dt)\n"
+               "    a = UI_SetText(\"title\", \"Level 2\")\n"
+               "    b = UI_SetVisible(\"hint\", 0)\n"
+               "    c = UI_SetText(\"missing\", \"nothing\")\n"
+               "    self.x = a + b + c\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    EntityId titleId = AddUIElement(scene, "Title", UIElementKind::Label, "title");
+    EntityId hintId = AddUIElement(scene, "Hint", UIElementKind::Label, "hint");
+    EntityId driverId = scene.CreateEntity("Driver").id;
+    scene.FindEntity(driverId)->script = ScriptComponent{"settle.gs"};
+
+    PlaySession session;
+    std::string error;
+    REQUIRE(session.Start(scene, dir.generic_string(), &error));
+
+    // The UI needs no layout for the setters: they write the component, so a headless script can
+    // relabel and hide widgets without a window or a view size.
+    session.Tick(scene, 0.0f);
+
+    REQUIRE(scene.FindEntity(titleId)->ui->text == "Level 2");
+    REQUIRE_FALSE(scene.FindEntity(hintId)->ui->visible);
+    // Two setters succeeded and the unknown id returned 0.
+    REQUIRE(Catch::Approx(scene.FindEntity(driverId)->transform.x) == 2.0);
+
+    // Hiding through the script takes the element out of the next layout.
+    UserInterface ui;
+    ui.Layout(scene, 800, 600);
+    REQUIRE(ui.GetWidget("hint") == nullptr);
+    REQUIRE(ui.GetWidget("title") != nullptr);
+
+    session.Stop(scene);
+    // Stop restores the pre-play snapshot, so the authored text and visibility are back.
+    REQUIRE(scene.FindEntity(titleId)->ui->text != "Level 2");
+    REQUIRE(scene.FindEntity(hintId)->ui->visible);
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("SceneRuntime lays out and draws a button and a label", "[EditorCore][UI][Runtime]") {
+    Scene scene;
+    EntityId buttonId = AddUIElement(scene, "Play", UIElementKind::Button, "play");
+    EntityId labelId = AddUIElement(scene, "Score", UIElementKind::Label, "score");
+
+    {
+        Entity *button = scene.FindEntity(buttonId);
+        button->ui->text = "Play";
+        button->ui->anchorH = UIAnchorH::Right;
+        button->ui->anchorV = UIAnchorV::Bottom;
+        button->ui->x = 20.0f;
+        button->ui->y = 20.0f;
+        button->ui->width = 160.0f;
+        button->ui->height = 48.0f;
+    }
+    {
+        Entity *label = scene.FindEntity(labelId);
+        label->ui->text = "Score 0";
+        label->ui->x = 16.0f;
+        label->ui->y = 16.0f;
+        label->ui->width = 200.0f;
+        label->ui->height = 32.0f;
+    }
+
+    SceneRuntime runtime;
+    std::string error;
+    REQUIRE(runtime.LoadFromScene(scene, std::string(), &error));
+    runtime.SetViewSize(800, 600);
+
+    // Update lays the UI out (so a script would see this frame's state); Render draws it. Both run
+    // headless: a Graphics::Layer only queues surfaces, no window or GL context is needed.
+    runtime.GetInput().SetMouseScreenPosition(780.0f, 580.0f);
+    runtime.Update(0.0f);
+
+    const UserInterface &ui = runtime.GetUserInterface();
+    REQUIRE(ui.GetWidgetCount() == 2);
+    REQUIRE(ui.GetViewWidth() == 800);
+    REQUIRE(ui.GetViewHeight() == 600);
+
+    const auto *button = ui.GetWidget("play");
+    REQUIRE(button != nullptr);
+    REQUIRE(button->rect.Right() == Catch::Approx(780.0f));
+    REQUIRE(button->rect.Bottom() == Catch::Approx(580.0f));
+
+    const auto *label = ui.GetWidget("score");
+    REQUIRE(label != nullptr);
+    REQUIRE(label->rect.x == Catch::Approx(16.0f));
+    REQUIRE(label->rect.y == Catch::Approx(16.0f));
+
+    Gorgon::Graphics::Layer layer;
+    runtime.Render(layer, 800, 600);
+    // Two fills plus two text runs (or placeholder bars without a font).
+    REQUIRE(runtime.GetUserInterface().GetLastDrawnQuadCount() >= 4);
+
+    // A resize re-anchors the corner button without touching the scene.
+    runtime.SetViewSize(1024, 768);
+    runtime.Update(0.0f);
+    runtime.Render(layer, 1024, 768);
+    REQUIRE(ui.GetWidget("play")->rect.Right() == Catch::Approx(1004.0f));
+    REQUIRE(ui.GetWidget("play")->rect.Bottom() == Catch::Approx(748.0f));
+    REQUIRE(ui.GetWidget("score")->rect.y == Catch::Approx(16.0f));
+
+    // Rendering with the UI switched off leaves the world path alone.
+    runtime.GetRenderOptions().drawUI = false;
+    runtime.Render(layer, 1024, 768);
+    REQUIRE(runtime.GetUserInterface().GetLastDrawnQuadCount() == 0);
+    runtime.GetRenderOptions().drawUI = true;
+
+    // A scene without any UI element skips the pass entirely.
+    Scene plain;
+    plain.CreateEntity("Nothing");
+    SceneRuntime plainRuntime;
+    REQUIRE(plainRuntime.LoadFromScene(plain, std::string(), &error));
+    plainRuntime.SetViewSize(800, 600);
+    plainRuntime.Update(0.0f);
+    plainRuntime.Render(layer, 800, 600);
+    REQUIRE(plainRuntime.GetUserInterface().GetWidgetCount() == 0);
+    REQUIRE(plainRuntime.GetUserInterface().GetLastDrawnQuadCount() == 0);
+}
+
+TEST_CASE("A UI-only scene exports without any asset", "[EditorCore][UI][Export]") {
+    Scene scene;
+    scene.name = "UIOnly";
+    EntityId buttonId = AddUIElement(scene, "Start", UIElementKind::Button, "start");
+    scene.FindEntity(buttonId)->ui->text = "Start";
+    AddUIElement(scene, "Backdrop", UIElementKind::Panel, "backdrop");
+
+    const std::string outputDir = UniqueExportTempDir("uibundle");
+
+    ExportOptions options;
+    options.outputDir = outputDir;
+    options.title = "UI Only";
+
+    const ExportResult result = GameExporter::Export(scene, options);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    REQUIRE(result.error.empty());
+
+    // The UI references no image, script or prefab: the bundle is the manifest, the scene and the
+    // player, and it is still a legal export.
+    REQUIRE(result.collectedAssets.empty());
+    REQUIRE(result.copiedAssets.empty());
+    REQUIRE(result.missingAssets.empty());
+    REQUIRE(export_fs::exists(result.manifestPath));
+    REQUIRE(export_fs::exists(result.scenePath));
+
+    Scene reloaded;
+    std::string error;
+    REQUIRE(SceneSerializer::LoadFromFile(result.scenePath, reloaded, &error));
+    REQUIRE(reloaded.GetEntityCount() == 2);
+    REQUIRE(reloaded.FindEntity(buttonId)->ui.has_value());
+    REQUIRE(reloaded.FindEntity(buttonId)->ui->id == "start");
+    REQUIRE(reloaded.FindEntity(buttonId)->ui->text == "Start");
+
+    // ...and the exported scene lays out exactly like the authored one.
+    SceneRuntime runtime;
+    REQUIRE(runtime.Load(result.scenePath, &error));
+    runtime.SetViewSize(1280, 720);
+    runtime.Update(0.0f);
+    REQUIRE(runtime.GetUserInterface().GetWidgetCount() == 2);
+
+    export_fs::remove_all(export_fs::path(outputDir));
+}

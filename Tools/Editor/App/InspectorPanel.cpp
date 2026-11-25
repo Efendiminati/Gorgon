@@ -1,6 +1,7 @@
 #include "InspectorPanel.h"
 
 #include <algorithm>
+#include <cctype>
 #include <iostream>
 #include <cstddef>
 #include <string>
@@ -200,6 +201,36 @@ namespace Gorgon :: Editor {
         panel_.Add(btnAddLight_);
         panel_.Add(btnRemoveLight_);
 
+        // ---- UI element ----------------------------------------------------
+        panel_.Add(lblUI_);
+        panel_.Add(lblUIKind_);
+        panel_.Add(uiKind_);
+        panel_.Add(lblUIId_);
+        panel_.Add(uiId_);
+        panel_.Add(lblUIText_);
+        panel_.Add(uiText_);
+        panel_.Add(lblUIFontSize_);
+        panel_.Add(uiFontSize_);
+        panel_.Add(lblUIOffset_);
+        panel_.Add(uiOffset_);
+        panel_.Add(lblUISize_);
+        panel_.Add(uiSize_);
+        panel_.Add(lblUIAnchorH_);
+        panel_.Add(uiAnchorH_);
+        panel_.Add(lblUIAnchorV_);
+        panel_.Add(uiAnchorV_);
+        panel_.Add(lblUITextColor_);
+        panel_.Add(uiTextColor_);
+        panel_.Add(lblUIBackground_);
+        panel_.Add(uiBackground_);
+        panel_.Add(lblUIHover_);
+        panel_.Add(uiHover_);
+        panel_.Add(lblUIPressed_);
+        panel_.Add(uiPressed_);
+        panel_.Add(chkUIVisible_);
+        panel_.Add(btnAddUI_);
+        panel_.Add(btnRemoveUI_);
+
         // Sprite tint supports alpha so tint can fade an entity out.
         spriteTint_.SetAlpha(true);
         backgroundColor_.SetAlpha(false);
@@ -217,6 +248,28 @@ namespace Gorgon :: Editor {
         lightType_.List.Add(std::string("Point"));
         lightType_.List.Add(std::string("Spot"));
         lightType_.List.SetSelectedIndex(0);
+
+        uiKind_.List.Add(std::string("Button"));
+        uiKind_.List.Add(std::string("Label"));
+        uiKind_.List.Add(std::string("Panel"));
+        uiKind_.List.SetSelectedIndex(0);
+
+        uiAnchorH_.List.Add(std::string("Left"));
+        uiAnchorH_.List.Add(std::string("Centre"));
+        uiAnchorH_.List.Add(std::string("Right"));
+        uiAnchorH_.List.SetSelectedIndex(0);
+
+        uiAnchorV_.List.Add(std::string("Top"));
+        uiAnchorV_.List.Add(std::string("Middle"));
+        uiAnchorV_.List.Add(std::string("Bottom"));
+        uiAnchorV_.List.SetSelectedIndex(0);
+
+        // A widget's colours are drawn as they are, so their alphas are authored too (a
+        // transparent panel background is a legitimate look).
+        uiTextColor_.SetAlpha(true);
+        uiBackground_.SetAlpha(true);
+        uiHover_.SetAlpha(true);
+        uiPressed_.SetAlpha(true);
 
         // A light's colour is used as-is by the lightmap, so its alpha is irrelevant.
         lightColor_.SetAlpha(false);
@@ -332,6 +385,22 @@ namespace Gorgon :: Editor {
         fieldRow(lblParticlesRate_, particlesRate_);
         fieldRow(lblParticlesSize_, particlesSize_);
         pairRow(btnAddParticles_, btnRemoveParticles_);
+
+        sectionRow(lblUI_);
+        fieldRow(lblUIKind_, uiKind_);
+        fieldRow(lblUIId_, uiId_);
+        fieldRow(lblUIText_, uiText_);
+        fieldRow(lblUIFontSize_, uiFontSize_);
+        fieldRow(lblUIOffset_, uiOffset_);
+        fieldRow(lblUISize_, uiSize_);
+        fieldRow(lblUIAnchorH_, uiAnchorH_);
+        fieldRow(lblUIAnchorV_, uiAnchorV_);
+        fieldRow(lblUITextColor_, uiTextColor_);
+        fieldRow(lblUIBackground_, uiBackground_);
+        fieldRow(lblUIHover_, uiHover_);
+        fieldRow(lblUIPressed_, uiPressed_);
+        sectionRow(chkUIVisible_);
+        pairRow(btnAddUI_, btnRemoveUI_);
 
         sectionRow(lblLight_);
         fieldRow(lblLightType_, lightType_);
@@ -850,6 +919,165 @@ namespace Gorgon :: Editor {
         btnRemoveParticles_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Particles); });
         btnAddLight_.ClickEvent.Register([this]() { addComponent(ComponentKind::Light); });
         btnRemoveLight_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Light); });
+
+        // ---- UI element ----------------------------------------------------
+        uiKind_.ChangedEvent.Register([this](long index) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const UIElementKind kind = index == 1 ? UIElementKind::Label
+                                     : index == 2 ? UIElementKind::Panel
+                                                  : UIElementKind::Button;
+            if(entity->ui->kind == kind)
+                return;
+            entity->ui->kind = kind;
+            modified(false);
+        });
+        uiId_.ChangedEvent.Register([this](const std::string &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui || entity->ui->id == value)
+                return;
+            entity->ui->id = value;
+            modified(false);
+        });
+        uiText_.ChangedEvent.Register([this](const std::string &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui || entity->ui->text == value)
+                return;
+            entity->ui->text = value;
+            modified(false);
+        });
+        uiFontSize_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const float size = std::max(1.0f, value);
+            if(size == entity->ui->fontSize)
+                return;
+            entity->ui->fontSize = size;
+            modified(false);
+        });
+        uiOffset_.ChangedEvent.Register([this](const Gorgon::Geometry::Pointf &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            if(entity->ui->x == value.X && entity->ui->y == value.Y)
+                return;
+            entity->ui->x = value.X;
+            entity->ui->y = value.Y;
+            modified(false);
+        });
+        uiSize_.ChangedEvent.Register([this](const Gorgon::Geometry::Pointf &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const float w = std::max(0.0f, value.X);
+            const float h = std::max(0.0f, value.Y);
+            if(entity->ui->width == w && entity->ui->height == h)
+                return;
+            entity->ui->width = w;
+            entity->ui->height = h;
+            modified(false);
+        });
+        uiAnchorH_.ChangedEvent.Register([this](long index) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const UIAnchorH anchor = index == 1 ? UIAnchorH::Center
+                                   : index == 2 ? UIAnchorH::Right
+                                                : UIAnchorH::Left;
+            if(entity->ui->anchorH == anchor)
+                return;
+            entity->ui->anchorH = anchor;
+            modified(false);
+        });
+        uiAnchorV_.ChangedEvent.Register([this](long index) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const UIAnchorV anchor = index == 1 ? UIAnchorV::Middle
+                                   : index == 2 ? UIAnchorV::Bottom
+                                                : UIAnchorV::Top;
+            if(entity->ui->anchorV == anchor)
+                return;
+            entity->ui->anchorV = anchor;
+            modified(false);
+        });
+        uiTextColor_.ChangedEvent.Register([this](const Gorgon::Graphics::RGBAf &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const ColorRGBA color = FromColorF(value);
+            if(color == entity->ui->textColor)
+                return;
+            entity->ui->textColor = color;
+            modified(false);
+        });
+        uiBackground_.ChangedEvent.Register([this](const Gorgon::Graphics::RGBAf &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const ColorRGBA color = FromColorF(value);
+            if(color == entity->ui->background)
+                return;
+            entity->ui->background = color;
+            modified(false);
+        });
+        uiHover_.ChangedEvent.Register([this](const Gorgon::Graphics::RGBAf &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const ColorRGBA color = FromColorF(value);
+            if(color == entity->ui->hoverBackground)
+                return;
+            entity->ui->hoverBackground = color;
+            modified(false);
+        });
+        uiPressed_.ChangedEvent.Register([this](const Gorgon::Graphics::RGBAf &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui)
+                return;
+            const ColorRGBA color = FromColorF(value);
+            if(color == entity->ui->pressedBackground)
+                return;
+            entity->ui->pressedBackground = color;
+            modified(false);
+        });
+        chkUIVisible_.ChangedEvent.Register([this](const bool &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->ui || entity->ui->visible == value)
+                return;
+            entity->ui->visible = value;
+            modified(false);
+        });
+        btnAddUI_.ClickEvent.Register([this]() { addComponent(ComponentKind::UIElement); });
+        btnRemoveUI_.ClickEvent.Register([this]() { removeComponent(ComponentKind::UIElement); });
     }
 
     void InspectorPanel::addComponent(ComponentKind kind) {
@@ -891,6 +1119,19 @@ namespace Gorgon :: Editor {
                 if(!entity->light)
                     entity->light = Light2DComponent{};
                 break;
+            case ComponentKind::UIElement:
+                if(!entity->ui) {
+                    UIElementComponent element;
+                    // A fresh element gets a handle derived from the entity name, so it is already
+                    // addressable from a script without any further typing.
+                    element.id = entity->name.empty() ? std::string("ui") : entity->name;
+                    for(auto &c : element.id) {
+                        if(std::isspace(static_cast<unsigned char>(c)))
+                            c = '_';
+                    }
+                    entity->ui = element;
+                }
+                break;
         }
 
         modified(true);
@@ -909,6 +1150,7 @@ namespace Gorgon :: Editor {
             case ComponentKind::Tilemap:    entity->tilemap.reset();    break;
             case ComponentKind::Particles:  entity->particles.reset();  break;
             case ComponentKind::Light:      entity->light.reset();      break;
+            case ComponentKind::UIElement:  entity->ui.reset();         break;
         }
 
         modified(true);
@@ -1069,6 +1311,39 @@ namespace Gorgon :: Editor {
         btnAddLight_.SetVisible(hasEntity && !hasLight);
         btnRemoveLight_.SetVisible(hasLight);
 
+        const bool hasUI = hasEntity && entity->ui.has_value();
+        const bool uiHasText = hasUI && entity->ui->kind != UIElementKind::Panel;
+        const bool uiIsButton = hasUI && entity->ui->kind == UIElementKind::Button;
+        lblUI_.SetVisible(hasEntity);
+        lblUIKind_.SetVisible(hasUI);
+        uiKind_.SetVisible(hasUI);
+        lblUIId_.SetVisible(hasUI);
+        uiId_.SetVisible(hasUI);
+        lblUIText_.SetVisible(uiHasText);
+        uiText_.SetVisible(uiHasText);
+        lblUIFontSize_.SetVisible(uiHasText);
+        uiFontSize_.SetVisible(uiHasText);
+        lblUIOffset_.SetVisible(hasUI);
+        uiOffset_.SetVisible(hasUI);
+        lblUISize_.SetVisible(hasUI);
+        uiSize_.SetVisible(hasUI);
+        lblUIAnchorH_.SetVisible(hasUI);
+        uiAnchorH_.SetVisible(hasUI);
+        lblUIAnchorV_.SetVisible(hasUI);
+        uiAnchorV_.SetVisible(hasUI);
+        lblUITextColor_.SetVisible(uiHasText);
+        uiTextColor_.SetVisible(uiHasText);
+        lblUIBackground_.SetVisible(hasUI);
+        uiBackground_.SetVisible(hasUI);
+        // Only a button changes colour on hover/press, so the other kinds hide those fields.
+        lblUIHover_.SetVisible(uiIsButton);
+        uiHover_.SetVisible(uiIsButton);
+        lblUIPressed_.SetVisible(uiIsButton);
+        uiPressed_.SetVisible(uiIsButton);
+        chkUIVisible_.SetVisible(hasUI);
+        btnAddUI_.SetVisible(hasEntity && !hasUI);
+        btnRemoveUI_.SetVisible(hasUI);
+
         const bool hasPrefab = hasEntity && !entity->prefabSource.empty();
         lblPrefab_.SetVisible(hasEntity);
         lblPrefabSource_.SetVisible(hasPrefab);
@@ -1219,6 +1494,42 @@ namespace Gorgon :: Editor {
             if(!lightDirection_.IsFocused())
                 lightDirection_.Set(light.direction);
             chkLightShadows_.SetState(light.castShadows);
+        }
+        if(entity->ui.has_value()) {
+            const auto &ui = *entity->ui;
+            if(!uiKind_.IsFocused()) {
+                const long index = ui.kind == UIElementKind::Label ? 1
+                                 : ui.kind == UIElementKind::Panel ? 2 : 0;
+                if(uiKind_.List.GetSelectedIndex() != index)
+                    uiKind_.List.SetSelectedIndex(index);
+            }
+            if(!uiId_.IsFocused())
+                uiId_.Set(ui.id);
+            if(!uiText_.IsFocused())
+                uiText_.Set(ui.text);
+            if(!uiFontSize_.IsFocused())
+                uiFontSize_.Set(ui.fontSize);
+            if(!uiOffset_.IsFocused())
+                uiOffset_.Set(Gorgon::Geometry::Pointf{ui.x, ui.y});
+            if(!uiSize_.IsFocused())
+                uiSize_.Set(Gorgon::Geometry::Pointf{ui.width, ui.height});
+            if(!uiAnchorH_.IsFocused()) {
+                const long index = ui.anchorH == UIAnchorH::Center ? 1
+                                 : ui.anchorH == UIAnchorH::Right ? 2 : 0;
+                if(uiAnchorH_.List.GetSelectedIndex() != index)
+                    uiAnchorH_.List.SetSelectedIndex(index);
+            }
+            if(!uiAnchorV_.IsFocused()) {
+                const long index = ui.anchorV == UIAnchorV::Middle ? 1
+                                 : ui.anchorV == UIAnchorV::Bottom ? 2 : 0;
+                if(uiAnchorV_.List.GetSelectedIndex() != index)
+                    uiAnchorV_.List.SetSelectedIndex(index);
+            }
+            uiTextColor_.Set(ToColorF(ui.textColor));
+            uiBackground_.Set(ToColorF(ui.background));
+            uiHover_.Set(ToColorF(ui.hoverBackground));
+            uiPressed_.Set(ToColorF(ui.pressedBackground));
+            chkUIVisible_.SetState(ui.visible);
         }
 
         lblPrefabPath_.Text = entity->prefabSource;

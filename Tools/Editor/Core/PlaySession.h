@@ -6,6 +6,7 @@
 #include "RuntimeCamera.h"
 #include "Scene.h"
 #include "ScriptLog.h"
+#include "UserInterface.h"
 
 #include <memory>
 #include <string>
@@ -96,6 +97,19 @@ namespace Gorgon :: Editor {
         /// Redirects the camera the scripts read and write. Pass nullptr to go back to the
         /// session's own camera. The camera is not part of the scene snapshot and survives Stop().
         void SetCamera(RuntimeCamera *camera);
+
+        /**
+         * In-game UI the `UI` library reads click and hover state from. It defaults to a
+         * UserInterface the session owns (empty until a host lays it out), so a headless test can
+         * `GetUserInterface().Layout(scene, w, h)` and drive it directly. A host that renders the
+         * UI passes its own instance in, so `UI_IsClicked` agrees with what is on screen.
+         *
+         * UI_SetText/UI_SetVisible always write the live scene's UIElementComponent and therefore
+         * need no UserInterface at all.
+         */
+        void SetUserInterface(UserInterface *ui);
+        UserInterface &GetUserInterface();
+        const UserInterface &GetUserInterface() const;
 
         /// True when a script changed the camera since the last call; reading it clears the flag.
         /// A host uses it to copy the session camera into its viewport only when a script moved it.
