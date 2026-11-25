@@ -71,6 +71,14 @@ namespace Gorgon :: Editor {
         // ---- Animation timeline ---------------------------------------------
         TimelinePanel &GetTimelinePanel() { return timeline_; }
 
+        // ---- 2D lighting toggle (viewport toolbar) ---------------------------
+        /// Mirrors the toolbar's *Lights* checkbox, which turns the viewport's lightmap preview on
+        /// and off. Exposed so tests and scripts can drive the same state the button drives.
+        bool IsLightingPreviewEnabled() const { return viewport_.IsLightingPreviewEnabled(); }
+        void SetLightingPreviewEnabled(bool enabled);
+        /// The *Lights* checkbox itself (state changes go through the same path as a click).
+        Gorgon::Widgets::Checkbox &GetLightsToggle() { return chkLights_; }
+
         BottomTab GetBottomTab() const { return bottomTab_; }
         /// Switches the bottom dock between the asset browser, the console and the timeline.
         void ShowBottomTab(BottomTab tab);
@@ -268,6 +276,8 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button btnConsoleTab_{"Console"};
         Gorgon::Widgets::Button btnTimelineTab_{"Timeline"};
         Gorgon::Widgets::Checkbox chkGridSnap_{"Grid Snap", true};
+        /// Turns the viewport's 2D lighting preview on and off (see EditorViewport::SetLightingPreviewEnabled).
+        Gorgon::Widgets::Checkbox chkLights_{"Lights", true};
         Gorgon::Widgets::Label lblStatus_{"Ready"};
 
         // 4-pane docks + center viewport

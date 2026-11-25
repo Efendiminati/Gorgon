@@ -32,6 +32,7 @@ namespace Gorgon :: Editor {
         std::optional<CameraComponent> camera;
         std::optional<TilemapComponent> tilemap;
         std::optional<ParticleComponent> particles;
+        std::optional<Light2DComponent> light;
         std::string prefabSource;
 
         bool HasTag(const std::string &tag) const {
@@ -61,6 +62,7 @@ namespace Gorgon :: Editor {
                    camera == other.camera &&
                    tilemap == other.tilemap &&
                    particles == other.particles &&
+                   light == other.light &&
                    prefabSource == other.prefabSource;
         }
 

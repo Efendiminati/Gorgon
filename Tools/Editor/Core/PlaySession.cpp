@@ -1632,6 +1632,229 @@ namespace Gorgon :: Editor {
                         Gorgon::Scripting::Types::Float(), {}
                     )
                 }
+            ),
+
+            // ---- 2D lights -----------------------------------------------------
+            // A light lives on an entity as a Light2DComponent, at that entity's world position, so a
+            // script moves a light by moving (or parenting) its entity. The runtime rebuilds the
+            // lightmap from the live scene every frame, so these edits show up immediately.
+            new Gorgon::Scripting::Function(
+                "CreateLight",
+                "Creates a point light entity at a world position and returns its id, or 0 when it "
+                "could not be created.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](std::string name, float x, float y, float radius, float intensity) -> int {
+                            if(!session->scene)
+                                return 0;
+
+                            Entity &created = session->scene->CreateEntity(
+                                name.empty() ? std::string("Light") : name
+                            );
+                            const EntityId id = created.id;
+                            SetWorldPosition(*session->scene, id, x, y);
+
+                            Light2DComponent light;
+                            light.radius = radius > 0.0f ? radius : light.radius;
+                            light.intensity = intensity >= 0.0f ? intensity : light.intensity;
+                            created.light = light;
+                            return int(id);
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Name", "Name of the new light entity",
+                                                        Gorgon::Scripting::Types::String()),
+                            Gorgon::Scripting::Parameter("X", "World position on x",
+                                                        Gorgon::Scripting::Types::Float()),
+                            Gorgon::Scripting::Parameter("Y", "World position on y",
+                                                        Gorgon::Scripting::Types::Float()),
+                            Gorgon::Scripting::Parameter("Radius", "World units the light reaches",
+                                                        Gorgon::Scripting::Types::Float()),
+                            Gorgon::Scripting::Parameter("Intensity", "Brightness multiplier",
+                                                        Gorgon::Scripting::Types::Float())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "HasLight",
+                "Returns 1 when the entity carries a light, 0 otherwise or when the id is unknown.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            const Entity *entity = session->scene->FindEntity(EntityId(rawId));
+                            return entity && entity->light.has_value() ? 1 : 0;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {Gorgon::Scripting::Parameter("Entity", "Id of the entity",
+                                                     Gorgon::Scripting::Types::Int())}
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "SetLightColor",
+                "Sets a light's colour from 0-255 channels and returns 1, or 0 when the entity has "
+                "no light.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, int r, int g, int b) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            Entity *entity = session->scene->FindEntity(EntityId(rawId));
+                            if(!entity || !entity->light)
+                                return 0;
+                            const auto channel = [](int value) {
+                                return std::uint8_t(std::clamp(value, 0, 255));
+                            };
+                            entity->light->color.r = channel(r);
+                            entity->light->color.g = channel(g);
+                            entity->light->color.b = channel(b);
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the light entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Red", "Red channel, 0-255",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Green", "Green channel, 0-255",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Blue", "Blue channel, 0-255",
+                                                        Gorgon::Scripting::Types::Int())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "SetLightRadius",
+                "Sets how far a light reaches, in world units, and returns 1 (0 when it has no light).",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, float radius) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            Entity *entity = session->scene->FindEntity(EntityId(rawId));
+                            if(!entity || !entity->light)
+                                return 0;
+                            entity->light->radius = std::max(0.0f, radius);
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the light entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Radius", "World units", 
+                                                        Gorgon::Scripting::Types::Float())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "SetLightIntensity",
+                "Sets a light's brightness multiplier and returns 1 (0 when it has no light).",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, float intensity) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            Entity *entity = session->scene->FindEntity(EntityId(rawId));
+                            if(!entity || !entity->light)
+                                return 0;
+                            entity->light->intensity = std::max(0.0f, intensity);
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the light entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Intensity", "Brightness multiplier",
+                                                        Gorgon::Scripting::Types::Float())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "SetLightCone",
+                "Turns the light into a spot: a cone `angle` degrees wide pointing at `direction` "
+                "(degrees, 0 = +x). Returns 1, or 0 when the entity has no light.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, float angle, float direction) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            Entity *entity = session->scene->FindEntity(EntityId(rawId));
+                            if(!entity || !entity->light)
+                                return 0;
+                            entity->light->type = LightType::Spot;
+                            entity->light->coneAngle = std::clamp(angle, 1.0f, 360.0f);
+                            entity->light->direction = direction;
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the light entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Angle", "Full cone width in degrees",
+                                                        Gorgon::Scripting::Types::Float()),
+                            Gorgon::Scripting::Parameter("Direction", "Cone direction, degrees, 0 = +x",
+                                                        Gorgon::Scripting::Types::Float())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "SetLightShadows",
+                "Turns shadow casting on (1) or off (0) for a light and returns 1, or 0 when the "
+                "entity has no light.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, int castShadows) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            Entity *entity = session->scene->FindEntity(EntityId(rawId));
+                            if(!entity || !entity->light)
+                                return 0;
+                            entity->light->castShadows = castShadows != 0;
+                            return 1;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the light entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("CastShadows", "1 to cast shadows, 0 to stop",
+                                                        Gorgon::Scripting::Types::Int())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "GetLightRadius",
+                "How far the light reaches in world units, 0 when the entity has no light.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId) -> float {
+                            if(rawId <= 0 || !session->scene)
+                                return 0.0f;
+                            const Entity *entity = session->scene->FindEntity(EntityId(rawId));
+                            if(!entity || !entity->light)
+                                return 0.0f;
+                            return entity->light->radius;
+                        },
+                        Gorgon::Scripting::Types::Float(),
+                        {Gorgon::Scripting::Parameter("Entity", "Id of the light entity",
+                                                     Gorgon::Scripting::Types::Int())}
+                    )
+                }
             )
         });
 

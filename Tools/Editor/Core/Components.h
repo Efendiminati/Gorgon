@@ -291,4 +291,50 @@ namespace Gorgon :: Editor {
         float life = 1.0f;
     };
 
+    enum class LightType {
+        Point = 0,
+        Spot
+    };
+
+    inline std::string LightTypeToString(LightType type) {
+        switch(type) {
+            case LightType::Spot: return "spot";
+            case LightType::Point:
+            default:              return "point";
+        }
+    }
+
+    inline bool LightTypeFromString(const std::string &str, LightType &out) {
+        if(str == "point") { out = LightType::Point; return true; }
+        if(str == "spot")  { out = LightType::Spot;  return true; }
+        return false;
+    }
+
+    /// A 2D light placed at the entity's world position. The runtime multiplies a lightmap built
+    /// from every light in the scene over the rendered scene; a scene without lights pays nothing.
+    ///
+    /// `radius` and `intensity` are the only two values a point light needs; a spot adds a cone of
+    /// `coneAngle` degrees (full width, 1..360) centred on `direction` (degrees, 0 = +x, growing
+    /// clockwise because y points down). `castShadows` makes the light test occluders (collider and
+    /// sprite boxes) between it and each sample point.
+    struct Light2DComponent {
+        LightType type = LightType::Point;
+        ColorRGBA color{255, 244, 214, 255};
+        float radius = 256.0f;      // world units the light reaches
+        float intensity = 1.0f;     // multiplies the colour; 1 is a full strength light
+        float coneAngle = 60.0f;    // spot only: full cone width in degrees
+        float direction = 0.0f;     // spot only: degrees, 0 points along +x
+        bool castShadows = false;
+
+        bool operator==(const Light2DComponent &other) const {
+            return type == other.type && color == other.color &&
+                   radius == other.radius && intensity == other.intensity &&
+                   coneAngle == other.coneAngle && direction == other.direction &&
+                   castShadows == other.castShadows;
+        }
+        bool operator!=(const Light2DComponent &other) const {
+            return !(*this == other);
+        }
+    };
+
 } // namespace Gorgon::Editor

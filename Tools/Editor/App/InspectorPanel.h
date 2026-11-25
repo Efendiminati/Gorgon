@@ -128,7 +128,8 @@ namespace Gorgon :: Editor {
             Audio,
             Camera,
             Tilemap,
-            Particles
+            Particles,
+            Light
         };
 
         void registerComponentEvents();
@@ -278,6 +279,24 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Numberbox particlesSize_{4.0f};
         Gorgon::Widgets::Button    btnAddParticles_{"+ Add Particles"};
         Gorgon::Widgets::Button    btnRemoveParticles_{"- Remove Particles"};
+
+        // ---- Light -------------------------------------------------------------
+        Gorgon::Widgets::Label     lblLight_{"Light", Gorgon::Widgets::Registry::Label_Subtitle};
+        Gorgon::Widgets::Label     lblLightType_{"Type"};
+        Gorgon::Widgets::DropdownList<std::string> lightType_;
+        Gorgon::Widgets::Label     lblLightColor_{"Colour"};
+        Gorgon::Widgets::ColorPicker lightColor_;
+        Gorgon::Widgets::Label     lblLightRadius_{"Radius"};
+        Gorgon::Widgets::Numberbox lightRadius_{256.0f};
+        Gorgon::Widgets::Label     lblLightIntensity_{"Intensity"};
+        Gorgon::Widgets::Numberbox lightIntensity_{1.0f};
+        Gorgon::Widgets::Label     lblLightCone_{"Cone Angle"};
+        Gorgon::Widgets::Numberbox lightCone_{60.0f};
+        Gorgon::Widgets::Label     lblLightDirection_{"Direction"};
+        Gorgon::Widgets::Numberbox lightDirection_{0.0f};
+        Gorgon::Widgets::Checkbox  chkLightShadows_{"Cast Shadows", false};
+        Gorgon::Widgets::Button    btnAddLight_{"+ Add Light"};
+        Gorgon::Widgets::Button    btnRemoveLight_{"- Remove Light"};
 
         std::vector<Row> rows_;
         bool updating_ = false;

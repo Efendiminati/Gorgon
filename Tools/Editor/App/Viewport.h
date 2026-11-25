@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Core/Scene.h"
+#include "Core/Lightmap.h"
 #include "Core/TilemapPainter.h"
 
 #include <Gorgon/Geometry/Point.h>
@@ -229,6 +230,24 @@ namespace Gorgon :: Editor {
         void SetViewportSizeOverride(Gorgon::Geometry::Size sz) { sizeOverride_ = sz; }
         Gorgon::Geometry::Size GetViewportSize() const;
 
+        // ---- 2D lighting preview ------------------------------------------------
+        /// Turns the lightmap preview on or off. On by default; an unlit scene looks and costs
+        /// exactly the same either way, because the pass skips itself when no light exists.
+        void SetLightingPreviewEnabled(bool enabled) { lightingPreviewEnabled_ = enabled; }
+        bool IsLightingPreviewEnabled() const { return lightingPreviewEnabled_; }
+        void ToggleLightingPreview() { lightingPreviewEnabled_ = !lightingPreviewEnabled_; }
+
+        /// Colour unlit areas fall back to in the preview (opaque black by default).
+        void SetLightAmbient(const ColorRGBA &ambient) { lightAmbient_ = ambient; }
+        const ColorRGBA &GetLightAmbient() const { return lightAmbient_; }
+
+        /// Number of light gizmos the last Redraw() drew (entities carrying a Light2DComponent).
+        int GetLightGizmoCount() const { return lightGizmoCount_; }
+        /// True when the last Redraw() composited a lightmap over the scene.
+        bool WasLightmapDrawn() const { return lightmapDrawn_; }
+        /// The map the last Redraw() built. Inactive when nothing was lit.
+        const Lightmap &GetLightmap() const { return lightmap_; }
+
         /// Hit-testing & interaction helpers (also directly testable in --selftest)
         EntityId HitTestEntity(float sx, float sy) const;
         std::vector<EntityId> HitTestMarquee(float sx1, float sy1, float sx2, float sy2) const;
@@ -287,6 +306,12 @@ namespace Gorgon :: Editor {
         void drawRectOutline(const std::array<Gorgon::Geometry::Pointf, 4> &pts, float thickness, Gorgon::Graphics::RGBAf color);
         void drawGrid(float viewW, float viewH);
         void drawEntities(float viewW, float viewH);
+        /// Builds the lightmap over the visible area and composites it over the world. A no-op for a
+        /// scene without lights, which is what keeps unlit editing unchanged.
+        void drawLighting(float viewW, float viewH);
+        /// Radius ring (and cone for spots) of every light, drawn over the preview so a light can be
+        /// seen and selected even while it lights nothing.
+        void drawLightGizmos(float viewW, float viewH);
         void drawColliders(float viewW, float viewH);
         void drawParticles(float viewW, float viewH);
         void drawCameraFrustum(float viewW, float viewH);
@@ -350,6 +375,14 @@ namespace Gorgon :: Editor {
 
         // Active asset drag-and-drop preview
         DropPreview dropPreview_;
+
+        // ---- 2D lighting preview state ----------------------------------------
+        bool lightingPreviewEnabled_ = true;
+        ColorRGBA lightAmbient_{0, 0, 0, 255};
+        Lightmap lightmap_;
+        LightmapTexture lightmapTexture_;
+        int lightGizmoCount_ = 0;
+        bool lightmapDrawn_ = false;
 
         // ---- Tilemap painting state -------------------------------------------
         bool tileToolActive_ = false;

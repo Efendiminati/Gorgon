@@ -6,6 +6,7 @@
 #include "Core/CommandStack.h"
 #include "Core/FileWatcher.h"
 #include "Core/GameExporter.h"
+#include "Core/Lightmap.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "Core/SceneRuntime.h"
@@ -3853,4 +3854,272 @@ TEST_CASE("An edited animation timeline survives a JSON round-trip", "[EditorCor
     Scene rejected;
     REQUIRE_FALSE(SceneSerializer::FromJsonString(broken, rejected, &error));
     REQUIRE_FALSE(error.empty());
+}
+
+TEST_CASE("Light2DComponent carries sane defaults and serializes its type", "[EditorCore][Lighting]") {
+    const Light2DComponent light;
+    REQUIRE(light.type == LightType::Point);
+    REQUIRE(light.radius == Catch::Approx(256.0f));
+    REQUIRE(light.intensity == Catch::Approx(1.0f));
+    REQUIRE(light.coneAngle == Catch::Approx(60.0f));
+    REQUIRE(light.direction == Catch::Approx(0.0f));
+    REQUIRE_FALSE(light.castShadows);
+    REQUIRE(light.color.a == 255);
+
+    REQUIRE(LightTypeToString(LightType::Point) == "point");
+    REQUIRE(LightTypeToString(LightType::Spot) == "spot");
+
+    LightType parsed = LightType::Point;
+    REQUIRE(LightTypeFromString("spot", parsed));
+    REQUIRE(parsed == LightType::Spot);
+    REQUIRE(LightTypeFromString("point", parsed));
+    REQUIRE(parsed == LightType::Point);
+    REQUIRE_FALSE(LightTypeFromString("lamp", parsed));
+
+    // Equality covers every field, which is what keeps a scene round-trip honest.
+    Light2DComponent other;
+    REQUIRE(light == other);
+    other.castShadows = true;
+    REQUIRE(light != other);
+}
+
+TEST_CASE("A light survives a JSON round-trip and an unlit entity writes no light", "[EditorCore][Lighting]") {
+    Scene scene;
+    Entity &lit = scene.CreateEntity("Lantern");
+    lit.transform.x = 120.0f;
+    lit.transform.y = 80.0f;
+
+    Light2DComponent light;
+    light.type = LightType::Spot;
+    light.color = ColorRGBA{255, 200, 120, 200};
+    light.radius = 180.0f;
+    light.intensity = 1.5f;
+    light.coneAngle = 45.0f;
+    light.direction = 90.0f;
+    light.castShadows = true;
+    lit.light = light;
+    // Scene stores entities in a vector, so the reference dies on the next CreateEntity.
+    const EntityId litId = lit.id;
+
+    Entity &plain = scene.CreateEntity("Plain");
+    plain.sprite = SpriteComponent{"assets/plain.png", ColorRGBA{255, 255, 255, 255}};
+
+    std::string error;
+    const std::string encoded = SceneSerializer::ToJsonString(scene);
+    const std::size_t lightKey = encoded.find("\"light\"");
+    REQUIRE(lightKey != std::string::npos);
+
+    Scene restored;
+    REQUIRE(SceneSerializer::FromJsonString(encoded, restored, &error));
+    REQUIRE(error.empty());
+    REQUIRE(restored == scene);
+
+    const Entity *reloaded = restored.FindEntity(litId);
+    REQUIRE(reloaded != nullptr);
+    REQUIRE(reloaded->light.has_value());
+    REQUIRE(reloaded->light->type == LightType::Spot);
+    REQUIRE(reloaded->light->color == light.color);
+    REQUIRE(reloaded->light->radius == Catch::Approx(180.0f));
+    REQUIRE(reloaded->light->intensity == Catch::Approx(1.5f));
+    REQUIRE(reloaded->light->coneAngle == Catch::Approx(45.0f));
+    REQUIRE(reloaded->light->direction == Catch::Approx(90.0f));
+    REQUIRE(reloaded->light->castShadows);
+
+    // The entity without a light writes no key at all, so old scenes stay byte identical.
+    REQUIRE_FALSE(restored.FindEntity(plain.id)->light.has_value());
+    REQUIRE(encoded.find("\"light\"", lightKey + 1) == std::string::npos);
+
+    // An unknown type is rejected rather than silently turned into a point light.
+    std::string broken = encoded;
+    const std::size_t spotAt = broken.find("\"spot\"");
+    REQUIRE(spotAt != std::string::npos);
+    broken.replace(spotAt, std::string("\"spot\"").size(), "\"lamp\"");
+    Scene rejected;
+    REQUIRE_FALSE(SceneSerializer::FromJsonString(broken, rejected, &error));
+    REQUIRE_FALSE(error.empty());
+}
+
+TEST_CASE("A Lightmap brightens towards a light and reaches zero at its radius", "[EditorCore][Lighting]") {
+    Scene scene;
+    Entity &entity = scene.CreateEntity("Lamp");
+    entity.transform.x = 0.0f;
+    entity.transform.y = 0.0f;
+
+    Light2DComponent light;
+    light.color = ColorRGBA{255, 255, 255, 255};   // a white light's level is its own reach
+    light.radius = 50.0f;
+    light.intensity = 1.0f;
+    entity.light = light;
+
+    const Gorgon::Geometry::Rectanglef world{-100.0f, -100.0f, 200.0f, 200.0f};
+
+    Lightmap map;
+    REQUIRE(BuildSceneLightmap(scene, world, 100, 100, map));
+    REQUIRE(map.IsActive());
+    REQUIRE(map.GetLightCount() == 1);
+    REQUIRE(map.GetWidth() == 100);
+    REQUIRE(map.GetHeight() == 100);
+
+    // Near the light is bright, and the level only falls off with distance.
+    const float centre = map.SampleWorld(0.0f, 0.0f);
+    const float near = map.SampleWorld(0.0f, 15.0f);
+    const float far = map.SampleWorld(0.0f, 35.0f);
+    REQUIRE(centre > 0.8f);
+    REQUIRE(near > 0.15f);
+    REQUIRE(centre > near);
+    REQUIRE(near > far);
+    REQUIRE(far > 0.0f);
+    REQUIRE(map.SampleWorld(0.0f, 60.0f) == 0.0f);
+    REQUIRE(map.SampleWorld(60.0f, 0.0f) == 0.0f);
+
+    // The overlay is the ambient colour, fully opaque where nothing reaches and clear where lit.
+    const ColorRGBA litPixel = map.GetOverlayColor(50, 50);
+    const ColorRGBA darkPixel = map.GetOverlayColor(0, 0);
+    REQUIRE(litPixel.a < 20);
+    REQUIRE(darkPixel.a == 255);
+    REQUIRE(darkPixel.r == map.GetOptions().ambient.r);
+    REQUIRE(map.GetOverlay().size() == 100u * 100u);
+    REQUIRE_FALSE(map.IsUniform());
+
+    // An intensity of 0 still counts as a light, but lights nothing.
+    Light2DComponent dim = light;
+    dim.intensity = 0.0f;
+    Lightmap dark;
+    Scene darkScene = scene;
+    darkScene.FindEntity(entity.id)->light = dim;
+    REQUIRE(BuildSceneLightmap(darkScene, world, 100, 100, dark));
+    REQUIRE(dark.SampleWorld(0.0f, 0.0f) == 0.0f);
+    REQUIRE(dark.IsUniform());
+}
+
+TEST_CASE("A spot light cuts off outside its cone angle", "[EditorCore][Lighting]") {
+    Scene scene;
+    Entity &entity = scene.CreateEntity("Spot");
+    entity.transform.x = 0.0f;
+    entity.transform.y = 0.0f;
+
+    Light2DComponent light;
+    light.type = LightType::Spot;
+    light.color = ColorRGBA{255, 255, 255, 255};
+    light.radius = 100.0f;
+    light.intensity = 1.0f;
+    light.coneAngle = 90.0f;
+    light.direction = 0.0f;   // +x
+    entity.light = light;
+
+    const Gorgon::Geometry::Rectanglef world{-150.0f, -150.0f, 300.0f, 300.0f};
+
+    Lightmap map;
+    REQUIRE(BuildSceneLightmap(scene, world, 100, 100, map));
+
+    // Straight ahead is lit, behind the light and outside the cone are not.
+    REQUIRE(map.SampleWorld(60.0f, 0.0f) > 0.05f);
+    REQUIRE(map.SampleWorld(-60.0f, 0.0f) == 0.0f);
+    REQUIRE(map.SampleWorld(0.0f, 60.0f) == 0.0f);
+    REQUIRE(map.SampleWorld(-40.0f, 40.0f) == 0.0f);
+
+    // Rotating the cone swings the lit area with it.
+    scene.FindEntity(entity.id)->light->direction = 90.0f;   // now +y
+    Lightmap rotated;
+    REQUIRE(BuildSceneLightmap(scene, world, 100, 100, rotated));
+    REQUIRE(rotated.SampleWorld(0.0f, 60.0f) > 0.05f);
+    REQUIRE(rotated.SampleWorld(60.0f, 0.0f) == 0.0f);
+
+    // A wider cone lights a sample the narrow one missed.
+    scene.FindEntity(entity.id)->light->direction = 0.0f;
+    scene.FindEntity(entity.id)->light->coneAngle = 200.0f;
+    Lightmap wide;
+    REQUIRE(BuildSceneLightmap(scene, world, 100, 100, wide));
+    REQUIRE(wide.SampleWorld(0.0f, 60.0f) > 0.0f);
+}
+
+TEST_CASE("A scene without lights builds no lightmap at all", "[EditorCore][Lighting]") {
+    Scene scene;
+    Entity &box = scene.CreateEntity("Box");
+    box.collider = ColliderComponent{ColliderType::AABB, 32.0f, 32.0f, 16.0f, 0.0f, 0.0f};
+    scene.CreateEntity("Empty");
+
+    Lightmap map;
+    map.SetAmbient(ColorRGBA{10, 20, 30, 255});
+    // A stale map from a previous scene is cleared, not reused.
+    Light2DComponent stale;
+    map.Configure(Gorgon::Geometry::Rectanglef{0.0f, 0.0f, 10.0f, 10.0f}, 4, 4);
+    map.AddLight(stale, 0.0f, 0.0f);
+    map.Build();
+    REQUIRE(map.IsActive());
+
+    REQUIRE_FALSE(BuildSceneLightmap(scene, Gorgon::Geometry::Rectanglef{-100.0f, -100.0f, 200.0f, 200.0f},
+                                     64, 64, map));
+    REQUIRE_FALSE(map.IsActive());
+    REQUIRE(map.GetLightCount() == 0);
+    REQUIRE(map.GetOverlay().empty());
+    REQUIRE(map.SampleWorld(0.0f, 0.0f) == 0.0f);
+
+    // An empty map is uniform, so a caller that draws it unconditionally still looks untouched.
+    REQUIRE(map.IsUniform());
+}
+
+TEST_CASE("Shadow casters darken what is behind them and are capped per light", "[EditorCore][Lighting]") {
+    Scene scene;
+    Entity &lamp = scene.CreateEntity("Lamp");
+    lamp.transform.x = 0.0f;
+    lamp.transform.y = 0.0f;
+
+    Light2DComponent light;
+    light.color = ColorRGBA{255, 255, 255, 255};
+    light.radius = 200.0f;
+    light.intensity = 1.0f;
+    light.castShadows = true;
+    lamp.light = light;
+    // Captured before the wall is created: Scene keeps entities in a vector, which reallocates.
+    const EntityId lampId = lamp.id;
+
+    const Gorgon::Geometry::Rectanglef world{-200.0f, -200.0f, 400.0f, 400.0f};
+
+    Lightmap unshadowed;
+    REQUIRE(BuildSceneLightmap(scene, world, 100, 100, unshadowed));
+    REQUIRE(unshadowed.SampleWorld(100.0f, 0.0f) > 0.0f);
+    REQUIRE(unshadowed.GetShadowCasterCount() == 0);
+
+    // A 20x20 collider 50 units to the right blocks the light straight ahead of it.
+    Entity &wall = scene.CreateEntity("Wall");
+    wall.transform.x = 50.0f;
+    wall.transform.y = 0.0f;
+    wall.collider = ColliderComponent{ColliderType::AABB, 20.0f, 20.0f, 10.0f, 0.0f, 0.0f};
+
+    Lightmap shadowed;
+    REQUIRE(BuildSceneLightmap(scene, world, 100, 100, shadowed));
+    REQUIRE(shadowed.GetOccluderCount() == 1);
+    REQUIRE(shadowed.GetShadowCasterCount() == 1);
+    REQUIRE(shadowed.GetShadowLightCount() == 1);
+
+    REQUIRE(shadowed.SampleWorld(100.0f, 0.0f) == 0.0f);
+    // Far enough off the box's edge the light still reaches, so only the shadow is dark.
+    REQUIRE(shadowed.SampleWorld(100.0f, 80.0f) > 0.0f);
+    // The lit side of the wall stays lit.
+    REQUIRE(shadowed.SampleWorld(30.0f, 0.0f) > 0.0f);
+
+    // Turning shadow casting off brings the light back behind the wall.
+    scene.FindEntity(lampId)->light->castShadows = false;
+    Lightmap noCasting;
+    REQUIRE(BuildSceneLightmap(scene, world, 100, 100, noCasting));
+    REQUIRE(noCasting.SampleWorld(100.0f, 0.0f) > 0.0f);
+    REQUIRE(noCasting.GetShadowCasterCount() == 0);
+
+    // The per-light cap bounds the cost: extra casters are ignored, the nearest ones are kept.
+    scene.FindEntity(lampId)->light->castShadows = true;
+    for(int i = 0; i < 40; ++i) {
+        Entity &extra = scene.CreateEntity("Caster" + std::to_string(i));
+        extra.transform.x = 20.0f + float(i) * 3.0f;
+        extra.transform.y = -60.0f;
+        extra.collider = ColliderComponent{ColliderType::AABB, 8.0f, 8.0f, 4.0f, 0.0f, 0.0f};
+    }
+
+    Lightmap capped;
+    LightmapOptions options;
+    options.maxShadowCastersPerLight = 8;
+    REQUIRE(BuildSceneLightmap(scene, world, 100, 100, capped, options));
+    REQUIRE(capped.GetOccluderCount() == 41);
+    REQUIRE(capped.GetShadowCasterCount() == 8);
+    REQUIRE(Lightmap::MaxShadowCasters == 16);
 }

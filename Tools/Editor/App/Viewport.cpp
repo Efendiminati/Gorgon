@@ -1585,6 +1585,126 @@ namespace Gorgon :: Editor {
         }
     }
 
+    void EditorViewport::drawLighting(float viewW, float viewH) {
+        lightmapDrawn_ = false;
+
+        if(!lightingPreviewEnabled_) {
+            lightmap_.Reset();
+            if(lightmapTexture_.IsReady())
+                lightmapTexture_.Clear();
+            return;
+        }
+
+        // The map covers exactly the visible world rect at roughly one sample per 16 screen pixels,
+        // so panning and zooming never change how soft a light looks.
+        const auto bounds = CameraWorldBounds(camera_.panX, camera_.panY, camera_.zoom, viewW, viewH);
+        int mapWidth = 0;
+        int mapHeight = 0;
+        LightmapGridSize(viewW, viewH, mapWidth, mapHeight);
+
+        LightmapOptions options;
+        options.ambient = lightAmbient_;
+        options.occluderSize = [this](EntityId id) -> Gorgon::Geometry::Size {
+            const Entity *entity = scene_.FindEntity(id);
+            if(!entity)
+                return {0, 0};
+
+            const auto size = ComputeEntityBaseSize(*entity);
+            return {int(size.X + 0.5f), int(size.Y + 0.5f)};
+        };
+
+        // No light in the scene: nothing is built, uploaded or drawn, which is what keeps editing an
+        // unlit scene byte-for-byte and frame-for-frame what it was before lighting existed.
+        if(!BuildSceneLightmap(scene_, bounds, mapWidth, mapHeight, lightmap_, options)) {
+            if(lightmapTexture_.IsReady())
+                lightmapTexture_.Clear();
+            return;
+        }
+
+        lightmapTexture_.Upload(lightmap_);
+        lightmapTexture_.Draw(gfxLayer_, viewW, viewH);
+        lightmapDrawn_ = true;
+    }
+
+    void EditorViewport::drawLightGizmos(float viewW, float viewH) {
+        lightGizmoCount_ = 0;
+
+        for(const auto &entity : scene_.GetEntities()) {
+            if(!entity.light.has_value() || !entity.visible)
+                continue;
+
+            ++lightGizmoCount_;
+
+            const auto &light = *entity.light;
+            const Transform world = scene_.GetWorldTransform(entity.id);
+            const auto center = camera_.WorldToScreen(world.x, world.y, viewW, viewH);
+            const float radiusPx = std::max(4.0f, light.radius * camera_.zoom);
+
+            const auto color = ToRGBAf(light.color);
+            const bool selected = (entity.id == selectedEntity_);
+            const float ringAlpha = selected ? 1.0f : 0.85f;
+            const Gorgon::Graphics::RGBAf ring(color.R, color.G, color.B, ringAlpha);
+            const Gorgon::Graphics::RGBAf faint(color.R, color.G, color.B, 0.30f);
+
+            // Radius ring: what the light reaches, in the same units the lightmap uses.
+            constexpr int kSegments = 48;
+            Gorgon::Geometry::Pointf prev{center.X + radiusPx, center.Y};
+            for(int i = 1; i <= kSegments; ++i) {
+                const float angle = 2.0f * kPi * float(i) / float(kSegments);
+                const Gorgon::Geometry::Pointf curr{center.X + std::cos(angle) * radiusPx,
+                                                    center.Y + std::sin(angle) * radiusPx};
+                drawLine(prev.X, prev.Y, curr.X, curr.Y, selected ? 2.0f : 1.2f, ring);
+                prev = curr;
+            }
+
+            if(light.type == LightType::Spot) {
+                const float half = std::clamp(light.coneAngle, 1.0f, 360.0f) * 0.5f * kDegToRad;
+                const float direction = light.direction * kDegToRad;
+
+                // The two cone edges from the light out to its radius.
+                for(int side = -1; side <= 1; side += 2) {
+                    const float angle = direction + half * float(side);
+                    drawLine(center.X, center.Y,
+                             center.X + std::cos(angle) * radiusPx,
+                             center.Y + std::sin(angle) * radiusPx,
+                             1.5f, ring);
+                }
+
+                // Arc across the cone, so the beam's width reads at a glance.
+                constexpr int kArcSegments = 24;
+                Gorgon::Geometry::Pointf arcPrev{center.X + std::cos(direction - half) * radiusPx,
+                                                 center.Y + std::sin(direction - half) * radiusPx};
+                for(int i = 1; i <= kArcSegments; ++i) {
+                    const float angle = direction - half + 2.0f * half * float(i) / float(kArcSegments);
+                    const Gorgon::Geometry::Pointf curr{center.X + std::cos(angle) * radiusPx,
+                                                        center.Y + std::sin(angle) * radiusPx};
+                    drawLine(arcPrev.X, arcPrev.Y, curr.X, curr.Y, 1.2f, faint);
+                    arcPrev = curr;
+                }
+            }
+
+            // Emitter marker plus a direction tick, so a light with radius 0 is still visible.
+            drawFilledCircle(center.X, center.Y, selected ? 5.0f : 4.0f, ring);
+            const float dir = light.direction * kDegToRad;
+            drawLine(center.X, center.Y,
+                     center.X + std::cos(dir) * 14.0f,
+                     center.Y + std::sin(dir) * 14.0f,
+                     1.5f, ring);
+
+            // Shadow casters are marked with a small square so the flag is visible without the
+            // Inspector: it reads as the box a shadow is projected from.
+            if(light.castShadows) {
+                const std::array<Gorgon::Geometry::Pointf, 4> box = {
+                    Gorgon::Geometry::Pointf{center.X - 9.0f, center.Y - 9.0f},
+                    Gorgon::Geometry::Pointf{center.X - 3.0f, center.Y - 9.0f},
+                    Gorgon::Geometry::Pointf{center.X - 3.0f, center.Y - 3.0f},
+                    Gorgon::Geometry::Pointf{center.X - 9.0f, center.Y - 3.0f}
+                };
+                gfxLayer_.Draw(box[0], box[1], box[2], box[3], ring);
+            }
+        }
+    }
+
     void EditorViewport::drawColliders(float viewW, float viewH) {
         const Gorgon::Graphics::RGBAf colColor(0.29f, 0.87f, 0.50f, 0.90f);
         const auto order = scene_.GetRenderOrder();
@@ -1843,11 +1963,18 @@ namespace Gorgon :: Editor {
         // 3. Scene entities (sorted by zOrder)
         drawEntities(viewW, viewH);
 
+        // 3b. 2D lighting preview: the lightmap is multiplied over what was just drawn, so the grid,
+        //     the background and the entities all fall into shadow. A scene without lights skips it.
+        drawLighting(viewW, viewH);
+
         // 4. Collider wireframes
         drawColliders(viewW, viewH);
 
         // 5. Particle emitters (live during play, marker while editing)
         drawParticles(viewW, viewH);
+
+        // 5b. Light gizmos sit above the darkness: a designer always sees where the lights are.
+        drawLightGizmos(viewW, viewH);
 
         // 6. CameraComponent frustum wireframe
         drawCameraFrustum(viewW, viewH);

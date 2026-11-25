@@ -117,6 +117,11 @@ namespace Gorgon :: Editor {
         std::vector<std::string> componentSounds;
         const Gorgon::Graphics::StyledPrinter *textPrinter = nullptr;
 
+        // 2D lighting: the lightmap is rebuilt from the live scene every frame (so a script that
+        // moves a light is picked up) and skipped wholesale when the scene carries no light.
+        Lightmap lightmap;
+        LightmapTexture lightmapTexture;
+
         std::string lastError;
         bool loaded = false;
 
@@ -125,6 +130,8 @@ namespace Gorgon :: Editor {
             sprites.clear();
             components.Reset();
             componentSounds.clear();
+            lightmap.Reset();
+            lightmapTexture.Clear();
         }
 
         /// The first active CameraComponent drives the projection when a scene carries one.
@@ -627,6 +634,37 @@ namespace Gorgon :: Editor {
                 }
             }
         }
+
+        // ---- 2D lighting --------------------------------------------------------
+        // The lightmap covers exactly what the camera shows and is rebuilt from the live scene, so a
+        // script that moves or creates a light is on screen the same frame. A scene without a light
+        // returns false here: nothing is allocated, uploaded or drawn, which keeps an unlit scene at
+        // the cost and the exact picture it had before lighting existed.
+        if(impl.options.drawLighting && impl.options.drawEntities) {
+            const auto bounds = CameraWorldBounds(camera.panX, camera.panY, camera.zoom, viewW, viewH);
+            int mapWidth = 0;
+            int mapHeight = 0;
+            LightmapGridSize(viewW, viewH, mapWidth, mapHeight);
+
+            LightmapOptions lightOptions;
+            lightOptions.ambient = impl.options.lightAmbient;
+            lightOptions.occluderSize = [&impl](EntityId id) -> Gorgon::Geometry::Size {
+                const Entity *entity = impl.scene.FindEntity(id);
+                if(!entity)
+                    return {0, 0};
+
+                const auto size = impl.entityBaseSize(*entity);
+                return {int(size.X + 0.5f), int(size.Y + 0.5f)};
+            };
+
+            if(BuildSceneLightmap(impl.scene, bounds, mapWidth, mapHeight, impl.lightmap, lightOptions)) {
+                impl.lightmapTexture.Upload(impl.lightmap);
+                impl.lightmapTexture.Draw(target, viewW, viewH);
+            }
+        }
+        else {
+            impl.lightmap.Reset();
+        }
     }
 
     Scene &SceneRuntime::GetScene() {
@@ -770,6 +808,10 @@ namespace Gorgon :: Editor {
 
     const std::string &SceneRuntime::GetLastError() const {
         return impl_->lastError;
+    }
+
+    const Lightmap &SceneRuntime::GetLightmap() const {
+        return impl_->lightmap;
     }
 
 } // namespace Gorgon::Editor

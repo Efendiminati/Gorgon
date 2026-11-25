@@ -225,6 +225,19 @@ namespace Gorgon :: Editor {
                 eObj.Set("particles", std::move(o));
             }
 
+            if(e.light.has_value()) {
+                const auto &l = *e.light;
+                JSON::Value o;
+                o.Set("type", LightTypeToString(l.type));
+                o.Set("color", colorToJson(l.color));
+                o.Set("radius", static_cast<double>(l.radius));
+                o.Set("intensity", static_cast<double>(l.intensity));
+                o.Set("coneAngle", static_cast<double>(l.coneAngle));
+                o.Set("direction", static_cast<double>(l.direction));
+                o.Set("castShadows", l.castShadows);
+                eObj.Set("light", std::move(o));
+            }
+
             // Written only when non-empty, so scenes that carry neither stay byte identical.
             if(!e.tags.empty()) {
                 JSON::Array tagArr;
@@ -541,6 +554,31 @@ namespace Gorgon :: Editor {
                 e.particles = comp;
             }
 
+            if(eObj.Has("light") && !eObj["light"].IsNull()) {
+                const auto &o = eObj["light"];
+                if(!o.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'light' must be an object");
+                    return false;
+                }
+                Light2DComponent comp;
+                const std::string typeName = getStringField(o, "type", "point");
+                if(!LightTypeFromString(typeName, comp.type)) {
+                    setError(outError, "Entity " + std::to_string(rawId) +
+                                        " has an unknown light type '" + typeName + "'");
+                    return false;
+                }
+                if(o.Has("color") && !o["color"].IsNull()) {
+                    if(!colorFromJson(o["color"], comp.color, outError, "light.color"))
+                        return false;
+                }
+                comp.radius = std::max(0.0f, getFloatField(o, "radius", 256.0f));
+                comp.intensity = std::max(0.0f, getFloatField(o, "intensity", 1.0f));
+                comp.coneAngle = std::clamp(getFloatField(o, "coneAngle", 60.0f), 1.0f, 360.0f);
+                comp.direction = getFloatField(o, "direction", 0.0f);
+                comp.castShadows = getBoolField(o, "castShadows", false);
+                e.light = comp;
+            }
+
             e.prefabSource = getStringField(eObj, "prefabSource", "");
 
             return true;
@@ -561,6 +599,7 @@ namespace Gorgon :: Editor {
             dst.camera = src.camera;
             dst.tilemap = src.tilemap;
             dst.particles = src.particles;
+            dst.light = src.light;
         }
 
         std::string makeUniqueEntityName(const std::string &desired, std::unordered_set<std::string> &usedNames) {

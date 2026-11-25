@@ -83,8 +83,8 @@ cannot delete or move anything.
 
 Toolbar buttons: **New**, **Open**, **Save**, **Save As**, **Export**, **Play**, **Pause**, **Stop**,
 **Undo**, **Redo**, **Reset View**, **Tiles**, **Assets**, **Console**, **Timeline**, plus the
-**Grid Snap** toggle and a status line showing the world position under the cursor and the current
-zoom.
+**Grid Snap** and **Lights** toggles and a status line showing the world position under the cursor
+and the current zoom.
 
 Panels:
 
@@ -192,6 +192,46 @@ seconds) into an explicit timeline. Frames that do not override their rect keep 
 cell, so editing one frame's timing never changes which part of the sheet the others show. While
 play-in-editor runs, the timeline stands aside: the running scene owns the viewport and its own
 animation stepping.
+
+### 2D lighting
+
+Add a **Light** component in the Inspector to light a scene. A light sits at its entity's world
+position (so moving or parenting the entity moves the light), and the viewport composites a lightmap
+over the world every frame: everything inside a light brightens towards its centre, everything
+outside fades to the ambient colour (opaque black by default, i.e. darkness).
+
+| Field | Meaning |
+| --- | --- |
+| *Type* | **Point** (a circle of light) or **Spot** (a cone) |
+| *Colour* | Tint of the light; its luminance sets how bright the lit area is |
+| *Radius* | World units the light reaches; the level falls to zero exactly at the radius |
+| *Intensity* | Brightness multiplier, `0` lights nothing |
+| *Cone Angle* / *Direction* | Spot only: full cone width in degrees and its heading (degrees, `0` = `+x`, growing clockwise because y points down) |
+| *Cast Shadows* | Makes the light cast from occluders |
+
+**Lights** in the viewport toolbar turns the preview on and off — a preview switch only, it never
+dirties the scene or records an undo step, so you can flip it freely while editing. Light gizmos are
+drawn above the darkness whether the preview is on or off: a radius ring, the two cone edges and an
+arc for a spot, an emitter dot with a direction tick, and a small square marking a shadow caster. The
+gizmos use the light's own colour, and the selected light's gizmo is drawn thicker.
+
+Falloff is smooth and monotone: `level = (1 - distance / radius)²`, multiplied by the intensity, the
+light's luminance and (for a spot) a cone term that eases over the outer quarter of the half angle
+and is exactly zero outside it. Several lights in range add up.
+
+**Shadows** come from occluders: an entity's collider is the authoritative shape (so what the player
+collides with is what casts the shadow), otherwise its sprite-animation frame box, otherwise its
+tilemap box, otherwise — when the host knows the sprite's pixel size — its sprite box. A light only
+tests the occluders within its own radius and skips any box it is standing inside (a light's own
+sprite must not black it out). **At most 16 shadow casters are tested per light**
+(`LightmapOptions::maxShadowCastersPerLight`, `Lightmap::MaxShadowCasters`); the nearest ones win and
+the rest are ignored, which bounds the per-frame cost at `samples x 16` segment tests. A sample
+inside an occluder stays lit, so sprites do not go pitch black in their own shadow.
+
+Lighting needs no window: the lightmap is plain arithmetic, so headless runs, `--selftest` and the
+unit tests build and sample it without a graphics context. Only the texture upload and the final
+composite need one. A scene with **no lights skips the entire pass** — nothing is allocated, uploaded
+or drawn, so an unlit scene costs and looks exactly as it did before lighting existed.
 
 ### Script editor
 
@@ -307,6 +347,7 @@ unchanged, and each one is only written back when an entity carries it.
 | `camera` | step | The first active component owns the projection: `zoom`, centred on `followTarget` (or on the camera entity). It overrides a script's `SetCameraPos`. |
 | `tilemap` | renderer | One quad per cell, textured from `tilesetAsset` (row-major with `tilesetCols` columns) or coloured per tile index when there is no tileset. |
 | `particles` | step | CPU emitter: `emitRate` particles per second, each living `lifetime` seconds and moving `speed` units/s from the emitter origin, coloured from `startColor` to `endColor`. Live particles live in the runtime, never in the scene file. |
+| `light` | renderer | A 2D light at the entity's world position: `point` or `spot`, with colour, radius, intensity, cone angle/direction and a `castShadows` flag. The runtime composites a lightmap built from every light in the scene; a scene without lights skips the pass. |
 
 Tags and properties are plain entity metadata: the inspector edits tags as a comma-separated list,
 and scripts read/write both through `using Scene`:
@@ -351,6 +392,32 @@ The array is written only for animations that were authored, and `frameCount` is
 length, so a scene written before the timeline existed loads, plays and saves unchanged. The runtime
 (`ComponentSimulation`, `SceneRuntime` and the editor viewport) steps and draws the explicit
 durations and rects when they are there, and the classic uniform grid when they are not.
+
+#### 2D light (`light`)
+
+```json
+"light": {
+  "type": "spot", "color": [255, 214, 170, 255],
+  "radius": 320.0, "intensity": 1.25,
+  "coneAngle": 60.0, "direction": 90.0,
+  "castShadows": true
+}
+```
+
+| Field | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | string | `"point"` | `"point"` or `"spot"`; any other value makes the scene fail to load, so a typo is never silently a point light. |
+| `color` | `[r, g, b, a]` | warm white | Tint of the light. The alpha is written but unused: a light is either in the scene or not. |
+| `radius` | float | `256.0` | World units the light reaches; clamped to at least 0. |
+| `intensity` | float | `1.0` | Brightness multiplier; clamped to at least 0. A `0` intensity still counts as a light, it just lights nothing. |
+| `coneAngle` | float | `60.0` | Spot only, full cone width in degrees, clamped to `1..360`. |
+| `direction` | float | `0.0` | Spot only, degrees; `0` points along `+x` and the angle grows clockwise (y points down). |
+| `castShadows` | bool | `false` | Casts from colliders and sprite/tilemap boxes, capped at 16 casters per light. |
+
+The whole `light` object is written only for entities that carry the component, so a scene written
+before lighting existed loads and saves byte identical. `radius`, `intensity`, `coneAngle`,
+`direction` and `castShadows` all fall back to the defaults above when missing, so a hand-written
+light only needs the fields it cares about.
 
 ### Prefabs (`.gprefab.json`)
 
@@ -690,6 +757,40 @@ The camera a script moves is the one `SceneRuntime::Render()` draws with, so
 `SetCameraPos`/`SetCameraZoom` are all a follow-cam needs; play-in-editor copies the same camera into
 the viewport whenever a script changed it.
 
+### Lights (`using Scene`)
+
+Lights are created and driven through the same `Scene` library, so a script can turn a torch on, dim
+it, swing a spot beam or swap it for a strobing point light while the game runs. The runtime rebuilds
+the lightmap from the live scene every frame, so an edit is on screen the same frame.
+
+| Function | Returns | Meaning |
+| --- | --- | --- |
+| `CreateLight(name, x, y, radius, intensity)` | Int | id of a new entity carrying a point light, `0` on failure |
+| `HasLight(id)` | Int | `1` when the entity carries a light |
+| `SetLightColor(id, r, g, b)` | Int | colour from 0-255 channels |
+| `SetLightRadius(id, radius)` | Int | world units the light reaches (clamped to at least 0) |
+| `SetLightIntensity(id, intensity)` | Int | brightness multiplier (clamped to at least 0) |
+| `SetLightCone(id, angle, direction)` | Int | turns the light into a spot: full cone width and heading in degrees |
+| `SetLightShadows(id, castShadows)` | Int | `1` casts shadows from occluders, `0` stops |
+| `GetLightRadius(id)` | Float | the light's radius, `0` when the entity has no light |
+
+Every setter returns `1` and every unknown id or non-light entity returns `0`/`0.0`, so a script can
+guard with `if(HasLight(id))`. A light is moved by moving its entity (`SetPos`), which is how a
+lantern carried by a character keeps its own position.
+
+```
+using Scene
+
+function Update(self, dt)
+    lamp = FindByName("Lantern")
+    if(IsKeyPressed("Space"))
+        SetLightIntensity(lamp, 2.0)
+        SetLightColor(lamp, 255, 120, 60)
+    end if
+    return 0
+end function
+```
+
 ### Sound (`using Audio`)
 
 | Function | Returns | Meaning |
@@ -755,7 +856,8 @@ API summary:
 | `Render(layer)` / `Render(layer, w, h)` | Draw background, visible entities and (optionally) collider wireframes into a layer you own. Uses the layer's target size for the camera unless a size is given. |
 | `GetScene()` | The live `Scene` (usable with the editor's model API, e.g. `FindEntity`, `GetWorldTransform`). |
 | `GetCamera()` / `SetCamera()` / `CenterCamera(w, h)` | `RuntimeCamera` with `panX`, `panY` (world point at the viewport centre) and `zoom` (pixels per world unit). |
-| `GetRenderOptions()` | `drawBackground`, `drawEntities`, `drawColliders` (debug wireframes). |
+| `GetRenderOptions()` | `drawBackground`, `drawEntities`, `drawColliders` (debug wireframes), `drawLighting` (composite the lightmap; free for a scene without lights) and `lightAmbient` (the colour unlit areas fall back to). |
+| `GetLightmap()` | The map the last `Render()` composited, inactive when the scene has no lights or lighting is off. Lets a host or a test assert its samples. |
 | `ResolveAssetPath(path)` | Resolve a scene-relative sprite/script path against the base dir. |
 | `SetBaseDir(dir)` | Re-root relative paths (re-resolves sprites and restarts scripts). |
 | `GetScriptCount()`, `GetLoadedSpriteCount()`, `GetLastError()`, `IsLoaded()`, `Unload()` | Diagnostics. |
@@ -858,8 +960,8 @@ writes the manifest, scene and assets and warns about the missing executable.
 ```bat
 ctest --test-dir build/WindowsTesting -C Release -R EditorCore --output-on-failure
 
-GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, console, syntax check, round-trip
-GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor, tile painting, animation timeline
+GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, console, syntax check, 2D lighting, round-trip
+GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor, tile painting, animation timeline, lighting toggle/gizmos
 EditorDemo.exe --selftest        rem SceneRuntime: load, path resolution, script ticking
 GorgonPlayer.exe --selftest      rem exported bundle: game.json, scene load, 30 scripted frames
 ```
@@ -890,6 +992,20 @@ destroy, camera, SpawnPrefab), `[Audio]` (sound calls are recorded with no devic
 `[Console]` (ring buffer, filter/scroll view, `Log()`/`Print()` capture, compile and runtime error
 attribution, compile-only `CheckSyntax`).
 
+`[Lighting]` covers 2D lighting without a window, because the lightmap is pure arithmetic: the
+component's defaults and its type codec, a JSON round-trip that also proves an entity without a light
+writes no `light` key (and that an unknown type is rejected rather than silently becoming a point
+light), falloff (bright at the centre, strictly darker further out, exactly zero past the radius),
+the overlay alpha (opaque ambient where nothing reaches, clear where lit), the spot cone's cut-off
+and its rotation and widening, shadow casting from a collider (behind is dark, beside and in front are
+lit), the per-light caster cap, and an unlit scene producing no active map at all — including a stale
+map from a previous scene being cleared rather than reused. The `--selftest` lighting phase runs the
+same checks headless and asserts a built map is **non-uniform** when a light is present, and the
+`--smoke` lighting phase drives the real toolbar: it adds a light, checks the gizmo count and that the
+lightmap was composited and is non-uniform, turns the *Lights* toggle off and back on (checking the
+preview followed both ways while the gizmo stayed), makes it a shadow-casting spot, then removes the
+light and restores the unlit scene.
+
 `[Export]` covers the packager without a window: asset collection across every component plus nested
 prefabs, the `game.json` codec (defaults, invalid input, missing `startScene`) and a real export of
 `Examples/EditorDemo/Scene/DemoScene.gscene.json` that asserts the bundle layout (`game.json`, scene,
@@ -914,7 +1030,8 @@ Tools/Editor/
   Core/                  Scene, Entity, Components, SceneSerializer, GameExporter,
                          CommandStack, PlaySession, SceneRuntime, FileWatcher,
                          TilemapPainter (grid geometry, stroke math, palette layout),
-                         AnimTimeline (frame model, per-frame durations, strip layout, playhead)
+                         AnimTimeline (frame model, per-frame durations, strip layout, playhead),
+                         Lightmap (light grid, falloff, cone, shadows, GPU overlay texture)
   App/                   EditorApp (window shell), Viewport, HierarchyPanel,
                          InspectorPanel, AssetBrowserPanel, TimelinePanel, EditorTheme, Main
   Player/                GorgonPlayer entry point (exported game runtime)

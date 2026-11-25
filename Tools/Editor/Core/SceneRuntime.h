@@ -2,6 +2,7 @@
 
 #include "CollisionSystem.h"
 #include "InputState.h"
+#include "Lightmap.h"
 #include "RuntimeCamera.h"
 #include "Scene.h"
 
@@ -19,6 +20,13 @@ namespace Gorgon :: Editor {
         bool drawBackground = true;
         bool drawEntities = true;
         bool drawColliders = false;
+        /// Composite the scene's Light2DComponents over the world. Ignored (and free) when the scene
+        /// carries no light at all: the lighting pass skips itself entirely, so an unlit scene costs
+        /// and looks exactly as it did before lighting existed.
+        bool drawLighting = true;
+        /// Colour unlit areas fall back to. Opaque black is "darkness"; a tinted ambient keeps the
+        /// scene readable outside every light.
+        ColorRGBA lightAmbient{0, 0, 0, 255};
     };
 
     /**
@@ -155,6 +163,10 @@ namespace Gorgon :: Editor {
 
         /// Last error from loading or script execution ("" when none).
         const std::string &GetLastError() const;
+
+        /// Lightmap the last Render() composited, or an empty (inactive) map when the scene has no
+        /// lights or lighting is disabled.
+        const Lightmap &GetLightmap() const;
 
     private:
         struct Impl;

@@ -477,6 +477,7 @@ namespace Gorgon :: Editor {
         btnResetView_.SetWidth(Units(3.8));
         btnTiles_.SetWidth(Units(4.4));
         chkGridSnap_.SetWidth(Units(4.0));
+        chkLights_.SetWidth(Units(3.4));
         btnAssetsTab_.SetWidth(Units(2.7));
         btnConsoleTab_.SetWidth(Units(3.0));
         lblStatus_.SetWidth(Units(14.0));
@@ -498,6 +499,14 @@ namespace Gorgon :: Editor {
         chkGridSnap_.ChangedEvent.Register([this]() {
             viewport_.SetGridSnap(chkGridSnap_.GetState());
         });
+        // StateChangingEvent, not ChangedEvent: the latter only fires for a user click, while this
+        // one also fires for SetState(), so the preview follows a toolbar click, a script call and a
+        // test through exactly one path. It runs before the state is stored, hence the event value.
+        chkLights_.StateChangingEvent.Register([this](bool value, bool &) {
+            viewport_.SetLightingPreviewEnabled(value);
+            // The preview is not scene state: redraw the viewport, never the dirty flag or an undo step.
+            viewport_.Redraw();
+        });
         btnAssetsTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Assets); });
         btnConsoleTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Console); });
         btnTimelineTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Timeline); });
@@ -506,7 +515,7 @@ namespace Gorgon :: Editor {
             << btnNew_ << btnOpen_ << btnSave_ << btnSaveAs_ << btnExport_
             << btnPlay_ << btnPause_ << btnStop_
             << btnUndo_ << btnRedo_
-            << btnResetView_ << btnTiles_ << chkGridSnap_
+            << btnResetView_ << btnTiles_ << chkGridSnap_ << chkLights_
             // Bottom dock tabs: asset browser, script console and animation timeline share one row.
             << btnAssetsTab_ << btnConsoleTab_ << btnTimelineTab_ << lblStatus_;
     }
@@ -1481,6 +1490,15 @@ namespace Gorgon :: Editor {
         };
 
         updateBottomTabButtons();
+    }
+
+    void EditorApp::SetLightingPreviewEnabled(bool enabled) {
+        viewport_.SetLightingPreviewEnabled(enabled);
+        // Keep the toolbar checkbox in sync whichever path (button or API) changed the state.
+        if(chkLights_.GetState() != enabled)
+            chkLights_.SetState(enabled);
+        // The preview is not scene state: redraw the viewport, never the dirty flag or an undo step.
+        viewport_.Redraw();
     }
 
     void EditorApp::ShowBottomTab(BottomTab tab) {

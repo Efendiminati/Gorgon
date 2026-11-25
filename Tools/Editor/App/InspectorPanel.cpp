@@ -182,6 +182,24 @@ namespace Gorgon :: Editor {
         panel_.Add(btnAddParticles_);
         panel_.Add(btnRemoveParticles_);
 
+        // ---- light ---------------------------------------------------------
+        panel_.Add(lblLight_);
+        panel_.Add(lblLightType_);
+        panel_.Add(lightType_);
+        panel_.Add(lblLightColor_);
+        panel_.Add(lightColor_);
+        panel_.Add(lblLightRadius_);
+        panel_.Add(lightRadius_);
+        panel_.Add(lblLightIntensity_);
+        panel_.Add(lightIntensity_);
+        panel_.Add(lblLightCone_);
+        panel_.Add(lightCone_);
+        panel_.Add(lblLightDirection_);
+        panel_.Add(lightDirection_);
+        panel_.Add(chkLightShadows_);
+        panel_.Add(btnAddLight_);
+        panel_.Add(btnRemoveLight_);
+
         // Sprite tint supports alpha so tint can fade an entity out.
         spriteTint_.SetAlpha(true);
         backgroundColor_.SetAlpha(false);
@@ -195,6 +213,13 @@ namespace Gorgon :: Editor {
         tileTool_.List.Add(std::string("Fill"));
         tileTool_.List.Add(std::string("Eraser"));
         tileTool_.List.SetSelectedIndex(0);
+
+        lightType_.List.Add(std::string("Point"));
+        lightType_.List.Add(std::string("Spot"));
+        lightType_.List.SetSelectedIndex(0);
+
+        // A light's colour is used as-is by the lightmap, so its alpha is irrelevant.
+        lightColor_.SetAlpha(false);
 
         registerComponentEvents();
 
@@ -307,6 +332,16 @@ namespace Gorgon :: Editor {
         fieldRow(lblParticlesRate_, particlesRate_);
         fieldRow(lblParticlesSize_, particlesSize_);
         pairRow(btnAddParticles_, btnRemoveParticles_);
+
+        sectionRow(lblLight_);
+        fieldRow(lblLightType_, lightType_);
+        fieldRow(lblLightColor_, lightColor_);
+        fieldRow(lblLightRadius_, lightRadius_);
+        fieldRow(lblLightIntensity_, lightIntensity_);
+        fieldRow(lblLightCone_, lightCone_);
+        fieldRow(lblLightDirection_, lightDirection_);
+        sectionRow(chkLightShadows_);
+        pairRow(btnAddLight_, btnRemoveLight_);
     }
 
     Entity *InspectorPanel::selectedEntity() {
@@ -722,6 +757,85 @@ namespace Gorgon :: Editor {
             modified(false);
         });
 
+        lightType_.ChangedEvent.Register([this](long index) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->light)
+                return;
+            entity->light->type = index == 1 ? LightType::Spot : LightType::Point;
+            modified(false);
+        });
+        lightColor_.ChangedEvent.Register([this](const Gorgon::Graphics::RGBAf &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->light)
+                return;
+            ColorRGBA color = FromColorF(value);
+            color.a = entity->light->color.a;
+            if(color == entity->light->color)
+                return;
+            entity->light->color = color;
+            modified(false);
+        });
+        lightRadius_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->light)
+                return;
+            const float radius = std::max(0.0f, value);
+            if(radius == entity->light->radius)
+                return;
+            entity->light->radius = radius;
+            modified(false);
+        });
+        lightIntensity_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->light)
+                return;
+            const float intensity = std::max(0.0f, value);
+            if(intensity == entity->light->intensity)
+                return;
+            entity->light->intensity = intensity;
+            modified(false);
+        });
+        lightCone_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->light)
+                return;
+            const float cone = std::clamp(value, 1.0f, 360.0f);
+            if(cone == entity->light->coneAngle)
+                return;
+            entity->light->coneAngle = cone;
+            modified(false);
+        });
+        lightDirection_.ChangedEvent.Register([this](const float &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->light)
+                return;
+            if(value == entity->light->direction)
+                return;
+            entity->light->direction = value;
+            modified(false);
+        });
+        chkLightShadows_.ChangedEvent.Register([this](const bool &value) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->light || entity->light->castShadows == value)
+                return;
+            entity->light->castShadows = value;
+            modified(false);
+        });
+
         btnAddAnim_.ClickEvent.Register([this]() { addComponent(ComponentKind::SpriteAnim); });
         btnRemoveAnim_.ClickEvent.Register([this]() { removeComponent(ComponentKind::SpriteAnim); });
         btnAddText_.ClickEvent.Register([this]() { addComponent(ComponentKind::Text); });
@@ -734,6 +848,8 @@ namespace Gorgon :: Editor {
         btnRemoveTilemap_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Tilemap); });
         btnAddParticles_.ClickEvent.Register([this]() { addComponent(ComponentKind::Particles); });
         btnRemoveParticles_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Particles); });
+        btnAddLight_.ClickEvent.Register([this]() { addComponent(ComponentKind::Light); });
+        btnRemoveLight_.ClickEvent.Register([this]() { removeComponent(ComponentKind::Light); });
     }
 
     void InspectorPanel::addComponent(ComponentKind kind) {
@@ -771,6 +887,10 @@ namespace Gorgon :: Editor {
                 if(!entity->particles)
                     entity->particles = ParticleComponent{};
                 break;
+            case ComponentKind::Light:
+                if(!entity->light)
+                    entity->light = Light2DComponent{};
+                break;
         }
 
         modified(true);
@@ -788,6 +908,7 @@ namespace Gorgon :: Editor {
             case ComponentKind::Camera:     entity->camera.reset();     break;
             case ComponentKind::Tilemap:    entity->tilemap.reset();    break;
             case ComponentKind::Particles:  entity->particles.reset();  break;
+            case ComponentKind::Light:      entity->light.reset();      break;
         }
 
         modified(true);
@@ -928,6 +1049,26 @@ namespace Gorgon :: Editor {
         btnAddParticles_.SetVisible(hasEntity && !hasParticles);
         btnRemoveParticles_.SetVisible(hasParticles);
 
+        const bool hasLight = hasEntity && entity->light.has_value();
+        const bool isSpot = hasLight && entity->light->type == LightType::Spot;
+        lblLight_.SetVisible(hasEntity);
+        lblLightType_.SetVisible(hasLight);
+        lightType_.SetVisible(hasLight);
+        lblLightColor_.SetVisible(hasLight);
+        lightColor_.SetVisible(hasLight);
+        lblLightRadius_.SetVisible(hasLight);
+        lightRadius_.SetVisible(hasLight);
+        lblLightIntensity_.SetVisible(hasLight);
+        lightIntensity_.SetVisible(hasLight);
+        // The cone fields only mean something for a spot, so a point light hides them.
+        lblLightCone_.SetVisible(isSpot);
+        lightCone_.SetVisible(isSpot);
+        lblLightDirection_.SetVisible(isSpot);
+        lightDirection_.SetVisible(isSpot);
+        chkLightShadows_.SetVisible(hasLight);
+        btnAddLight_.SetVisible(hasEntity && !hasLight);
+        btnRemoveLight_.SetVisible(hasLight);
+
         const bool hasPrefab = hasEntity && !entity->prefabSource.empty();
         lblPrefab_.SetVisible(hasEntity);
         lblPrefabSource_.SetVisible(hasPrefab);
@@ -1059,6 +1200,25 @@ namespace Gorgon :: Editor {
                 particlesRate_.Set(entity->particles->emitRate);
             if(!particlesSize_.IsFocused())
                 particlesSize_.Set(entity->particles->size);
+        }
+        if(entity->light.has_value()) {
+            const auto &light = *entity->light;
+            if(!lightType_.IsFocused()) {
+                const long index = light.type == LightType::Spot ? 1 : 0;
+                if(lightType_.List.GetSelectedIndex() != index)
+                    lightType_.List.SetSelectedIndex(index);
+            }
+            if(!lightColor_.IsFocused())
+                lightColor_.Set(ToColorF(light.color));
+            if(!lightRadius_.IsFocused())
+                lightRadius_.Set(light.radius);
+            if(!lightIntensity_.IsFocused())
+                lightIntensity_.Set(light.intensity);
+            if(!lightCone_.IsFocused())
+                lightCone_.Set(light.coneAngle);
+            if(!lightDirection_.IsFocused())
+                lightDirection_.Set(light.direction);
+            chkLightShadows_.SetState(light.castShadows);
         }
 
         lblPrefabPath_.Text = entity->prefabSource;

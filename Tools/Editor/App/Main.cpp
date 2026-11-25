@@ -1,5 +1,6 @@
 #include "Core/ComponentSimulation.h"
 #include "Core/GameExporter.h"
+#include "Core/Lightmap.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "Core/SceneRuntime.h"
@@ -27,6 +28,10 @@ namespace {
     bool Approx(float a, float b, float eps = 1e-2f) {
         return std::abs(a - b) <= eps;
     }
+
+    /// Headless 2D lighting check, runs late in --selftest so its definition sits at the bottom of
+    /// this file; declared here for the selftest body above it.
+    int RunLightingSelfTest();
 
     /// Smallest possible PNG (1x1, transparent) used to give the asset browser a real image
     /// to thumbnail without depending on repository resources being present.
@@ -256,7 +261,11 @@ namespace {
             return hotReloadResult;
         }
 
-        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, script console, syntax check, hot-reload, round-trip, asset browser)\n";
+        if(const int lightingResult = RunLightingSelfTest()) {
+            return lightingResult;
+        }
+
+        std::cout << "GorgonEditor --selftest PASSED (camera, hit-test, grid-snap drag, pan, multi-select, copy/paste, prefabs, script input, expanded components, script console, syntax check, hot-reload, 2D lighting, round-trip, asset browser)\n";
         return 0;
     }
 
@@ -2322,6 +2331,117 @@ namespace {
         return 0;
     }
 
+    /// 2D lighting without a window: a lightmap is pure arithmetic, so a headless run can prove it
+    /// brightens towards its light, cuts off past the radius and at a spot's cone edge, casts a
+    /// shadow from a collider, and does nothing at all for a scene without lights.
+    int RunLightingSelfTest() {
+        using namespace Gorgon::Editor;
+
+        Scene scene;
+        Entity &lamp = scene.CreateEntity("SelftestLamp");
+        lamp.transform.x = 0.0f;
+        lamp.transform.y = 0.0f;
+
+        Light2DComponent light;
+        light.color = ColorRGBA{255, 255, 255, 255};
+        light.radius = 64.0f;
+        light.intensity = 1.0f;
+        light.castShadows = true;
+        lamp.light = light;
+        // Scene stores entities in a vector, so the reference above dies on the next CreateEntity.
+        const EntityId lampId = lamp.id;
+
+        const Gorgon::Geometry::Rectanglef world{-128.0f, -128.0f, 256.0f, 256.0f};
+
+        Lightmap open;
+        if(!BuildSceneLightmap(scene, world, 64, 64, open)) {
+            std::cerr << "FAIL: the lightmap builder ignored a scene with a light\n";
+            return 1;
+        }
+        if(open.IsUniform()) {
+            std::cerr << "FAIL: the headless lightmap is uniform with a light present\n";
+            return 1;
+        }
+        if(!(open.SampleWorld(0.0f, 0.0f) > open.SampleWorld(0.0f, 30.0f))) {
+            std::cerr << "FAIL: the lightmap is not brighter near the light\n";
+            return 1;
+        }
+        if(open.SampleWorld(0.0f, 80.0f) != 0.0f) {
+            std::cerr << "FAIL: the lightmap still lights past the light radius\n";
+            return 1;
+        }
+
+        // A collider between the light and a sample must darken it.
+        Entity &wall = scene.CreateEntity("SelftestWall");
+        wall.transform.x = 24.0f;
+        wall.transform.y = 0.0f;
+        wall.collider = ColliderComponent{ColliderType::AABB, 12.0f, 12.0f, 6.0f, 0.0f, 0.0f};
+
+        Lightmap shadowed;
+        if(!BuildSceneLightmap(scene, world, 64, 64, shadowed)) {
+            std::cerr << "FAIL: the lightmap builder failed once a caster existed\n";
+            return 1;
+        }
+        if(shadowed.GetShadowCasterCount() != 1) {
+            std::cerr << "FAIL: the lightmap did not pick up the collider as a shadow caster\n";
+            return 1;
+        }
+        if(shadowed.SampleWorld(48.0f, 0.0f) != 0.0f) {
+            std::cerr << "FAIL: the collider did not cast a shadow\n";
+            return 1;
+        }
+
+        // A spot cuts off outside its cone.
+        scene.FindEntity(lampId)->light->type = LightType::Spot;
+        scene.FindEntity(lampId)->light->coneAngle = 60.0f;
+        scene.FindEntity(lampId)->light->direction = 180.0f;   // -x, away from the wall
+        Lightmap spot;
+        if(!BuildSceneLightmap(scene, world, 64, 64, spot)) {
+            std::cerr << "FAIL: the lightmap builder failed for a spot light\n";
+            return 1;
+        }
+        if(spot.SampleWorld(-48.0f, 0.0f) <= 0.0f) {
+            std::cerr << "FAIL: the spot light does not light the inside of its cone\n";
+            return 1;
+        }
+        if(spot.SampleWorld(0.0f, 48.0f) != 0.0f) {
+            std::cerr << "FAIL: the spot light leaked outside its cone\n";
+            return 1;
+        }
+
+        // A scene without lights skips the pass entirely.
+        Scene unlit;
+        unlit.CreateEntity("Nothing");
+        Lightmap none;
+        if(BuildSceneLightmap(unlit, world, 64, 64, none)) {
+            std::cerr << "FAIL: an unlit scene still reported a lightmap\n";
+            return 1;
+        }
+        if(none.IsActive() || none.GetLightCount() != 0) {
+            std::cerr << "FAIL: an unlit scene left an active lightmap behind\n";
+            return 1;
+        }
+
+        // The runtime hands the same component to a game, so a light survives a scene file.
+        std::string error;
+        const auto path = (std::filesystem::temp_directory_path() / "gorgon_lighting_selftest.gscene.json");
+        if(!SceneSerializer::SaveToFile(scene, path.string(), &error) ||
+           !SceneSerializer::LoadFromFile(path.string(), unlit, &error)) {
+            std::cerr << "FAIL: lighting round-trip failed: " << error << "\n";
+            std::filesystem::remove(path);
+            return 1;
+        }
+        std::filesystem::remove(path);
+
+        const Entity *reloaded = unlit.FindEntity(lampId);
+        if(!reloaded || !reloaded->light.has_value() || reloaded->light->type != LightType::Spot) {
+            std::cerr << "FAIL: the light component did not survive save/load\n";
+            return 1;
+        }
+
+        return 0;
+    }
+
 } // namespace
 
 int main(int argc, char *argv[]) {
@@ -3365,6 +3485,88 @@ int main(int argc, char *argv[]) {
             Gorgon::NextFrame();
         }
 
+        // ---- Phase 8: 2D lighting (preview toggle + gizmos + lightmap) --------
+        {
+            using namespace Gorgon::Editor;
+
+            auto fail = [&](const std::string &message) {
+                std::cerr << "FAIL: " << message << "\n";
+                window.Close();
+                return 1;
+            };
+
+            // An unlit scene pays nothing: the preview draws no gizmo and composites no lightmap.
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+            if(app.GetViewport().GetLightGizmoCount() != 0 || app.GetViewport().WasLightmapDrawn())
+                return fail("an unlit scene drew lighting");
+
+            // Add a light, then redraw: the gizmo and the lightmap both have to show up.
+            Entity &lamp = scene.CreateEntity("SmokeLight");
+            lamp.transform.x = 40.0f;
+            lamp.transform.y = 30.0f;
+            Light2DComponent light;
+            light.radius = 220.0f;
+            light.castShadows = false;
+            lamp.light = light;
+            const EntityId lightId = lamp.id;
+
+            app.GetViewport().SetSelectedEntity(lightId, true);
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+
+            if(app.GetViewport().GetLightGizmoCount() != 1)
+                return fail("the light gizmo was not drawn for the scene's light");
+            if(!app.GetViewport().WasLightmapDrawn())
+                return fail("the lightmap was not composited for a lit scene");
+            if(!app.GetViewport().GetLightmap().IsActive() ||
+               app.GetViewport().GetLightmap().GetLightCount() != 1)
+                return fail("the viewport lightmap did not pick up the light");
+            if(app.GetViewport().GetLightmap().IsUniform())
+                return fail("the viewport lightmap is uniform with a light present");
+            if(!app.IsLightingPreviewEnabled())
+                return fail("the lighting preview is off by default");
+
+            // The toolbar toggle drives the preview through the real checkbox.
+            app.GetLightsToggle().SetState(false);
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+            if(app.IsLightingPreviewEnabled())
+                return fail("the Lights toggle did not turn the preview off");
+            if(app.GetViewport().WasLightmapDrawn())
+                return fail("the lightmap was still drawn with the preview off");
+            if(app.GetViewport().GetLightGizmoCount() != 1)
+                return fail("turning the preview off hid the light gizmo as well");
+
+            app.GetLightsToggle().SetState(true);
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+            if(!app.IsLightingPreviewEnabled() || !app.GetViewport().WasLightmapDrawn())
+                return fail("the Lights toggle did not turn the preview back on");
+
+            // A spot light draws its cone gizmo without disturbing the preview.
+            scene.FindEntity(lightId)->light->type = LightType::Spot;
+            scene.FindEntity(lightId)->light->castShadows = true;
+            scene.FindEntity(lightId)->light->coneAngle = 70.0f;
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+            if(app.GetViewport().GetLightGizmoCount() != 1)
+                return fail("the spot light lost its gizmo");
+
+            // Restore the scene: no light, no lighting, preview back on.
+            scene.RemoveEntity(lightId, true);
+            app.GetViewport().ClearSelection(false);
+            app.GetViewport().Redraw();
+            Gorgon::NextFrame();
+            if(app.GetViewport().GetLightGizmoCount() != 0 || app.GetViewport().WasLightmapDrawn())
+                return fail("the scene was not restored to unlit");
+            if(!app.IsLightingPreviewEnabled())
+                return fail("the preview toggle was left off after the lighting phase");
+
+            app.GetCommandStack().Clear();
+            Gorgon::NextFrame();
+        }
+
         // Verify save/open round-trip through EditorApp in live window mode
         const auto tmpPath = (std::filesystem::temp_directory_path() / "gorgon_editor_smoke.gscene.json").string();
         std::string err;
@@ -3382,7 +3584,7 @@ int main(int argc, char *argv[]) {
             std::cerr << "FAIL: inspector edit did not persist through save/open\n";
             return 1;
         }
-        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + tilemap paint + animation timeline + round-trip)\n";
+        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + tilemap paint + animation timeline + 2D lighting + round-trip)\n";
         return 0;
     }
 
