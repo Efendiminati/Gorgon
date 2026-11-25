@@ -214,6 +214,9 @@ end function
   and `scaleY`. Values written are copied back into the scene after every call.
 - `dt` is the frame delta in seconds, clamped to `[0, 0.25]` so a stalled frame cannot teleport an
   entity.
+- Optional lifecycle hooks next to `Update` (the runtime wires only the ones the script defines):
+  `function Start(self)` runs **once** — when play starts, or when the entity is spawned — and
+  `function OnDestroy(self)` runs **before** the entity is destroyed and before Play stops.
 - Top-level assignments (`phase = 0.0`) are script globals: they persist between `Update` calls
   because the VM keeps the script scope alive.
 - `using Math` brings in `Sin`, `Cos`, `Tan`, `Log`, … (they take and return doubles; assignments to
@@ -408,6 +411,77 @@ end function
 in the same frame; `IsOverlapping` reports the set the previous collision pass left behind. Note
 GScript spells equality with a single `=` when one is needed inside a condition.
 
+### Scene access (`using Scene`)
+
+A script sees the whole scene through the `Scene` library: lookup, spawning, deferred destruction
+and the camera. Every position in this API is **world space**, so `GetX` of a child entity returns
+what `SetPos` wrote, not the child's local value.
+
+| Function | Returns | Meaning |
+| --- | --- | --- |
+| `FindByName(name)` | Int | id of the first entity with that name, `0` when there is none |
+| `Spawn(name, x, y)` | Int | id of a fresh entity. An existing entity with that name becomes the template: its whole subtree (components, colliders, scripts) is duplicated with new ids and the copy is named `<name> Copy`. With no such entity, an empty entity with that name is created. |
+| `SpawnPrefab(path, x, y)` | Int | id of the root instantiated from a `.gprefab.json`, `0` when the file cannot be loaded |
+| `Destroy(id)` | Int | `1` when the entity (and its children) was queued, `0` for an unknown id |
+| `GetX(id)`, `GetY(id)` | Float | world position |
+| `SetPos(id, x, y)` | Int | moves the entity to a world position (converted into its parent's space) |
+| `SetVisible(id, visible)` | Int | `1` shows, `0` hides |
+| `GetName(id)` | String | entity name, empty for an unknown id |
+| `SetCameraPos(x, y)` | Int | centres the camera on a world position |
+| `SetCameraZoom(zoom)` | Int | viewport pixels per world unit (clamped above zero) |
+| `GetCameraX()`, `GetCameraY()` | Float | world position the camera is centred on |
+
+`Destroy` never invalidates the frame it was called in: the entity is removed at the end of the tick,
+after every `Update` has run, so a script may destroy entities other scripts still reference (or
+itself) while it iterates. Its `OnDestroy` hook runs first. `Spawn` creates the entity immediately
+but compiles and `Start`s its script at the end of the same tick, so a spawned entity's `Update` runs
+from the next frame on.
+
+```
+using Scene
+
+function Update(self, dt)
+    if(IsKeyPressed("Space"))
+        Spawn("Bullet", GetX(self), GetY(self))
+    end if
+    SetCameraPos(GetX(self), GetY(self))
+    return 0
+end function
+```
+
+The camera a script moves is the one `SceneRuntime::Render()` draws with, so
+`SetCameraPos`/`SetCameraZoom` are all a follow-cam needs; play-in-editor copies the same camera into
+the viewport whenever a script changed it.
+
+### Sound (`using Audio`)
+
+| Function | Returns | Meaning |
+| --- | --- | --- |
+| `PlaySound(path)` | Int | `1` when playback started, `0` when Gorgon::Audio has no device or the file cannot be decoded |
+
+The path is resolved against the scene directory like any other asset, and every call is recorded in
+`PlaySession::GetPlayedSounds()` / `SceneRuntime::GetPlayedSounds()` whether or not a device was
+available — that is what makes the hook testable in a headless run.
+
+```
+using Audio
+
+function OnCollisionEnter(self, otherId)
+    PlaySound("audio/hit.wav")
+    return 0
+end function
+
+function Update(self, dt)
+    return 0
+end function
+```
+
+**Call it as a statement.** A function call on the right-hand side of a `self.<member> = …`
+assignment is evaluated *twice* by GScript (once while the assignment is resolved, once when the
+result is converted), so `self.rotation = PlaySound("hit.wav")` plays the sound twice. Store the
+result in a script variable first (`v = PlaySound(...)` then `self.rotation = v`) or just ignore the
+return value.
+
 ## Loading a scene in a Gorgon game
 
 `SceneRuntime` is the only class a game needs; it lives in `GorgonEditorCore`
@@ -488,6 +562,10 @@ GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste,
 GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor
 EditorDemo.exe --selftest        rem SceneRuntime: load, path resolution, script ticking
 ```
+
+The Catch2 suite covers the script runtime too: `[Lifecycle]` (Start → Update → OnDestroy order,
+including a destroyed entity's hook and the Play-stop hooks), `[Scene]` (name lookup, spawn, deferred
+destroy, camera, SpawnPrefab) and `[Audio]` (sound calls are recorded with no device present).
 
 ## Source layout
 

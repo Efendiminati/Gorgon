@@ -132,6 +132,17 @@ namespace Gorgon :: Editor {
         return &entities_[it->second];
     }
 
+    EntityId Scene::FindEntityByName(const std::string &entityName) const {
+        if(entityName.empty())
+            return InvalidEntityId;
+
+        for(const auto &e : entities_) {
+            if(e.name == entityName)
+                return e.id;
+        }
+        return InvalidEntityId;
+    }
+
     bool Scene::HasEntity(EntityId id) const {
         return indexById_.find(id) != indexById_.end();
     }

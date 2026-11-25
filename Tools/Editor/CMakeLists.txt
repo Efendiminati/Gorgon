@@ -3,6 +3,8 @@ cmake_minimum_required(VERSION 3.25)
 add_library(GorgonEditorCore STATIC
     Core/Components.h
     Core/Entity.h
+    Core/RuntimeCamera.h
+    Core/RuntimeCamera.cpp
     Core/Scene.h
     Core/Scene.cpp
     Core/SceneSerializer.h

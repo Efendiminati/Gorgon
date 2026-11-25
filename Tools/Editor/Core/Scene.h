@@ -46,6 +46,11 @@ namespace Gorgon :: Editor {
 
         Entity *FindEntity(EntityId id);
         const Entity *FindEntity(EntityId id) const;
+
+        /// Returns the id of the first entity (storage order) whose name matches exactly, or
+        /// InvalidEntityId when no entity carries that name.
+        EntityId FindEntityByName(const std::string &entityName) const;
+
         bool HasEntity(EntityId id) const;
 
         const std::vector<Entity> &GetEntities() const { return entities_; }

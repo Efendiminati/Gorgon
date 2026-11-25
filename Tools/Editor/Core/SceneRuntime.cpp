@@ -71,33 +71,6 @@ namespace Gorgon :: Editor {
         }
     } // namespace
 
-    // ---- RuntimeCamera -------------------------------------------------------
-
-    Gorgon::Geometry::Pointf RuntimeCamera::WorldToScreen(float wx, float wy, float viewW, float viewH) const {
-        return {
-            (wx - panX) * zoom + viewW * 0.5f,
-            (wy - panY) * zoom + viewH * 0.5f
-        };
-    }
-
-    Gorgon::Geometry::Pointf RuntimeCamera::ScreenToWorld(float sx, float sy, float viewW, float viewH) const {
-        return {
-            (sx - viewW * 0.5f) / zoom + panX,
-            (sy - viewH * 0.5f) / zoom + panY
-        };
-    }
-
-    void RuntimeCamera::CenterOn(float wx, float wy) {
-        panX = wx;
-        panY = wy;
-    }
-
-    void RuntimeCamera::Reset() {
-        panX = 0.0f;
-        panY = 0.0f;
-        zoom = 1.0f;
-    }
-
     // ---- SceneRuntime --------------------------------------------------------
 
     struct SceneRuntime::Impl {
@@ -138,6 +111,9 @@ namespace Gorgon :: Editor {
                 return;
 
             play = std::unique_ptr<PlaySession>(new PlaySession);
+            // The session writes the camera through this pointer, so a script's SetCameraPos/
+            // SetCameraZoom changes what Render() shows on the next frame.
+            play->SetCamera(&camera);
             // Seed the session with the caller's held state. Start() drops the edge flags, so a key
             // pressed before the scripts ran does not read as freshly pressed on frame one.
             play->GetInput() = input;
@@ -520,6 +496,11 @@ namespace Gorgon :: Editor {
 
     bool SceneRuntime::IsOverlapping(EntityId a, EntityId b) const {
         return impl_->play ? impl_->play->IsOverlapping(a, b) : false;
+    }
+
+    const std::vector<std::string> &SceneRuntime::GetPlayedSounds() const {
+        static const std::vector<std::string> empty;
+        return impl_->play ? impl_->play->GetPlayedSounds() : empty;
     }
 
     int SceneRuntime::GetLoadedSpriteCount() const {

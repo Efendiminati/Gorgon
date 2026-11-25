@@ -1695,3 +1695,469 @@ TEST_CASE("Collider trigger and static flags survive a JSON round-trip", "[Edito
     REQUIRE_FALSE(reloaded.FindEntity(plainId)->collider->isStatic);
 }
 
+namespace {
+    /// Number of non-overlapping occurrences of needle in text, used to assert call order/count of
+    /// the lifecycle hooks a script echoes into PlaySession::GetOutput().
+    std::size_t CountOccurrences(const std::string &text, const std::string &needle) {
+        if(needle.empty())
+            return 0;
+
+        std::size_t count = 0;
+        for(std::size_t pos = text.find(needle); pos != std::string::npos;
+            pos = text.find(needle, pos + needle.size())) {
+            ++count;
+        }
+        return count;
+    }
+}
+
+TEST_CASE("Play session runs Start once, Update every frame and OnDestroy on stop or destroy",
+          "[EditorCore][Play][Lifecycle]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_lifecycle_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // A script that records every lifecycle hook it receives. Echo writes into the VM's output
+    // stream, which PlaySession exposes through GetOutput() — that is the call log.
+    {
+        std::ofstream out(dir / "life.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Start(self)\n"
+               "    Echo(\"start\")\n"
+               "    self.rotation = 100\n"
+               "    return 0\n"
+               "end function\n"
+               "function Update(self, dt)\n"
+               "    Echo(\"update\")\n"
+               "    self.x = self.x + 1\n"
+               "    return 0\n"
+               "end function\n"
+               "function OnDestroy(self)\n"
+               "    Echo(\"destroy\")\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &entity = scene.CreateEntity("Runner");
+    entity.script = ScriptComponent{"life.gs"};
+    const EntityId runnerId = entity.id;
+
+    PlaySession session;
+    std::string error;
+    const bool started = session.Start(scene, dir.generic_string(), &error);
+
+    // Start() runs before the first frame: the hook already wrote rotation and echoed.
+    INFO("play start error: " << error);
+    REQUIRE(started);
+    REQUIRE(session.GetLastError().empty());
+    REQUIRE(session.GetScriptCount() == 1);
+    REQUIRE(Catch::Approx(scene.FindEntity(runnerId)->transform.rotation) == 100.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(runnerId)->transform.x) == 0.0);
+
+    std::string log = session.GetOutput();
+    REQUIRE(CountOccurrences(log, "start") == 1);
+    REQUIRE(CountOccurrences(log, "update") == 0);
+
+    session.Tick(scene, 0.25f);
+    session.Tick(scene, 0.25f);
+
+    // Update ran on both frames, Start did not run again, and the frame delta still reaches it.
+    log = session.GetOutput();
+    REQUIRE(CountOccurrences(log, "start") == 1);
+    REQUIRE(CountOccurrences(log, "update") == 2);
+    REQUIRE(log.find("start") < log.find("update"));
+    REQUIRE(Catch::Approx(scene.FindEntity(runnerId)->transform.x) == 2.0);
+
+    session.Stop(scene);
+    REQUIRE_FALSE(session.IsRunning());
+
+    // Leaving play fires OnDestroy last and restores the snapshot the hooks wrote into.
+    log = session.GetOutput();
+    REQUIRE(CountOccurrences(log, "destroy") == 1);
+    REQUIRE(log.find("update") < log.find("destroy"));
+    REQUIRE(Catch::Approx(scene.FindEntity(runnerId)->transform.x) == 0.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(runnerId)->transform.rotation) == 0.0);
+
+    // Destroying a scripted entity mid-play runs OnDestroy for it, and only then removes it: the
+    // victim still ticks on the frame it was destroyed (removal is deferred to the end of the tick).
+    {
+        std::ofstream out(dir / "victim.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Start(self)\n"
+               "    Echo(\"victim-start\")\n"
+               "    return 0\n"
+               "end function\n"
+               "function Update(self, dt)\n"
+               "    Echo(\"victim-update\")\n"
+               "    return 0\n"
+               "end function\n"
+               "function OnDestroy(self)\n"
+               "    Echo(\"victim-destroy\")\n"
+               "    return 0\n"
+               "end function\n";
+    }
+    {
+        std::ofstream out(dir / "killer.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Scene\n"
+               "phase = 0\n"
+               "function Update(self, dt)\n"
+               "    phase = phase + 1\n"
+               "    if(phase = 2)\n"
+               "        self.rotation = Destroy(FindByName(\"Victim\"))\n"
+               "    end if\n"
+               "    return 0\n"
+               "end function\n"
+               "function OnDestroy(self)\n"
+               "    Echo(\"killer-destroy\")\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene arena;
+    Entity &victim = arena.CreateEntity("Victim");
+    victim.script = ScriptComponent{"victim.gs"};
+    const EntityId victimId = victim.id;
+    Entity &killer = arena.CreateEntity("Killer");
+    killer.script = ScriptComponent{"killer.gs"};
+    const EntityId killerId = killer.id;
+
+    PlaySession duel;
+    std::string duelError;
+    REQUIRE(duel.Start(arena, dir.generic_string(), &duelError));
+    INFO("duel start error: " << duelError);
+    REQUIRE(duel.GetScriptCount() == 2);
+
+    duel.Tick(arena, 0.0f);
+    REQUIRE(arena.HasEntity(victimId));
+    REQUIRE(CountOccurrences(duel.GetOutput(), "victim-update") == 1);
+
+    duel.Tick(arena, 0.0f);
+    REQUIRE_FALSE(arena.HasEntity(victimId));
+    REQUIRE(arena.HasEntity(killerId));
+    REQUIRE(Catch::Approx(arena.FindEntity(killerId)->transform.rotation) == 1.0);
+    REQUIRE(duel.GetScriptCount() == 1);
+    REQUIRE(duel.GetScriptedEntities() == std::vector<EntityId>{killerId});
+    // The victim was still ticked during the frame that destroyed it, and its hook ran afterwards.
+    REQUIRE(CountOccurrences(duel.GetOutput(), "victim-update") == 2);
+    REQUIRE(CountOccurrences(duel.GetOutput(), "victim-destroy") == 1);
+
+    duel.Stop(arena);
+    REQUIRE(CountOccurrences(duel.GetOutput(), "killer-destroy") == 1);
+    // Stop restores the snapshot, so the destroyed victim is back in the edited scene.
+    REQUIRE(arena.HasEntity(victimId));
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Scene GScript library finds, spawns, moves and destroys entities",
+          "[EditorCore][Play][Scene]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_scene_api_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    {
+        std::ofstream out(dir / "controller.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Scene\n"
+               "phase = 0\n"
+               "bullet = 0\n"
+               "function Start(self)\n"
+               "    self.rotation = FindByName(\"Target\")\n"
+               "    return 0\n"
+               "end function\n"
+               "function Update(self, dt)\n"
+               "    phase = phase + 1\n"
+               "    SetPos(2, GetX(2) + 10.0, GetY(2) + 5.0)\n"
+               "    self.x = GetX(2)\n"
+               "    self.y = GetY(2)\n"
+               "    if(GetName(2) = \"Target\")\n"
+               "        self.scaleX = 3\n"
+               "    end if\n"
+               "    if(phase = 2)\n"
+               "        bullet = Spawn(\"Bullet\", 300.0, 400.0)\n"
+               "        self.scaleY = bullet\n"
+               "    end if\n"
+               "    if(phase = 3)\n"
+               "        if(FindByName(\"Nowhere\") = 0)\n"
+               "            self.rotation = self.rotation + 10\n"
+               "        end if\n"
+               "        if(Destroy(999) = 0)\n"
+               "            self.rotation = self.rotation + 100\n"
+               "        end if\n"
+               "    end if\n"
+               "    if(phase = 4)\n"
+               "        SetVisible(2, 0)\n"
+               "    end if\n"
+               "    if(phase = 5)\n"
+               "        Destroy(bullet)\n"
+               "    end if\n"
+               "    return 0\n"
+               "end function\n";
+    }
+    {
+        // The spawned copy carries this script too, so Start/Update/OnDestroy of a dynamic entity
+        // are proven as well.
+        std::ofstream out(dir / "bullet.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Start(self)\n"
+               "    self.rotation = 7\n"
+               "    return 0\n"
+               "end function\n"
+               "function Update(self, dt)\n"
+               "    self.y = self.y + 1.0\n"
+               "    return 0\n"
+               "end function\n"
+               "function OnDestroy(self)\n"
+               "    Echo(\"bullet-destroy\")\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &player = scene.CreateEntity("Player");
+    player.script = ScriptComponent{"controller.gs"};
+    const EntityId playerId = player.id;
+
+    Entity &target = scene.CreateEntity("Target");
+    target.transform.x = 10.0f;
+    target.transform.y = 20.0f;
+    const EntityId targetId = target.id;
+
+    Entity &bulletTemplate = scene.CreateEntity("Bullet");
+    bulletTemplate.script = ScriptComponent{"bullet.gs"};
+    const EntityId templateId = bulletTemplate.id;
+
+    REQUIRE(playerId == 1);
+    REQUIRE(targetId == 2);
+    REQUIRE(templateId == 3);
+
+    PlaySession session;
+    std::string error;
+    const bool started = session.Start(scene, dir.generic_string(), &error);
+    INFO("play start error: " << error);
+    REQUIRE(started);
+    REQUIRE(session.GetLastError().empty());
+    REQUIRE(session.GetScriptCount() == 2);
+
+    // Start resolved the name to an id (rotation receives the float conversion of an Int result).
+    REQUIRE(Catch::Approx(scene.FindEntity(playerId)->transform.rotation) == double(targetId));
+    REQUIRE(Catch::Approx(scene.FindEntity(templateId)->transform.rotation) == 7.0);
+
+    const auto playerX = [&]() { return scene.FindEntity(playerId)->transform.x; };
+    const auto playerY = [&]() { return scene.FindEntity(playerId)->transform.y; };
+    const auto targetX = [&]() { return scene.FindEntity(targetId)->transform.x; };
+    const auto targetY = [&]() { return scene.FindEntity(targetId)->transform.y; };
+
+    // Frame 1: SetPos moved the target, and GetX/GetY read the new world position back.
+    session.Tick(scene, 0.0f);
+    INFO("script error: " << session.GetLastError());
+    REQUIRE(Catch::Approx(targetX()) == 20.0);
+    REQUIRE(Catch::Approx(targetY()) == 25.0);
+    REQUIRE(Catch::Approx(playerX()) == 20.0);
+    REQUIRE(Catch::Approx(playerY()) == 25.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(playerId)->transform.scaleX) == 3.0);
+    REQUIRE(scene.GetEntityCount() == 3);
+
+    // Frame 2: Spawn duplicated the Bullet template at the requested position; the copy gets a
+    // fresh id, keeps the template's script and had its Start hook run at the end of the tick.
+    session.Tick(scene, 0.0f);
+    INFO("script error: " << session.GetLastError());
+    REQUIRE(scene.GetEntityCount() == 4);
+    const EntityId bulletId = 4;
+    REQUIRE(scene.HasEntity(bulletId));
+    REQUIRE(Catch::Approx(scene.FindEntity(playerId)->transform.scaleY) == double(bulletId));
+    REQUIRE(Catch::Approx(scene.FindEntity(bulletId)->transform.x) == 300.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(bulletId)->transform.y) == 400.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(bulletId)->transform.rotation) == 7.0);
+    REQUIRE(session.GetScriptCount() == 3);
+
+    // Frame 3: unknown names and ids report 0 instead of failing, and the spawned copy ticks.
+    session.Tick(scene, 0.0f);
+    INFO("script error: " << session.GetLastError());
+    REQUIRE(Catch::Approx(scene.FindEntity(playerId)->transform.rotation) == double(targetId) + 110.0);
+    REQUIRE(Catch::Approx(scene.FindEntity(bulletId)->transform.y) == 401.0);
+    REQUIRE(Catch::Approx(targetX()) == 40.0);
+
+    // Frame 4: SetVisible hides the target without removing it.
+    session.Tick(scene, 0.0f);
+    REQUIRE_FALSE(scene.FindEntity(targetId)->visible);
+    REQUIRE(Catch::Approx(targetX()) == 50.0);
+
+    // Frame 5: Destroy is deferred, so it lands after every Update of the tick; the spawned copy
+    // runs OnDestroy and stops being a scripted entity.
+    session.Tick(scene, 0.0f);
+    INFO("script error: " << session.GetLastError());
+    REQUIRE_FALSE(scene.HasEntity(bulletId));
+    REQUIRE(scene.GetEntityCount() == 3);
+    REQUIRE(session.GetScriptCount() == 2);
+    REQUIRE(CountOccurrences(session.GetOutput(), "bullet-destroy") == 1);
+    REQUIRE(Catch::Approx(targetX()) == 60.0);
+    REQUIRE(Catch::Approx(targetY()) == 45.0);
+    REQUIRE(session.GetLastError().empty());
+
+    session.Stop(scene);
+    REQUIRE(scene.GetEntityCount() == 3);
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Scene camera calls move the SceneRuntime camera, SpawnPrefab instantiates a file",
+          "[EditorCore][Runtime][Scene]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_camera_api_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // A prefab file the script instantiates by relative path.
+    {
+        Scene blueprint;
+        Entity &drone = blueprint.CreateEntity("Drone");
+        drone.transform.x = 0.0f;
+        drone.transform.y = 0.0f;
+        std::string prefabError;
+        const bool saved = SceneSerializer::SavePrefabToFile(
+            blueprint, drone.id, (dir / "drone.gprefab.json").string(), &prefabError
+        );
+        INFO("prefab save error: " << prefabError);
+        REQUIRE(saved);
+    }
+
+    {
+        std::ofstream out(dir / "director.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Scene\n"
+               "phase = 0\n"
+               "drone = 0\n"
+               "function Start(self)\n"
+               "    SetCameraPos(100.0, 50.0)\n"
+               "    SetCameraZoom(2.0)\n"
+               "    return 0\n"
+               "end function\n"
+               "function Update(self, dt)\n"
+               "    phase = phase + 1\n"
+               "    if(phase = 1)\n"
+               "        drone = SpawnPrefab(\"drone.gprefab.json\", 40.0, 60.0)\n"
+               "        SetPos(drone, 70.0, 80.0)\n"
+               "        self.x = GetX(drone)\n"
+               "        self.y = GetY(drone)\n"
+               "    end if\n"
+               "    SetCameraPos(GetCameraX() + 1.0, GetCameraY() + 2.0)\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &director = scene.CreateEntity("Director");
+    director.script = ScriptComponent{"director.gs"};
+    const EntityId directorId = director.id;
+
+    SceneRuntime runtime;
+    std::string error;
+    REQUIRE(runtime.LoadFromScene(scene, dir.generic_string(), &error));
+    INFO("runtime load error: " << error);
+    REQUIRE(runtime.GetScriptCount() == 1);
+
+    // Start ran during load and already moved the runtime's own camera.
+    REQUIRE(Catch::Approx(runtime.GetCamera().panX) == 100.0);
+    REQUIRE(Catch::Approx(runtime.GetCamera().panY) == 50.0);
+    REQUIRE(Catch::Approx(runtime.GetCamera().zoom) == 2.0);
+
+    runtime.Update(0.0f);
+    INFO("script error: " << runtime.GetLastError());
+
+    // Camera settle: the Start position plus this frame's nudge, read back through GetCameraX/Y.
+    REQUIRE(Catch::Approx(runtime.GetCamera().panX) == 101.0);
+    REQUIRE(Catch::Approx(runtime.GetCamera().panY) == 52.0);
+    REQUIRE(Catch::Approx(runtime.GetCamera().zoom) == 2.0);
+
+    // SpawnPrefab created the prefab root; SetPos placed it and GetX/GetY read it back.
+    REQUIRE(runtime.GetScene().GetEntityCount() == 2);
+    const EntityId droneId = runtime.GetScene().FindEntityByName("Drone");
+    REQUIRE(droneId != InvalidEntityId);
+    REQUIRE(Catch::Approx(runtime.GetScene().GetWorldTransform(droneId).x) == 70.0);
+    REQUIRE(Catch::Approx(runtime.GetScene().GetWorldTransform(droneId).y) == 80.0);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(directorId)->transform.x) == 70.0);
+    REQUIRE(Catch::Approx(runtime.GetScene().FindEntity(directorId)->transform.y) == 80.0);
+
+    // A prefab path that does not exist reports 0 and leaves the scene alone.
+    REQUIRE(runtime.GetPlayedSounds().empty());
+    REQUIRE(runtime.GetLastError().empty());
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Audio GScript library records played sounds and no-ops without a device",
+          "[EditorCore][Play][Audio]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_audio_api_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir / "assets", ec);
+
+    // An empty file is enough: the point is the resolution + record path, not the decoding, which
+    // is skipped entirely when the machine running the tests has no audio device.
+    { std::ofstream out(dir / "assets" / "boom.wav", std::ios::binary); out << "not-a-real-wav"; }
+
+    {
+        std::ofstream out(dir / "sfx.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Audio\n"
+               "phase = 0\n"
+               "function Start(self)\n"
+               "    PlaySound(\"assets/boom.wav\")\n"
+               "    return 0\n"
+               "end function\n"
+               "function Update(self, dt)\n"
+               "    phase = phase + 1\n"
+               "    if(phase = 2)\n"
+               "        # A bare call is evaluated once; a call on the right side of a self.<member>\n"
+               "        # assignment is evaluated twice by GScript, so keep the result in a\n"
+               "        # script variable first.\n"
+               "        v = PlaySound(\"assets/missing.ogg\")\n"
+               "        self.rotation = v\n"
+               "    end if\n"
+               "    if(phase = 3)\n"
+               "        PlaySound(\"\")\n"
+               "    end if\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &speaker = scene.CreateEntity("Speaker");
+    speaker.script = ScriptComponent{"sfx.gs"};
+    const EntityId speakerId = speaker.id;
+
+    PlaySession session;
+    std::string error;
+    const bool started = session.Start(scene, dir.generic_string(), &error);
+    INFO("play start error: " << error);
+    REQUIRE(started);
+
+    // The Start hook's call is recorded with the path resolved against the scene directory.
+    REQUIRE(session.GetPlayedSounds().size() == 1);
+    REQUIRE(std::filesystem::path(session.GetPlayedSounds()[0]) == dir / "assets" / "boom.wav");
+
+    session.Tick(scene, 0.0f);
+    REQUIRE(session.GetPlayedSounds().size() == 1);
+
+    // A missing file cannot start playback, so the script sees 0 — but the call is still recorded.
+    session.Tick(scene, 0.0f);
+    INFO("script error: " << session.GetLastError());
+    REQUIRE(session.GetPlayedSounds().size() == 2);
+    REQUIRE(std::filesystem::path(session.GetPlayedSounds()[1]) == dir / "assets" / "missing.ogg");
+    REQUIRE(Catch::Approx(scene.FindEntity(speakerId)->transform.rotation) == 0.0);
+
+    // An empty path is ignored instead of resolving to the scene directory.
+    session.Tick(scene, 0.0f);
+    REQUIRE(session.GetPlayedSounds().size() == 2);
+
+    session.Stop(scene);
+    REQUIRE(session.GetPlayedSounds().empty());
+
+    std::filesystem::remove_all(dir, ec);
+}
+

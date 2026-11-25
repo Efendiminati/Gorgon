@@ -2,6 +2,7 @@
 
 #include "CollisionSystem.h"
 #include "InputState.h"
+#include "RuntimeCamera.h"
 #include "Scene.h"
 
 #include <Gorgon/Graphics/Layer.h>
@@ -11,20 +12,6 @@
 #include <vector>
 
 namespace Gorgon :: Editor {
-
-    /// Orthographic 2D camera used by SceneRuntime. `panX/panY` is the world position shown at
-    /// the centre of the viewport, `zoom` is viewport pixels per world unit.
-    struct RuntimeCamera {
-        float panX = 0.0f;
-        float panY = 0.0f;
-        float zoom = 1.0f;
-
-        Gorgon::Geometry::Pointf WorldToScreen(float wx, float wy, float viewW, float viewH) const;
-        Gorgon::Geometry::Pointf ScreenToWorld(float sx, float sy, float viewW, float viewH) const;
-
-        void CenterOn(float wx, float wy);
-        void Reset();
-    };
 
     /// Controls what SceneRuntime::Render draws. Colliders are debug wireframes, off by default.
     struct SceneRenderOptions {
@@ -68,6 +55,12 @@ namespace Gorgon :: Editor {
      * constants into the names the API expects, and GetCamera().ScreenToWorld() turns the mouse
      * pixel position into the world position the scripts read). Pressed/released are one-frame edge
      * flags: Update() consumes them.
+     *
+     * The rest of the script API matches play-in-editor: `function Start(self)` runs once before the
+     * first frame, `function OnDestroy(self)` runs when a script's entity is destroyed, `using Scene`
+     * gives lookup/spawn/destroy/camera access and `using Audio` gives PlaySound(). The session
+     * writes the camera through GetCamera(), so a script that calls SetCameraPos/SetCameraZoom moves
+     * what Render() draws without any extra wiring.
      */
     class SceneRuntime {
     public:
@@ -137,6 +130,10 @@ namespace Gorgon :: Editor {
 
         /// True when the last Update() reported an overlap between the two entities (either order).
         bool IsOverlapping(EntityId a, EntityId b) const;
+
+        /// Resolved paths the scripts passed to Audio::PlaySound() since the scripts started.
+        /// Recorded even when no audio device is available, so a headless run can verify the call.
+        const std::vector<std::string> &GetPlayedSounds() const;
 
         /// Number of sprite bitmaps successfully loaded so far.
         int GetLoadedSpriteCount() const;

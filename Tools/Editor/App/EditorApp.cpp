@@ -680,6 +680,17 @@ namespace Gorgon :: Editor {
         // The session consumed this frame's edges. Clearing the editor's copy keeps a press from
         // being delivered again on the next frame.
         playInput_.ClearEdges();
+
+        // A script that moved the camera during play moves the viewport with it; the editor only
+        // copies when a script asked for a change so a manual pan is never fought over.
+        if(play_.ConsumeCameraChange()) {
+            auto &camera = viewport_.GetCamera();
+            const auto &playCamera = play_.GetCamera();
+            camera.panX = playCamera.panX;
+            camera.panY = playCamera.panY;
+            camera.zoom = playCamera.zoom;
+        }
+
         viewport_.Redraw();
     }
 

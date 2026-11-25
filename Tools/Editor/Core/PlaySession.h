@@ -2,6 +2,7 @@
 
 #include "CollisionSystem.h"
 #include "InputState.h"
+#include "RuntimeCamera.h"
 #include "Scene.h"
 
 #include <memory>
@@ -28,16 +29,27 @@ namespace Gorgon :: Editor {
      * back into the scene. Stop() tears the VMs down and restores the exact pre-play snapshot, so
      * playing never dirties the scene.
      *
-     * Scripts are compiled against three libraries:
-     *   - EditorPlay: EntityTransform with writable x, y, rotation, scaleX, scaleY, plus
-     *     RegisterUpdate(handler), appended to the source by the runtime, so a script only has to
-     *     define `function Update(self, dt)`.
+     * Optional script entry points are registered the same way Update is: the runtime appends a
+     * registration line for each one the source defines.
+     *   - `function Start(self)` runs once, when the session starts or when the entity is spawned.
+     *   - `function Update(self, dt)` runs every frame.
+     *   - `function OnDestroy(self)` runs before the entity is destroyed and before Play stops.
+     *
+     * Scripts are compiled against these libraries:
+     *   - EditorPlay: EntityTransform with writable x, y, rotation, scaleX, scaleY, plus the
+     *     RegisterUpdate/RegisterStart/RegisterDestroy registration helpers.
      *   - Input (bring it in with `using Input`): IsKeyDown(name), IsKeyPressed(name),
      *     IsKeyReleased(name), IsMouseDown(button), MouseX() and MouseY(). The state they read is
      *     whatever was pushed into GetInput() before Tick(); pressed/released are edge flags that
      *     are cleared at the end of every Tick().
      *   - Physics (bring it in with `using Physics`): Overlaps(idA, idB), OverlapPoint(x, y) and
      *     IsOverlapping(id). They read the live collider shapes of the currently stepped scene.
+     *   - Scene (bring it in with `using Scene`): FindByName, Spawn, SpawnPrefab, Destroy,
+     *     GetX/GetY/SetPos/SetVisible/GetName and the camera setters/getters. Destroy is deferred to
+     *     the end of the tick, so a script may destroy entities (even itself) while it iterates.
+     *   - Audio (bring it in with `using Audio`): PlaySound(path) loads and plays a wav/ogg file
+     *     through Gorgon::Audio when a device is present, and records the path either way so a
+     *     headless test can still verify the call.
      *
      * Collision runs after the scripts of a frame have moved their entities, so a script never
      * sees a stale shape in the same frame it moved into one. Entities whose collider is not a
@@ -59,7 +71,9 @@ namespace Gorgon :: Editor {
         bool Start(Scene &scene, const std::string &baseDir, std::string *outError = nullptr);
 
         /// Advances all running scripts by dt seconds. dt is clamped to [0, 0.25].
-        /// Pressed/released edge flags of GetInput() are cleared at the end of the call.
+        /// Pressed/released edge flags of GetInput() are cleared at the end of the call. Scripts of
+        /// entities spawned during the tick get their Start hook here; entities destroyed during
+        /// the tick are removed after every Update ran, so no iteration is invalidated.
         void Tick(Scene &scene, float dt);
 
         /// Keyboard/mouse state play scripts read through `using Input`. Push the current frame's
@@ -67,7 +81,25 @@ namespace Gorgon :: Editor {
         InputState &GetInput();
         const InputState &GetInput() const;
 
-        /// Stops the session and restores the pre-play snapshot. Safe to call repeatedly.
+        /**
+         * Camera state `using Scene` scripts read and write through SetCameraPos/SetCameraZoom/
+         * GetCameraX/GetCameraY. It defaults to a camera owned by the session; a host that renders
+         * the scene (SceneRuntime, the editor viewport) points it at its own camera with SetCamera()
+         * so a script's camera move shows up in the next Render().
+         */
+        RuntimeCamera &GetCamera();
+        const RuntimeCamera &GetCamera() const;
+
+        /// Redirects the camera the scripts read and write. Pass nullptr to go back to the
+        /// session's own camera. The camera is not part of the scene snapshot and survives Stop().
+        void SetCamera(RuntimeCamera *camera);
+
+        /// True when a script changed the camera since the last call; reading it clears the flag.
+        /// A host uses it to copy the session camera into its viewport only when a script moved it.
+        bool ConsumeCameraChange();
+
+        /// Stops the session (firing every remaining OnDestroy hook) and restores the pre-play
+        /// snapshot. Safe to call repeatedly.
         void Stop(Scene &scene);
 
         bool IsRunning() const;
@@ -84,6 +116,10 @@ namespace Gorgon :: Editor {
 
         /// True when the last Tick() reported an overlap between the two entities (either order).
         bool IsOverlapping(EntityId a, EntityId b) const;
+
+        /// Resolved paths passed to Audio::PlaySound(), in call order. Recorded whether or not an
+        /// audio device was available, which is what makes the audio hook testable headlessly.
+        const std::vector<std::string> &GetPlayedSounds() const;
 
         /// Last error produced while starting or ticking ("" when none).
         const std::string &GetLastError() const;
