@@ -1,6 +1,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/catch_approx.hpp>
 
+#include "Core/CollisionSystem.h"
 #include "Core/CommandStack.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
@@ -590,8 +591,9 @@ TEST_CASE("Play session Input library drives an entity from simulated keys and m
 
     PlaySession session;
     std::string error;
-    REQUIRE(session.Start(scene, dir.generic_string(), &error));
+    const bool started = session.Start(scene, dir.generic_string(), &error);
     INFO("play start error: " << error);
+    REQUIRE(started);
     REQUIRE(session.GetScriptCount() == 1);
 
     const auto posX = [&]() { return scene.FindEntity(id)->transform.x; };
@@ -1083,3 +1085,613 @@ TEST_CASE("Scene round-trip preserves prefabSource and prefab instances survive 
 
     std::filesystem::remove_all(dir, ec);
 }
+
+TEST_CASE("Collision shapes follow the world transform and overlap in every combination",
+          "[EditorCore][Collision]") {
+    Scene scene;
+
+    Entity &box = scene.CreateEntity("Box");
+    box.transform.x = 100.0f;
+    box.transform.y = 50.0f;
+    ColliderComponent boxCollider;
+    boxCollider.type = ColliderType::AABB;
+    boxCollider.width = 40.0f;
+    boxCollider.height = 20.0f;
+    box.collider = boxCollider;
+    const EntityId boxId = box.id;
+
+    Entity &circle = scene.CreateEntity("Circle");
+    circle.transform.x = 130.0f;
+    circle.transform.y = 50.0f;
+    ColliderComponent circleCollider;
+    circleCollider.type = ColliderType::Circle;
+    circleCollider.radius = 15.0f;
+    circle.collider = circleCollider;
+    const EntityId circleId = circle.id;
+
+    CollisionShape boxShape;
+    CollisionShape circleShape;
+    REQUIRE(CollisionSystem::ComputeShape(scene, boxId, boxShape));
+    REQUIRE(boxShape.kind == CollisionShape::Kind::Box);
+    REQUIRE(Catch::Approx(boxShape.centerX) == 100.0);
+    REQUIRE(Catch::Approx(boxShape.centerY) == 50.0);
+    REQUIRE(Catch::Approx(boxShape.halfWidth) == 20.0);
+    REQUIRE(Catch::Approx(boxShape.halfHeight) == 10.0);
+
+    REQUIRE(CollisionSystem::ComputeShape(scene, circleId, circleShape));
+    REQUIRE(circleShape.kind == CollisionShape::Kind::Circle);
+    REQUIRE(Catch::Approx(circleShape.radius) == 15.0);
+
+    // ---- AABB / AABB -------------------------------------------------------
+    {
+        Entity &other = scene.CreateEntity("OtherBox");
+        other.transform.x = 130.0f;
+        other.transform.y = 50.0f;
+        ColliderComponent comp;
+        comp.type = ColliderType::AABB;
+        comp.width = 40.0f;
+        comp.height = 20.0f;
+        other.collider = comp;
+
+        // Make the circle a no-op for this check by moving it far away first.
+        scene.FindEntity(circleId)->transform.x = 10000.0f;
+
+        CollisionShape a, b;
+        REQUIRE(CollisionSystem::ComputeShape(scene, boxId, a));
+        REQUIRE(CollisionSystem::ComputeShape(scene, other.id, b));
+        REQUIRE(CollisionSystem::Overlaps(a, b));
+
+        const auto hit = CollisionSystem::ComputeOverlap(a, b);
+        REQUIRE(hit.overlaps);
+        // x overlap 10 (80..120 vs 110..150) is smaller than the y overlap 20, so x separates.
+        REQUIRE(Catch::Approx(hit.depth) == 10.0);
+        REQUIRE(Catch::Approx(hit.normalX) == -1.0);
+        REQUIRE(Catch::Approx(hit.normalY) == 0.0);
+
+        // Exactly touching is not an overlap.
+        other.transform.x = 140.0f;
+        REQUIRE(CollisionSystem::ComputeShape(scene, other.id, b));
+        REQUIRE_FALSE(CollisionSystem::Overlaps(a, b));
+
+        scene.RemoveEntity(other.id);
+        scene.FindEntity(circleId)->transform.x = 130.0f;
+    }
+
+    // ---- AABB / circle -----------------------------------------------------
+    REQUIRE(CollisionSystem::ComputeShape(scene, boxId, boxShape));
+    REQUIRE(CollisionSystem::ComputeShape(scene, circleId, circleShape));
+    REQUIRE(CollisionSystem::Overlaps(boxShape, circleShape));
+    {
+        const auto hit = CollisionSystem::ComputeOverlap(boxShape, circleShape);
+        REQUIRE(hit.overlaps);
+        // Closest box point to the circle centre is (120, 50): 10 away, radius 15 -> depth 5.
+        REQUIRE(Catch::Approx(hit.depth) == 5.0);
+        REQUIRE(Catch::Approx(hit.normalX) == -1.0);
+        REQUIRE(Catch::Approx(hit.normalY) == 0.0);
+
+        // The mirrored argument order reports the opposite normal for the same penetration.
+        const auto mirrored = CollisionSystem::ComputeOverlap(circleShape, boxShape);
+        REQUIRE(mirrored.overlaps);
+        REQUIRE(Catch::Approx(mirrored.depth) == 5.0);
+        REQUIRE(Catch::Approx(mirrored.normalX) == 1.0);
+
+        // A circle whose centre sits inside the box leaves through the nearest face.
+        scene.FindEntity(circleId)->transform.x = 108.0f;
+        CollisionShape inside;
+        REQUIRE(CollisionSystem::ComputeShape(scene, circleId, inside));
+        const auto insideHit = CollisionSystem::ComputeOverlap(boxShape, inside);
+        REQUIRE(insideHit.overlaps);
+        // Nearest face is the box's top edge, 10 away -> box travels down by 10 + radius.
+        REQUIRE(Catch::Approx(insideHit.depth) == 25.0);
+        REQUIRE(Catch::Approx(insideHit.normalX) == 0.0);
+        REQUIRE(Catch::Approx(insideHit.normalY) == 1.0);
+
+        scene.FindEntity(circleId)->transform.x = 200.0f;
+        REQUIRE(CollisionSystem::ComputeShape(scene, circleId, circleShape));
+        REQUIRE_FALSE(CollisionSystem::Overlaps(boxShape, circleShape));
+    }
+
+    // ---- circle / circle ---------------------------------------------------
+    {
+        Entity &a = scene.CreateEntity("CircleA");
+        a.transform.x = 0.0f;
+        ColliderComponent comp;
+        comp.type = ColliderType::Circle;
+        comp.radius = 10.0f;
+        a.collider = comp;
+        const EntityId aId = a.id;
+
+        Entity &b = scene.CreateEntity("CircleB");
+        b.transform.x = 15.0f;
+        ColliderComponent compB;
+        compB.type = ColliderType::Circle;
+        compB.radius = 10.0f;
+        b.collider = compB;
+        const EntityId bId = b.id;
+
+        CollisionShape sa, sb;
+        REQUIRE(CollisionSystem::ComputeShape(scene, aId, sa));
+        REQUIRE(CollisionSystem::ComputeShape(scene, bId, sb));
+        REQUIRE(CollisionSystem::Overlaps(sa, sb));
+
+        const auto hit = CollisionSystem::ComputeOverlap(sa, sb);
+        REQUIRE(hit.overlaps);
+        REQUIRE(Catch::Approx(hit.depth) == 5.0);
+        REQUIRE(Catch::Approx(hit.normalX) == -1.0);
+
+        b.transform.x = 25.0f;
+        REQUIRE(CollisionSystem::ComputeShape(scene, bId, sb));
+        REQUIRE_FALSE(CollisionSystem::Overlaps(sa, sb));
+    }
+
+    // ---- world transform: scale, rotation and offset ------------------------
+    {
+        Entity &parent = scene.CreateEntity("Parent");
+        parent.transform.x = 500.0f;
+        parent.transform.scaleX = 2.0f;
+        parent.transform.scaleY = 2.0f;
+
+        Entity &child = scene.CreateEntity("Child", parent.id);
+        child.transform.x = 10.0f;
+        child.transform.y = 5.0f;
+        ColliderComponent comp;
+        comp.type = ColliderType::AABB;
+        comp.width = 20.0f;
+        comp.height = 10.0f;
+        // 8 on x and 4 on y in world units, both rotated by 90 degrees.
+        comp.offsetX = 4.0f;
+        comp.offsetY = 2.0f;
+        child.collider = comp;
+        child.transform.rotation = 90.0f;
+
+        CollisionShape shape;
+        REQUIRE(CollisionSystem::ComputeShape(scene, child.id, shape));
+        // World position of the child is (520, 10); the offset swings to (-4, +8).
+        REQUIRE(Catch::Approx(shape.centerX) == 516.0);
+        REQUIRE(Catch::Approx(shape.centerY) == 18.0);
+        // Half extents are scaled by the parent's world scale.
+        REQUIRE(Catch::Approx(shape.halfWidth) == 20.0);
+        REQUIRE(Catch::Approx(shape.halfHeight) == 10.0);
+
+        REQUIRE(CollisionSystem::ContainsPoint(shape, 516.0f, 18.0f));
+        REQUIRE(CollisionSystem::ContainsPoint(shape, 535.0f, 18.0f));   // on the edge
+        REQUIRE_FALSE(CollisionSystem::ContainsPoint(shape, 537.0f, 18.0f));
+    }
+
+    // Entities without a usable collider produce no shape at all.
+    Entity &bare = scene.CreateEntity("Bare");
+    CollisionShape unused;
+    REQUIRE_FALSE(CollisionSystem::ComputeShape(scene, bare.id, unused));
+    bare.collider = ColliderComponent{};   // type None
+    REQUIRE_FALSE(CollisionSystem::ComputeShape(scene, bare.id, unused));
+    REQUIRE_FALSE(CollisionSystem::ComputeShape(scene, 9999u, unused));
+}
+
+TEST_CASE("Play session separates solid colliders along the minimum translation vector",
+          "[EditorCore][Collision][Play]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_collision_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    // A play session needs at least one script; this one never touches the transform.
+    {
+        std::ofstream out(dir / "idle.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "function Update(self, dt)\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    auto makeBox = [](Entity &entity, float x, float y) {
+        ColliderComponent comp;
+        comp.type = ColliderType::AABB;
+        comp.width = 40.0f;
+        comp.height = 40.0f;
+        entity.transform.x = x;
+        entity.transform.y = y;
+        entity.collider = comp;
+    };
+
+    Scene scene;
+    Entity &dynamicBox = scene.CreateEntity("Dynamic");
+    makeBox(dynamicBox, 0.0f, 0.0f);
+    dynamicBox.script = ScriptComponent{"idle.gs"};
+    const EntityId dynamicId = dynamicBox.id;
+
+    Entity &otherBox = scene.CreateEntity("Other");
+    makeBox(otherBox, 30.0f, 0.0f);
+    const EntityId otherId = otherBox.id;
+
+    PlaySession session;
+    std::string error;
+    const bool started = session.Start(scene, dir.generic_string(), &error);
+    INFO("play start error: " << error);
+    REQUIRE(started);
+    REQUIRE(session.GetScriptCount() == 1);
+
+    const auto xOf = [&](EntityId id) { return scene.FindEntity(id)->transform.x; };
+    const auto yOf = [&](EntityId id) { return scene.FindEntity(id)->transform.y; };
+
+    // Two dynamic solids overlap by 10 on x: each travels half of it, away from the other.
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(xOf(dynamicId)) == -5.0);
+    REQUIRE(Catch::Approx(xOf(otherId)) == 35.0);
+    REQUIRE(session.GetActiveOverlaps().size() == 1);
+    REQUIRE(session.IsOverlapping(dynamicId, otherId));
+    REQUIRE(session.IsOverlapping(otherId, dynamicId));
+    REQUIRE_FALSE(session.GetActiveOverlaps().front().trigger);
+
+    // Separated now: another tick does not move anything.
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(xOf(dynamicId)) == -5.0);
+    REQUIRE(Catch::Approx(xOf(otherId)) == 35.0);
+    REQUIRE(session.GetActiveOverlaps().empty());
+
+    // A static body never moves: the dynamic one takes the whole translation vector.
+    scene.FindEntity(dynamicId)->transform.x = 0.0f;
+    scene.FindEntity(otherId)->transform.x = 30.0f;
+    scene.FindEntity(otherId)->collider->isStatic = true;
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(xOf(dynamicId)) == -10.0);
+    REQUIRE(Catch::Approx(xOf(otherId)) == 30.0);
+
+    // Two static bodies report the overlap but cannot resolve it.
+    scene.FindEntity(dynamicId)->transform.x = 0.0f;
+    scene.FindEntity(dynamicId)->collider->isStatic = true;
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(xOf(dynamicId)) == 0.0);
+    REQUIRE(Catch::Approx(xOf(otherId)) == 30.0);
+    REQUIRE(session.IsOverlapping(dynamicId, otherId));
+
+    // A trigger volume reports the overlap without pushing anything, even when both are dynamic.
+    scene.FindEntity(dynamicId)->collider->isStatic = false;
+    scene.FindEntity(otherId)->collider->isStatic = false;
+    scene.FindEntity(otherId)->collider->isTrigger = true;
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(xOf(dynamicId)) == 0.0);
+    REQUIRE(Catch::Approx(xOf(otherId)) == 30.0);
+    REQUIRE(session.GetActiveOverlaps().size() == 1);
+    REQUIRE(session.GetActiveOverlaps().front().trigger);
+
+    // Vertical overlap pushes up, not sideways.
+    scene.FindEntity(otherId)->collider->isTrigger = false;
+    scene.FindEntity(otherId)->transform.x = 0.0f;
+    scene.FindEntity(otherId)->transform.y = 25.0f;
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(xOf(dynamicId)) == 0.0);
+    // 40 tall each, 25 apart -> 15 of y penetration, halved between two dynamic bodies.
+    REQUIRE(Catch::Approx(yOf(dynamicId)) == -7.5);
+    REQUIRE(Catch::Approx(yOf(otherId)) == 32.5);
+
+    // Stop restores the snapshot, so collision pushes never dirty the scene.
+    session.Stop(scene);
+    REQUIRE(Catch::Approx(xOf(dynamicId)) == 0.0);
+    REQUIRE(Catch::Approx(xOf(otherId)) == 30.0);
+    REQUIRE(session.GetActiveOverlaps().empty());
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Play session fires collision and trigger enter/exit hooks with the other entity id",
+          "[EditorCore][Collision][Play]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_collision_hooks_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    {
+        std::ofstream out(dir / "hooks.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out <<                "function Update(self, dt)\n"
+
+               "    return 0\n"
+
+               "end function\n"
+
+               "\n"
+
+               "# The hooks log themselves into the rotation, which never moves a collider: an AABB stays\n"
+
+               "# axis aligned and its offset is zero, so the overlap set only changes when the test moves\n"
+
+               "# another entity. The trigger hook adds the other id, the solid hook adds 100x the other id.\n"
+
+               "function OnCollisionEnter(self, otherId)\n"
+
+               "    self.rotation = self.rotation + otherId * 100\n"
+
+               "    return 0\n"
+
+               "end function\n"
+
+               "\n"
+
+               "function OnCollisionExit(self, otherId)\n"
+
+               "    self.rotation = self.rotation + 2000\n"
+
+               "    return 0\n"
+
+               "end function\n"
+
+               "\n"
+
+               "function OnTriggerEnter(self, otherId)\n"
+
+               "    self.rotation = self.rotation + otherId\n"
+
+               "    return 0\n"
+
+               "end function\n"
+
+               "\n"
+
+               "function OnTriggerExit(self, otherId)\n"
+
+               "    self.rotation = self.rotation + 20\n"
+
+               "    return 0\n"
+
+               "end function\n";
+    }
+
+    auto makeBox = [](Entity &entity, float x, float y) {
+        ColliderComponent comp;
+        comp.type = ColliderType::AABB;
+        comp.width = 40.0f;
+        comp.height = 40.0f;
+        entity.transform.x = x;
+        entity.transform.y = y;
+        entity.collider = comp;
+    };
+
+    Scene scene;
+    Entity &player = scene.CreateEntity("Player");
+    makeBox(player, 0.0f, 0.0f);
+    // Static, so the solver never moves it: only a hook can change its numbers.
+    player.collider->isStatic = true;
+    player.script = ScriptComponent{"hooks.gs"};
+    const EntityId playerId = player.id;
+
+    Entity &volume = scene.CreateEntity("Volume");
+    makeBox(volume, 300.0f, 0.0f);
+    volume.collider->isTrigger = true;
+    const EntityId volumeId = volume.id;
+
+    Entity &wall = scene.CreateEntity("Wall");
+    makeBox(wall, 600.0f, 0.0f);
+    wall.collider->isStatic = true;
+    const EntityId wallId = wall.id;
+
+    REQUIRE(playerId == 1);
+    REQUIRE(volumeId == 2);
+    REQUIRE(wallId == 3);
+
+    PlaySession session;
+    std::string error;
+    const bool started = session.Start(scene, dir.generic_string(), &error);
+    INFO("play start error: " << error);
+    REQUIRE(started);
+    REQUIRE(session.GetScriptCount() == 1);
+
+    const auto xOf = [&]() { return scene.FindEntity(playerId)->transform.x; };
+    const auto rotationOf = [&]() { return scene.FindEntity(playerId)->transform.rotation; };
+
+    // Nothing overlapping yet: no hook of any kind fired.
+    session.Tick(scene, 0.0f);
+    REQUIRE(session.GetActiveOverlaps().empty());
+    REQUIRE(Catch::Approx(rotationOf()) == 0.0);
+
+    // Moving into the trigger fires OnTriggerEnter only, with the trigger's id.
+    scene.FindEntity(volumeId)->transform.x = 10.0f;
+    session.Tick(scene, 0.0f);
+    INFO("hook error after trigger enter: " << session.GetLastError());
+    REQUIRE(session.GetActiveOverlaps().size() == 1);
+    REQUIRE(session.GetActiveOverlaps().front().trigger);
+    REQUIRE(Catch::Approx(rotationOf()) == 2.0);
+    REQUIRE(Catch::Approx(xOf()) == 0.0);
+
+    // Staying inside does not repeat the enter, and no collision enter fired for the pair.
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(rotationOf()) == 2.0);
+
+    // Leaving fires OnTriggerExit (300 is clear of both the player and the wall).
+    scene.FindEntity(volumeId)->transform.x = 300.0f;
+    session.Tick(scene, 0.0f);
+    REQUIRE(session.GetActiveOverlaps().empty());
+    REQUIRE(Catch::Approx(rotationOf()) == 22.0);
+
+    // A solid pair reports through OnCollisionEnter/Exit instead of the trigger hooks.
+    scene.FindEntity(wallId)->transform.x = 10.0f;
+    session.Tick(scene, 0.0f);
+    REQUIRE(session.GetActiveOverlaps().size() == 1);
+    REQUIRE_FALSE(session.GetActiveOverlaps().front().trigger);
+    REQUIRE(Catch::Approx(rotationOf()) == 322.0);
+    REQUIRE(Catch::Approx(xOf()) == 0.0);
+
+    scene.FindEntity(wallId)->transform.x = 900.0f;
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(rotationOf()) == 2322.0);
+    REQUIRE(session.GetActiveOverlaps().empty());
+
+    // A fresh overlap after an exit fires enter again, still with the wall's id.
+    scene.FindEntity(wallId)->transform.x = 12.0f;
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(rotationOf()) == 2622.0);
+
+    REQUIRE(session.GetLastError().empty());
+
+    // Stop clears the overlap set along with the runtime.
+    session.Stop(scene);
+    REQUIRE(session.GetActiveOverlaps().empty());
+    REQUIRE(Catch::Approx(rotationOf()) == 0.0);
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Physics GScript library answers overlap, point and active-pair queries",
+          "[EditorCore][Collision][Play]") {
+    const auto dir = std::filesystem::temp_directory_path() / "gorgon_editor_physics_api_test";
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+    std::filesystem::create_directories(dir, ec);
+
+    {
+        std::ofstream out(dir / "queries.gs", std::ios::binary | std::ios::trunc);
+        REQUIRE(out.good());
+        out << "using Physics\n"
+               "function Update(self, dt)\n"
+               "    if(Overlaps(1, 2))\n"
+               "        self.x = self.x + 1\n"
+               "    end if\n"
+               "    if(IsOverlapping(1))\n"
+               "        self.y = self.y + 1\n"
+               "    end if\n"
+               "    self.rotation = self.rotation + OverlapPoint(0, 0)\n"
+               "    if(Overlaps(1, 3))\n"
+               "        self.scaleX = 2\n"
+               "    end if\n"
+               "    if(Overlaps(1, 999))\n"
+               "        self.scaleY = 2\n"
+               "    end if\n"
+               "    self.scaleY = self.scaleY + OverlapPoint(5000, 5000)\n"
+               "    return 0\n"
+               "end function\n";
+    }
+
+    Scene scene;
+    Entity &player = scene.CreateEntity("Player");
+    player.transform.x = 0.0f;
+    player.transform.y = 0.0f;
+    ColliderComponent playerCollider;
+    playerCollider.type = ColliderType::AABB;
+    playerCollider.width = 40.0f;
+    playerCollider.height = 40.0f;
+    player.collider = playerCollider;
+    player.script = ScriptComponent{"queries.gs"};
+    const EntityId playerId = player.id;
+
+    Entity &volume = scene.CreateEntity("Volume");
+    volume.transform.x = 30.0f;
+    ColliderComponent volumeCollider;
+    volumeCollider.type = ColliderType::AABB;
+    volumeCollider.width = 40.0f;
+    volumeCollider.height = 40.0f;
+    volumeCollider.isTrigger = true;
+    volume.collider = volumeCollider;
+    const EntityId volumeId = volume.id;
+
+    Entity &farAway = scene.CreateEntity("FarAway");
+    farAway.transform.x = 1000.0f;
+    ColliderComponent farCollider;
+    farCollider.type = ColliderType::Circle;
+    farCollider.radius = 10.0f;
+    farAway.collider = farCollider;
+    const EntityId farId = farAway.id;
+
+    REQUIRE(playerId == 1);
+    REQUIRE(volumeId == 2);
+    REQUIRE(farId == 3);
+
+    PlaySession session;
+    std::string error;
+    const bool started = session.Start(scene, dir.generic_string(), &error);
+    INFO("play start error: " << error);
+    REQUIRE(started);
+    REQUIRE(session.GetScriptCount() == 1);
+
+    auto entity = [&]() { return scene.FindEntity(playerId); };
+
+    // First tick: the live Overlaps query already sees the overlap, IsOverlapping has no previous
+    // pass to read yet, OverlapPoint resolves the AABB under the origin to the player.
+    session.Tick(scene, 0.0f);
+    INFO("script error: " << session.GetLastError());
+    REQUIRE(Catch::Approx(entity()->transform.x) == 1.0);
+    REQUIRE(Catch::Approx(entity()->transform.y) == 0.0);
+    REQUIRE(Catch::Approx(entity()->transform.rotation) == 1.0);
+    REQUIRE(Catch::Approx(entity()->transform.scaleX) == 1.0);
+    // Overlaps(1, 3) and Overlaps(1, 999) found nothing, so neither branch ran, and the far point
+    // query returned 0 (adding it left scaleY untouched).
+    REQUIRE(Catch::Approx(entity()->transform.scaleX) == 1.0);
+    REQUIRE(Catch::Approx(entity()->transform.scaleY) == 1.0);
+
+    // Second tick: the pair recorded by the previous pass makes IsOverlapping report 1.
+    session.Tick(scene, 0.0f);
+    INFO("script error: " << session.GetLastError());
+    REQUIRE(Catch::Approx(entity()->transform.x) == 2.0);
+    REQUIRE(Catch::Approx(entity()->transform.y) == 1.0);
+    REQUIRE(Catch::Approx(entity()->transform.rotation) == 2.0);
+
+    // Pulling the trigger volume away stops the live overlap; x freezes while rotation keeps
+    // tracking the point query.
+    scene.FindEntity(volumeId)->transform.x = 800.0f;
+    session.Tick(scene, 0.0f);
+    REQUIRE(Catch::Approx(entity()->transform.x) == 2.0);
+    REQUIRE(Catch::Approx(entity()->transform.rotation) == 3.0);
+    REQUIRE(session.GetActiveOverlaps().empty());
+
+    REQUIRE(session.GetLastError().empty());
+
+    session.Stop(scene);
+
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("Collider trigger and static flags survive a JSON round-trip", "[EditorCore][Collision][JSON]") {
+    Scene scene;
+
+    Entity &volume = scene.CreateEntity("Volume");
+    ColliderComponent trigger;
+    trigger.type = ColliderType::AABB;
+    trigger.width = 64.0f;
+    trigger.height = 64.0f;
+    trigger.isTrigger = true;
+    volume.collider = trigger;
+    const EntityId volumeId = volume.id;
+
+    Entity &floor = scene.CreateEntity("Floor");
+    ColliderComponent solid;
+    solid.type = ColliderType::AABB;
+    solid.width = 256.0f;
+    solid.height = 32.0f;
+    solid.isStatic = true;
+    floor.collider = solid;
+    const EntityId floorId = floor.id;
+
+    const std::string json = SceneSerializer::ToJsonString(scene);
+    REQUIRE(json.find("\"isTrigger\": true") != std::string::npos);
+    REQUIRE(json.find("\"isStatic\": true") != std::string::npos);
+
+    Scene loaded;
+    std::string error;
+    const bool loadedOk = SceneSerializer::FromJsonString(json, loaded, &error);
+    INFO("load error: " << error);
+    REQUIRE(loadedOk);
+    REQUIRE(loaded == scene);
+    REQUIRE(loaded.FindEntity(volumeId)->collider->isTrigger);
+    REQUIRE_FALSE(loaded.FindEntity(volumeId)->collider->isStatic);
+    REQUIRE(loaded.FindEntity(floorId)->collider->isStatic);
+    REQUIRE_FALSE(loaded.FindEntity(floorId)->collider->isTrigger);
+
+    // A payload without the new keys (an older scene file) loads with both flags off, and a collider
+    // that uses neither keeps writing the same JSON it always did.
+    Scene plain;
+    Entity &plainEntity = plain.CreateEntity("Plain");
+    ColliderComponent plainCollider;
+    plainCollider.type = ColliderType::Circle;
+    plainCollider.radius = 12.0f;
+    plainEntity.collider = plainCollider;
+    const EntityId plainId = plainEntity.id;
+
+    const std::string plainJson = SceneSerializer::ToJsonString(plain);
+    REQUIRE(plainJson.find("isTrigger") == std::string::npos);
+    REQUIRE(plainJson.find("isStatic") == std::string::npos);
+
+    Scene reloaded;
+    REQUIRE(SceneSerializer::FromJsonString(plainJson, reloaded, &error));
+    REQUIRE(reloaded.FindEntity(plainId)->collider.has_value());
+    REQUIRE_FALSE(reloaded.FindEntity(plainId)->collider->isTrigger);
+    REQUIRE_FALSE(reloaded.FindEntity(plainId)->collider->isStatic);
+}
+

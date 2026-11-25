@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CollisionSystem.h"
 #include "InputState.h"
 #include "Scene.h"
 
@@ -27,7 +28,7 @@ namespace Gorgon :: Editor {
      * back into the scene. Stop() tears the VMs down and restores the exact pre-play snapshot, so
      * playing never dirties the scene.
      *
-     * Scripts are compiled against two libraries:
+     * Scripts are compiled against three libraries:
      *   - EditorPlay: EntityTransform with writable x, y, rotation, scaleX, scaleY, plus
      *     RegisterUpdate(handler), appended to the source by the runtime, so a script only has to
      *     define `function Update(self, dt)`.
@@ -35,6 +36,15 @@ namespace Gorgon :: Editor {
      *     IsKeyReleased(name), IsMouseDown(button), MouseX() and MouseY(). The state they read is
      *     whatever was pushed into GetInput() before Tick(); pressed/released are edge flags that
      *     are cleared at the end of every Tick().
+     *   - Physics (bring it in with `using Physics`): Overlaps(idA, idB), OverlapPoint(x, y) and
+     *     IsOverlapping(id). They read the live collider shapes of the currently stepped scene.
+     *
+     * Collision runs after the scripts of a frame have moved their entities, so a script never
+     * sees a stale shape in the same frame it moved into one. Entities whose collider is not a
+     * trigger and not static are pushed apart along the minimum translation vector; overlapping
+     * pairs are diffed frame to frame and reported to the scripts through the optional hooks
+     * OnCollisionEnter/OnCollisionExit(self, otherId) and, when either collider is a trigger,
+     * OnTriggerEnter/OnTriggerExit(self, otherId).
      */
     class PlaySession {
     public:
@@ -67,6 +77,13 @@ namespace Gorgon :: Editor {
 
         /// Entity ids currently driven by a script, in scene order.
         std::vector<EntityId> GetScriptedEntities() const;
+
+        /// Overlapping collider pairs detected by the last Tick(). Cleared whenever the session
+        /// starts or stops. `trigger` is true when either collider of the pair is a trigger.
+        const std::vector<CollisionPair> &GetActiveOverlaps() const;
+
+        /// True when the last Tick() reported an overlap between the two entities (either order).
+        bool IsOverlapping(EntityId a, EntityId b) const;
 
         /// Last error produced while starting or ticking ("" when none).
         const std::string &GetLastError() const;

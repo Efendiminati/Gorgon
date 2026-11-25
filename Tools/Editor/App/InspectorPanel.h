@@ -174,6 +174,8 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Numberbox colliderRadius_;
         Gorgon::Widgets::Label     lblColliderOffset_{"Offset"};
         Gorgon::Widgets::Pointfbox colliderOffset_;
+        Gorgon::Widgets::Checkbox  chkColliderTrigger_{"Trigger", false};
+        Gorgon::Widgets::Checkbox  chkColliderStatic_{"Static", false};
         Gorgon::Widgets::Button    btnAddCollider_{"+ Add Collider"};
         Gorgon::Widgets::Button    btnRemoveCollider_{"- Remove Collider"};
 

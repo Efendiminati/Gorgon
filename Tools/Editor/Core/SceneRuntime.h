@@ -1,5 +1,6 @@
 #pragma once
 
+#include "CollisionSystem.h"
 #include "InputState.h"
 #include "Scene.h"
 
@@ -7,6 +8,7 @@
 
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace Gorgon :: Editor {
 
@@ -128,6 +130,13 @@ namespace Gorgon :: Editor {
 
         /// Number of entity scripts that compiled and are being ticked.
         int GetScriptCount() const;
+
+        /// Overlapping collider pairs from the last Update(). Empty while no scripts run, because a
+        /// scriptless scene has no play session to resolve collisions in.
+        const std::vector<CollisionPair> &GetActiveOverlaps() const;
+
+        /// True when the last Update() reported an overlap between the two entities (either order).
+        bool IsOverlapping(EntityId a, EntityId b) const;
 
         /// Number of sprite bitmaps successfully loaded so far.
         int GetLoadedSpriteCount() const;

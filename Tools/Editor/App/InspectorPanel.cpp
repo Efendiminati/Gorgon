@@ -96,6 +96,8 @@ namespace Gorgon :: Editor {
         panel_.Add(colliderRadius_);
         panel_.Add(lblColliderOffset_);
         panel_.Add(colliderOffset_);
+        panel_.Add(chkColliderTrigger_);
+        panel_.Add(chkColliderStatic_);
         panel_.Add(btnAddCollider_);
         panel_.Add(btnRemoveCollider_);
 
@@ -183,6 +185,7 @@ namespace Gorgon :: Editor {
         fieldRow(lblColliderSize_, colliderSize_);
         fieldRow(lblColliderRadius_, colliderRadius_);
         fieldRow(lblColliderOffset_, colliderOffset_);
+        pairRow(chkColliderTrigger_, chkColliderStatic_);
         fullRow(btnAddCollider_);
         fullRow(btnRemoveCollider_);
 
@@ -368,6 +371,26 @@ namespace Gorgon :: Editor {
             modified(false);
         });
 
+        chkColliderTrigger_.ChangedEvent.Register([this](bool state) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->collider || entity->collider->isTrigger == state)
+                return;
+            entity->collider->isTrigger = state;
+            modified(false);
+        });
+
+        chkColliderStatic_.ChangedEvent.Register([this](bool state) {
+            if(updating_)
+                return;
+            Entity *entity = selectedEntity();
+            if(!entity || !entity->collider || entity->collider->isStatic == state)
+                return;
+            entity->collider->isStatic = state;
+            modified(false);
+        });
+
         scriptPath_.ChangedEvent.Register([this](const std::string &value) {
             if(updating_)
                 return;
@@ -462,6 +485,8 @@ namespace Gorgon :: Editor {
         colliderRadius_.SetVisible(isCircle);
         lblColliderOffset_.SetVisible(hasCollider);
         colliderOffset_.SetVisible(hasCollider);
+        chkColliderTrigger_.SetVisible(hasCollider);
+        chkColliderStatic_.SetVisible(hasCollider);
         btnAddCollider_.SetVisible(hasEntity && !hasCollider);
         btnRemoveCollider_.SetVisible(hasCollider);
 
@@ -540,6 +565,9 @@ namespace Gorgon :: Editor {
 
             if(!colliderOffset_.IsFocused())
                 colliderOffset_.Set(Gorgon::Geometry::Pointf{entity->collider->offsetX, entity->collider->offsetY});
+
+            chkColliderTrigger_.SetState(entity->collider->isTrigger);
+            chkColliderStatic_.SetState(entity->collider->isStatic);
         }
 
         if(entity->script && !scriptPath_.IsFocused())

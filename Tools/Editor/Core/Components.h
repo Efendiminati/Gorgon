@@ -80,12 +80,18 @@ namespace Gorgon :: Editor {
         float radius = 16.0f;
         float offsetX = 0.0f;
         float offsetY = 0.0f;
+        /// A trigger volume reports overlaps (OnTriggerEnter/Exit) but is never pushed apart.
+        bool isTrigger = false;
+        /// A static collider is never moved by the solid solver; dynamic colliders are pushed out
+        /// of it instead. Two static colliders never resolve against each other.
+        bool isStatic = false;
 
         bool operator==(const ColliderComponent &other) const {
             return type == other.type &&
                    width == other.width && height == other.height &&
                    radius == other.radius &&
-                   offsetX == other.offsetX && offsetY == other.offsetY;
+                   offsetX == other.offsetX && offsetY == other.offsetY &&
+                   isTrigger == other.isTrigger && isStatic == other.isStatic;
         }
         bool operator!=(const ColliderComponent &other) const {
             return !(*this == other);

@@ -114,6 +114,11 @@ namespace Gorgon :: Editor {
                 colObj.Set("radius", static_cast<double>(e.collider->radius));
                 colObj.Set("offsetX", static_cast<double>(e.collider->offsetX));
                 colObj.Set("offsetY", static_cast<double>(e.collider->offsetY));
+                // Written only when set, so scenes that predate these flags stay byte identical.
+                if(e.collider->isTrigger)
+                    colObj.Set("isTrigger", true);
+                if(e.collider->isStatic)
+                    colObj.Set("isStatic", true);
                 eObj.Set("collider", std::move(colObj));
             }
 
@@ -205,6 +210,8 @@ namespace Gorgon :: Editor {
                 comp.radius = getFloatField(col, "radius", 16.0f);
                 comp.offsetX = getFloatField(col, "offsetX", 0.0f);
                 comp.offsetY = getFloatField(col, "offsetY", 0.0f);
+                comp.isTrigger = getBoolField(col, "isTrigger", false);
+                comp.isStatic = getBoolField(col, "isStatic", false);
                 e.collider = comp;
             }
 

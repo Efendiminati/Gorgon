@@ -372,7 +372,10 @@ namespace Gorgon :: Editor {
             if(impl.options.drawColliders && entity->collider.has_value() &&
                entity->collider->type != ColliderType::None) {
                 const auto &collider = *entity->collider;
-                const Gorgon::Graphics::RGBAf wire(0.29f, 0.87f, 0.50f, 0.90f);
+                // Triggers are drawn amber so a volume that never blocks anything is obvious.
+                const Gorgon::Graphics::RGBAf wire = collider.isTrigger
+                    ? Gorgon::Graphics::RGBAf(0.95f, 0.71f, 0.24f, 0.90f)
+                    : Gorgon::Graphics::RGBAf(0.29f, 0.87f, 0.50f, 0.90f);
 
                 auto colliderPoint = [&](float lx, float ly) -> Gorgon::Geometry::Pointf {
                     const float offX = (collider.offsetX + lx) * world.scaleX;
@@ -508,6 +511,15 @@ namespace Gorgon :: Editor {
 
     int SceneRuntime::GetScriptCount() const {
         return impl_->play ? impl_->play->GetScriptCount() : 0;
+    }
+
+    const std::vector<CollisionPair> &SceneRuntime::GetActiveOverlaps() const {
+        static const std::vector<CollisionPair> empty;
+        return impl_->play ? impl_->play->GetActiveOverlaps() : empty;
+    }
+
+    bool SceneRuntime::IsOverlapping(EntityId a, EntityId b) const {
+        return impl_->play ? impl_->play->IsOverlapping(a, b) : false;
     }
 
     int SceneRuntime::GetLoadedSpriteCount() const {

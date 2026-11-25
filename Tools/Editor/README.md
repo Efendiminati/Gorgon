@@ -325,6 +325,89 @@ held state persists until you clear it. `InputState::Reset()` forgets everything
 drops the one-frame flags. Tests (and scripted demos) drive the same struct directly, which is how
 `--selftest` and the `[Input]` Catch2 cases exercise a real `.gs` script without a keyboard.
 
+## Collision and physics
+
+Every entity can carry one `ColliderComponent` (inspector → Collider): an `AABB` (`W`/`H`) or a
+`Circle` (`Radius`), placed relative to the entity with `Offset`. Two flags change how the solver
+treats it:
+
+| Flag | Serialized as | Meaning |
+| --- | --- | --- |
+| `Trigger` | `"isTrigger": true` | Reports overlaps but is never pushed apart. |
+| `Static` | `"isStatic": true` | Never moves; dynamic colliders are pushed out of it instead. |
+
+Both default to `false` and are omitted from the JSON when unset, so older scenes load unchanged.
+
+Play mode runs one collision pass per `PlaySession::Tick()` (and therefore per
+`SceneRuntime::Update()`), *after* the scripts have moved their entities:
+
+1. every collider is turned into a world-space shape (`CollisionSystem::ComputeShape`), which
+   accounts for the entity's composed world transform and its collider offset — the parent scale
+   sizes the shape and the world rotation swings the offset;
+2. overlapping pairs are collected and reported through `PlaySession::GetActiveOverlaps()` (or
+   `SceneRuntime::GetActiveOverlaps()`, plus `IsOverlapping(a, b)`);
+3. non-trigger pairs where at least one collider is dynamic are separated along the minimum
+   translation vector — two dynamic bodies travel half of it each, a dynamic one takes all of it
+   against a static one;
+4. the pair set is diffed against the previous frame and the difference drives the script hooks.
+
+The queries (`CollisionSystem::Overlaps` / `ComputeOverlap` / `ContainsPoint`) are pure geometry, so
+they can be used without a play session at all. Colliders are axis aligned in world space: rotation
+moves the offset but never tilts the box.
+
+### Collision hooks
+
+A script may define any of these next to `Update`; the runtime only wires the ones that exist:
+
+```
+function OnCollisionEnter(self, otherId)   # solid overlap started
+function OnCollisionExit(self, otherId)    # solid overlap ended
+function OnTriggerEnter(self, otherId)     # overlap with a trigger volume started
+function OnTriggerExit(self, otherId)      # ... ended
+```
+
+`self` is the same writable transform `Update` receives (a hook may move or rotate its entity) and
+`otherId` is the id of the other entity. A pair counts as a trigger pair as soon as either collider
+is a trigger, so a trigger never fires `OnCollisionEnter`. Enter fires on the frame the pair appears,
+exit on the frame it disappears; a pair that stays put does not repeat.
+
+```
+function OnTriggerEnter(self, otherId)
+    self.rotation = self.rotation + 45
+    return 0
+end function
+
+function Update(self, dt)
+    return 0
+end function
+```
+
+### Physics queries (`using Physics`)
+
+| Function | Result |
+| --- | --- |
+| `Overlaps(idA, idB)` | `1` when the two colliders overlap right now, else `0` |
+| `OverlapPoint(x, y)` | id of the topmost entity whose collider contains the world point, `0` when none |
+| `IsOverlapping(id)` | `1` when the entity was part of an overlap in the last collision pass |
+
+```
+using Physics
+
+function Update(self, dt)
+    if(Overlaps(1, 2))
+        self.x = self.x + 1
+    end if
+    if(IsOverlapping(self))
+        self.rotation = self.rotation + OverlapPoint(0, 0)
+    end if
+    return 0
+end function
+```
+
+`Overlaps` and `OverlapPoint` read the live transforms, so they see the moves a script made earlier
+in the same frame; `IsOverlapping` reports the set the previous collision pass left behind. Note
+GScript spells equality with a single `=` when one is needed inside a condition.
+
 ## Loading a scene in a Gorgon game
 
 `SceneRuntime` is the only class a game needs; it lives in `GorgonEditorCore`
