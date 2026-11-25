@@ -51,6 +51,73 @@ namespace Gorgon :: Editor {
         /// InvalidEntityId when no entity carries that name.
         EntityId FindEntityByName(const std::string &entityName) const;
 
+        /// Returns the ids of every entity carrying `tag`, in storage order.
+        std::vector<EntityId> FindEntitiesByTag(const std::string &tag) const {
+            std::vector<EntityId> result;
+            for(const auto &entity : entities_) {
+                if(entity.HasTag(tag))
+                    result.push_back(entity.id);
+            }
+            return result;
+        }
+
+        /// First entity (storage order) carrying `tag`, or InvalidEntityId.
+        EntityId FindEntityByTag(const std::string &tag) const {
+            for(const auto &entity : entities_) {
+                if(entity.HasTag(tag))
+                    return entity.id;
+            }
+            return InvalidEntityId;
+        }
+
+        bool HasTag(EntityId id, const std::string &tag) const {
+            const Entity *entity = FindEntity(id);
+            return entity && entity->HasTag(tag);
+        }
+
+        /// Adds the tag when the entity exists and does not already carry it.
+        bool AddTag(EntityId id, const std::string &tag) {
+            Entity *entity = FindEntity(id);
+            if(!entity || tag.empty() || entity->HasTag(tag))
+                return false;
+            entity->tags.push_back(tag);
+            return true;
+        }
+
+        bool RemoveTag(EntityId id, const std::string &tag) {
+            Entity *entity = FindEntity(id);
+            if(!entity)
+                return false;
+            for(auto it = entity->tags.begin(); it != entity->tags.end(); ++it) {
+                if(*it == tag) {
+                    entity->tags.erase(it);
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// Value of a custom property, empty when the entity or key does not exist.
+        std::string GetProperty(EntityId id, const std::string &key) const {
+            const Entity *entity = FindEntity(id);
+            if(!entity)
+                return {};
+            auto it = entity->properties.find(key);
+            return it == entity->properties.end() ? std::string() : it->second;
+        }
+
+        /// Sets (or with an empty value erases) a custom property. Returns false when the id is unknown.
+        bool SetProperty(EntityId id, const std::string &key, const std::string &value) {
+            Entity *entity = FindEntity(id);
+            if(!entity || key.empty())
+                return false;
+            if(value.empty())
+                entity->properties.erase(key);
+            else
+                entity->properties[key] = value;
+            return true;
+        }
+
         bool HasEntity(EntityId id) const;
 
         const std::vector<Entity> &GetEntities() const { return entities_; }

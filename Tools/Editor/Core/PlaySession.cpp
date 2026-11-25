@@ -66,6 +66,9 @@ namespace Gorgon :: Editor {
         std::unique_ptr<Gorgon::Scripting::Library> audioLibrary;
         Gorgon::Scripting::MappedReferenceType<ScriptTransform> *entityType = nullptr;
 
+        // Steps sprite animations, particles and the play-on-start audio components every tick.
+        ComponentSimulation components;
+
         struct ScriptState {
             EntityId entityId = InvalidEntityId;
             std::string path;
@@ -758,6 +761,11 @@ namespace Gorgon :: Editor {
         impl.baseDir = baseDir;
         impl.ResetCollisionState();
         impl.ResetQueues();
+        // Component state (live particles, "audio already fired") belongs to one play session.
+        impl.components.Reset();
+        impl.components.SetSoundSink([this](const std::string &asset) {
+            impl_->PlaySound(asset);
+        });
 
         impl.library = std::unique_ptr<Gorgon::Scripting::Library>(
             new Gorgon::Scripting::Library("EditorPlay", "Play-in-editor script bindings")
@@ -1123,6 +1131,154 @@ namespace Gorgon :: Editor {
                 }
             ),
             new Gorgon::Scripting::Function(
+                "FindByTag",
+                "Returns the id of the first entity carrying this tag, 0 when there is none.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](std::string tag) -> int {
+                            if(!session->scene)
+                                return 0;
+                            return int(session->scene->FindEntityByTag(tag));
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Tag", "Tag to look for",
+                                                        Gorgon::Scripting::Types::String())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "FindAllByTag",
+                "Number of entities carrying the tag. Ids are returned through GetTaggedEntity.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](std::string tag) -> int {
+                            if(!session->scene)
+                                return 0;
+                            return int(session->scene->FindEntitiesByTag(tag).size());
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Tag", "Tag to count",
+                                                        Gorgon::Scripting::Types::String())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "GetTaggedEntity",
+                "Id of the index-th entity carrying the tag, 0 when the index is out of range.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](std::string tag, int index) -> int {
+                            if(!session->scene || index < 0)
+                                return 0;
+                            const auto ids = session->scene->FindEntitiesByTag(tag);
+                            if(std::size_t(index) >= ids.size())
+                                return 0;
+                            return int(ids[std::size_t(index)]);
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Tag", "Tag to look for",
+                                                        Gorgon::Scripting::Types::String()),
+                            Gorgon::Scripting::Parameter("Index", "Zero based index",
+                                                        Gorgon::Scripting::Types::Int())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "HasTag",
+                "Returns 1 when the entity carries the tag, 0 otherwise or when the id is unknown.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, std::string tag) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            return session->scene->HasTag(EntityId(rawId), tag) ? 1 : 0;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Tag", "Tag to test",
+                                                        Gorgon::Scripting::Types::String())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "AddTag",
+                "Adds a tag to the entity and returns 1, or 0 when the id is unknown or it already has it.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, std::string tag) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            return session->scene->AddTag(EntityId(rawId), tag) ? 1 : 0;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Tag", "Tag to add",
+                                                        Gorgon::Scripting::Types::String())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "GetProp",
+                "Value of a custom property, empty when the entity or key is unknown.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, std::string key) -> std::string {
+                            if(rawId <= 0 || !session->scene)
+                                return {};
+                            return session->scene->GetProperty(EntityId(rawId), key);
+                        },
+                        Gorgon::Scripting::Types::String(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Key", "Property name",
+                                                        Gorgon::Scripting::Types::String())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
+                "SetProp",
+                "Sets a custom property and returns 1, or 0 when the id is unknown.",
+                nullptr,
+                {
+                    Gorgon::Scripting::MapFunction(
+                        [session](int rawId, std::string key, std::string value) -> int {
+                            if(rawId <= 0 || !session->scene)
+                                return 0;
+                            return session->scene->SetProperty(EntityId(rawId), key, value) ? 1 : 0;
+                        },
+                        Gorgon::Scripting::Types::Int(),
+                        {
+                            Gorgon::Scripting::Parameter("Entity", "Id of the entity",
+                                                        Gorgon::Scripting::Types::Int()),
+                            Gorgon::Scripting::Parameter("Key", "Property name",
+                                                        Gorgon::Scripting::Types::String()),
+                            Gorgon::Scripting::Parameter("Value", "Property value",
+                                                        Gorgon::Scripting::Types::String())
+                        }
+                    )
+                }
+            ),
+            new Gorgon::Scripting::Function(
                 "Spawn",
                 "Creates a copy of the named entity (whole subtree) at the world position and "
                 "returns its id. When no entity has that name a fresh empty entity is created.",
@@ -1467,6 +1623,11 @@ namespace Gorgon :: Editor {
         if(impl.running)
             impl.StepCollisions(scene);
 
+        // Sprite animations, particle emitters and play-on-start audio advance on the same clock
+        // as the scripts, after spawns/destroys so a spawned emitter starts on its first frame.
+        if(impl.running)
+            impl.components.Step(scene, dt);
+
         // Edge flags belong to one frame: a press is visible to every script of this Tick and to
         // nobody afterwards. Held keys and buttons stay down until their up event arrives.
         impl.inputState.ClearEdges();
@@ -1503,6 +1664,7 @@ namespace Gorgon :: Editor {
         impl.library.reset();
         impl.ResetCollisionState();
         impl.ResetQueues();
+        impl.components.Reset();
         impl.playedSounds.clear();
 #ifdef GORGON_AUDIO_SUPPORT
         impl.soundVoices.clear();
@@ -1550,6 +1712,18 @@ namespace Gorgon :: Editor {
 
     const std::vector<std::string> &PlaySession::GetPlayedSounds() const {
         return impl_->playedSounds;
+    }
+
+    void PlaySession::TriggerSound(const std::string &assetPath) {
+        impl_->PlaySound(assetPath);
+    }
+
+    const std::vector<Particle> *PlaySession::GetParticles(EntityId id) const {
+        return impl_->components.GetParticles(id);
+    }
+
+    const ComponentSimulation &PlaySession::GetComponentSimulation() const {
+        return impl_->components;
     }
 
     int PlaySession::GetScriptCount() const {

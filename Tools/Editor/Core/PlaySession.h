@@ -1,6 +1,7 @@
 #pragma once
 
 #include "CollisionSystem.h"
+#include "ComponentSimulation.h"
 #include "InputState.h"
 #include "RuntimeCamera.h"
 #include "Scene.h"
@@ -120,6 +121,17 @@ namespace Gorgon :: Editor {
         /// Resolved paths passed to Audio::PlaySound(), in call order. Recorded whether or not an
         /// audio device was available, which is what makes the audio hook testable headlessly.
         const std::vector<std::string> &GetPlayedSounds() const;
+
+        /// Plays (or records, headlessly) a sound the way Audio::PlaySound() does. Used by the
+        /// AudioComponent trigger and by a host that wants to fire a component sound.
+        void TriggerSound(const std::string &assetPath);
+
+        /// Live particles of an entity's ParticleComponent, or nullptr when it has none. The list
+        /// is stepped by Tick(); a renderer reads it to draw the emitter.
+        const std::vector<Particle> *GetParticles(EntityId id) const;
+
+        /// The simulation that steps sprite animations, particles and play-on-start audio.
+        const ComponentSimulation &GetComponentSimulation() const;
 
         /// Last error produced while starting or ticking ("" when none).
         const std::string &GetLastError() const;

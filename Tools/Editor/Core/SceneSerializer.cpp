@@ -128,6 +128,97 @@ namespace Gorgon :: Editor {
                 eObj.Set("script", std::move(scObj));
             }
 
+            if(e.spriteAnim.has_value()) {
+                const auto &a = *e.spriteAnim;
+                JSON::Value o;
+                o.Set("asset", a.asset);
+                o.Set("frameW", a.frameW);
+                o.Set("frameH", a.frameH);
+                o.Set("frameCount", a.frameCount);
+                o.Set("fps", static_cast<double>(a.fps));
+                o.Set("loop", a.loop);
+                o.Set("playing", a.playing);
+                o.Set("currentFrame", a.currentFrame);
+                o.Set("tint", colorToJson(a.tint));
+                eObj.Set("spriteAnim", std::move(o));
+            }
+
+            if(e.text.has_value()) {
+                const auto &t = *e.text;
+                JSON::Value o;
+                o.Set("text", t.text);
+                o.Set("color", colorToJson(t.color));
+                o.Set("fontSize", static_cast<double>(t.fontSize));
+                o.Set("style", t.style);
+                o.Set("align", TextAlignToString(t.align));
+                eObj.Set("text", std::move(o));
+            }
+
+            if(e.audio.has_value()) {
+                const auto &a = *e.audio;
+                JSON::Value o;
+                o.Set("asset", a.asset);
+                o.Set("volume", static_cast<double>(a.volume));
+                o.Set("loop", a.loop);
+                o.Set("playOnStart", a.playOnStart);
+                eObj.Set("audio", std::move(o));
+            }
+
+            if(e.camera.has_value()) {
+                const auto &c = *e.camera;
+                JSON::Value o;
+                o.Set("active", c.active);
+                o.Set("zoom", static_cast<double>(c.zoom));
+                o.Set("followTarget", static_cast<int>(c.followTarget));
+                eObj.Set("camera", std::move(o));
+            }
+
+            if(e.tilemap.has_value()) {
+                const auto &t = *e.tilemap;
+                JSON::Value o;
+                o.Set("tileW", static_cast<double>(t.tileW));
+                o.Set("tileH", static_cast<double>(t.tileH));
+                o.Set("cols", t.cols);
+                o.Set("rows", t.rows);
+                o.Set("tilesetCols", t.tilesetCols);
+                o.Set("tilesetAsset", t.tilesetAsset);
+                JSON::Array tilesArr;
+                tilesArr.reserve(t.tiles.size());
+                for(int index : t.tiles)
+                    tilesArr.emplace_back(index);
+                o.Set("tiles", JSON::Value(std::move(tilesArr)));
+                eObj.Set("tilemap", std::move(o));
+            }
+
+            if(e.particles.has_value()) {
+                const auto &p = *e.particles;
+                JSON::Value o;
+                o.Set("emitRate", static_cast<double>(p.emitRate));
+                o.Set("lifetime", static_cast<double>(p.lifetime));
+                o.Set("speed", static_cast<double>(p.speed));
+                o.Set("startColor", colorToJson(p.startColor));
+                o.Set("endColor", colorToJson(p.endColor));
+                o.Set("size", static_cast<double>(p.size));
+                o.Set("active", p.active);
+                eObj.Set("particles", std::move(o));
+            }
+
+            // Written only when non-empty, so scenes that carry neither stay byte identical.
+            if(!e.tags.empty()) {
+                JSON::Array tagArr;
+                tagArr.reserve(e.tags.size());
+                for(const auto &tag : e.tags)
+                    tagArr.emplace_back(tag);
+                eObj.Set("tags", JSON::Value(std::move(tagArr)));
+            }
+
+            if(!e.properties.empty()) {
+                JSON::Object props;
+                for(const auto &entry : e.properties)
+                    props.emplace(entry.first, JSON::Value(entry.second));
+                eObj.Set("properties", JSON::Value(std::move(props)));
+            }
+
             if(!e.prefabSource.empty()) {
                 eObj.Set("prefabSource", e.prefabSource);
             }
@@ -226,9 +317,190 @@ namespace Gorgon :: Editor {
                 e.script = std::move(comp);
             }
 
+            if(eObj.Has("tags") && !eObj["tags"].IsNull()) {
+                const auto &tagsVal = eObj["tags"];
+                if(!tagsVal.IsArray()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'tags' must be an array");
+                    return false;
+                }
+                for(int i = 0; i < tagsVal.GetCount(); ++i) {
+                    if(!tagsVal[i].IsString()) {
+                        setError(outError, "Entity " + std::to_string(rawId) + " has a non-string tag");
+                        return false;
+                    }
+                    e.tags.push_back(tagsVal[i].Get<std::string>());
+                }
+            }
+
+            if(eObj.Has("properties") && !eObj["properties"].IsNull()) {
+                const auto &propsVal = eObj["properties"];
+                if(!propsVal.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'properties' must be an object");
+                    return false;
+                }
+                const auto obj = propsVal.Get<JSON::Object>();
+                for(const auto &entry : obj) {
+                    if(!entry.second.IsString()) {
+                        setError(outError, "Entity " + std::to_string(rawId) + " property '" + entry.first +
+                                           "' must be a string");
+                        return false;
+                    }
+                    e.properties[entry.first] = entry.second.Get<std::string>();
+                }
+            }
+
+            if(eObj.Has("spriteAnim") && !eObj["spriteAnim"].IsNull()) {
+                const auto &o = eObj["spriteAnim"];
+                if(!o.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'spriteAnim' must be an object");
+                    return false;
+                }
+                SpriteAnimComponent comp;
+                comp.asset = getStringField(o, "asset", "");
+                comp.frameW = getIntField(o, "frameW", 32);
+                comp.frameH = getIntField(o, "frameH", 32);
+                comp.frameCount = std::max(1, getIntField(o, "frameCount", 1));
+                comp.fps = std::max(0.0f, getFloatField(o, "fps", 12.0f));
+                comp.loop = getBoolField(o, "loop", true);
+                comp.playing = getBoolField(o, "playing", true);
+                comp.currentFrame = getIntField(o, "currentFrame", 0);
+                if(comp.currentFrame < 0 || comp.currentFrame >= comp.frameCount)
+                    comp.currentFrame = 0;
+                if(o.Has("tint") && !o["tint"].IsNull()) {
+                    if(!colorFromJson(o["tint"], comp.tint, outError, "spriteAnim.tint"))
+                        return false;
+                }
+                e.spriteAnim = comp;
+            }
+
+            if(eObj.Has("text") && !eObj["text"].IsNull()) {
+                const auto &o = eObj["text"];
+                if(!o.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'text' must be an object");
+                    return false;
+                }
+                TextComponent comp;
+                comp.text = getStringField(o, "text", "");
+                comp.fontSize = std::max(1.0f, getFloatField(o, "fontSize", 16.0f));
+                comp.style = getStringField(o, "style", "regular");
+                if(o.Has("color") && !o["color"].IsNull()) {
+                    if(!colorFromJson(o["color"], comp.color, outError, "text.color"))
+                        return false;
+                }
+                const std::string align = getStringField(o, "align", "left");
+                if(!TextAlignFromString(align, comp.align)) {
+                    setError(outError, "Unknown text alignment: '" + align + "'");
+                    return false;
+                }
+                e.text = comp;
+            }
+
+            if(eObj.Has("audio") && !eObj["audio"].IsNull()) {
+                const auto &o = eObj["audio"];
+                if(!o.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'audio' must be an object");
+                    return false;
+                }
+                AudioComponent comp;
+                comp.asset = getStringField(o, "asset", "");
+                comp.volume = std::clamp(getFloatField(o, "volume", 1.0f), 0.0f, 1.0f);
+                comp.loop = getBoolField(o, "loop", false);
+                comp.playOnStart = getBoolField(o, "playOnStart", true);
+                e.audio = comp;
+            }
+
+            if(eObj.Has("camera") && !eObj["camera"].IsNull()) {
+                const auto &o = eObj["camera"];
+                if(!o.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'camera' must be an object");
+                    return false;
+                }
+                CameraComponent comp;
+                comp.active = getBoolField(o, "active", true);
+                comp.zoom = std::max(0.01f, getFloatField(o, "zoom", 1.0f));
+                const int follow = getIntField(o, "followTarget", 0);
+                if(follow < 0) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " has negative camera followTarget");
+                    return false;
+                }
+                comp.followTarget = static_cast<EntityId>(follow);
+                e.camera = comp;
+            }
+
+            if(eObj.Has("tilemap") && !eObj["tilemap"].IsNull()) {
+                const auto &o = eObj["tilemap"];
+                if(!o.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'tilemap' must be an object");
+                    return false;
+                }
+                TilemapComponent comp;
+                comp.tileW = std::max(1.0f, getFloatField(o, "tileW", 32.0f));
+                comp.tileH = std::max(1.0f, getFloatField(o, "tileH", 32.0f));
+                comp.cols = std::max(0, getIntField(o, "cols", 0));
+                comp.rows = std::max(0, getIntField(o, "rows", 0));
+                comp.tilesetCols = std::max(1, getIntField(o, "tilesetCols", 8));
+                comp.tilesetAsset = getStringField(o, "tilesetAsset", "");
+                if(o.Has("tiles") && !o["tiles"].IsNull()) {
+                    const auto &tilesVal = o["tiles"];
+                    if(!tilesVal.IsArray()) {
+                        setError(outError, "Entity " + std::to_string(rawId) + " 'tilemap.tiles' must be an array");
+                        return false;
+                    }
+                    comp.tiles.reserve(static_cast<std::size_t>(tilesVal.GetCount()));
+                    for(int i = 0; i < tilesVal.GetCount(); ++i) {
+                        if(!tilesVal[i].IsNumber()) {
+                            setError(outError, "Entity " + std::to_string(rawId) + " has a non-numeric tile index");
+                            return false;
+                        }
+                        comp.tiles.push_back(static_cast<int>(tilesVal[i].Get<double>()));
+                    }
+                }
+                e.tilemap = comp;
+            }
+
+            if(eObj.Has("particles") && !eObj["particles"].IsNull()) {
+                const auto &o = eObj["particles"];
+                if(!o.IsObject()) {
+                    setError(outError, "Entity " + std::to_string(rawId) + " 'particles' must be an object");
+                    return false;
+                }
+                ParticleComponent comp;
+                comp.emitRate = std::max(0.0f, getFloatField(o, "emitRate", 20.0f));
+                comp.lifetime = std::max(0.01f, getFloatField(o, "lifetime", 1.0f));
+                comp.speed = getFloatField(o, "speed", 60.0f);
+                comp.size = std::max(0.5f, getFloatField(o, "size", 4.0f));
+                comp.active = getBoolField(o, "active", true);
+                if(o.Has("startColor") && !o["startColor"].IsNull()) {
+                    if(!colorFromJson(o["startColor"], comp.startColor, outError, "particles.startColor"))
+                        return false;
+                }
+                if(o.Has("endColor") && !o["endColor"].IsNull()) {
+                    if(!colorFromJson(o["endColor"], comp.endColor, outError, "particles.endColor"))
+                        return false;
+                }
+                e.particles = comp;
+            }
+
             e.prefabSource = getStringField(eObj, "prefabSource", "");
 
             return true;
+        }
+
+        /// Copies every optional component plus tags/properties from src onto dst, leaving the
+        /// identity (id, name, parent, transform) alone. Used by paste/prefab paths so a new
+        /// component never has to be added to four different copy loops.
+        void copyComponentSet(Entity &dst, const Entity &src) {
+            dst.tags = src.tags;
+            dst.properties = src.properties;
+            dst.sprite = src.sprite;
+            dst.collider = src.collider;
+            dst.script = src.script;
+            dst.spriteAnim = src.spriteAnim;
+            dst.text = src.text;
+            dst.audio = src.audio;
+            dst.camera = src.camera;
+            dst.tilemap = src.tilemap;
+            dst.particles = src.particles;
         }
 
         std::string makeUniqueEntityName(const std::string &desired, std::unordered_set<std::string> &usedNames) {
@@ -592,9 +864,7 @@ namespace Gorgon :: Editor {
                 created.locked = src.locked;
                 created.zOrder = src.zOrder;
                 created.transform = src.transform;
-                created.sprite = src.sprite;
-                created.collider = src.collider;
-                created.script = src.script;
+                copyComponentSet(created, src);
                 created.prefabSource = src.prefabSource;
 
                 if(src.parentId == InvalidEntityId) {
@@ -942,9 +1212,7 @@ namespace Gorgon :: Editor {
             created.locked = src.locked;
             created.zOrder = src.zOrder;
             created.transform = src.transform;
-            created.sprite = src.sprite;
-            created.collider = src.collider;
-            created.script = src.script;
+            copyComponentSet(created, src);
             created.prefabSource = isRoot ? prefabSource : src.prefabSource;
 
             if(isRoot) {
@@ -1052,6 +1320,7 @@ namespace Gorgon :: Editor {
         instanceRoot->sprite = prefabRoot->sprite;
         instanceRoot->collider = prefabRoot->collider;
         instanceRoot->script = prefabRoot->script;
+        copyComponentSet(*instanceRoot, *prefabRoot);
         instanceRoot->prefabSource = keepSource;
 
         // Recreate prefab descendants under instanceRootId.
@@ -1064,9 +1333,7 @@ namespace Gorgon :: Editor {
             created.locked = src.locked;
             created.zOrder = src.zOrder;
             created.transform = src.transform;
-            created.sprite = src.sprite;
-            created.collider = src.collider;
-            created.script = src.script;
+            copyComponentSet(created, src);
             created.prefabSource = src.prefabSource;
             idMap[src.id] = created.id;
         }

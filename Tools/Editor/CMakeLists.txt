@@ -13,6 +13,8 @@ add_library(GorgonEditorCore STATIC
     Core/CommandStack.cpp
     Core/CollisionSystem.h
     Core/CollisionSystem.cpp
+    Core/ComponentSimulation.h
+    Core/ComponentSimulation.cpp
     Core/InputState.h
     Core/PlaySession.h
     Core/PlaySession.cpp

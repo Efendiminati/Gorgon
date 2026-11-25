@@ -26,6 +26,30 @@ namespace Gorgon :: Editor {
             );
         }
 
+        /// Linear blend used for particle lifetime colours.
+        Gorgon::Graphics::RGBAf LerpColor(const ColorRGBA &from, const ColorRGBA &to, float t) {
+            t = std::clamp(t, 0.0f, 1.0f);
+            const auto mix = [t](std::uint8_t a, std::uint8_t b) {
+                return (a / 255.0f) + (b / 255.0f - a / 255.0f) * t;
+            };
+            return Gorgon::Graphics::RGBAf(mix(from.r, to.r), mix(from.g, to.g),
+                                           mix(from.b, to.b), mix(from.a, to.a));
+        }
+
+        /// Stable colour for a tilemap cell drawn without a tileset texture.
+        Gorgon::Graphics::RGBAf TileColor(int index) {
+            static const Gorgon::Graphics::RGBAf palette[] = {
+                {0.34f, 0.56f, 0.32f, 1.0f}, // grass
+                {0.45f, 0.36f, 0.28f, 1.0f}, // dirt
+                {0.42f, 0.45f, 0.52f, 1.0f}, // stone
+                {0.28f, 0.42f, 0.62f, 1.0f}, // water
+                {0.62f, 0.55f, 0.30f, 1.0f}, // sand
+                {0.55f, 0.30f, 0.30f, 1.0f}, // brick
+            };
+            const std::size_t count = sizeof(palette) / sizeof(palette[0]);
+            return palette[std::size_t(std::max(0, index)) % count];
+        }
+
         /// Placeholder fill for entities without a (loadable) sprite. Matches the editor viewport so
         /// a scene looks the same in both.
         Gorgon::Graphics::RGBAf FallbackColorForEntity(const Entity &entity) {
@@ -87,12 +111,48 @@ namespace Gorgon :: Editor {
         std::unique_ptr<PlaySession> play;
         std::unordered_map<std::string, std::unique_ptr<Gorgon::Graphics::Bitmap>> sprites;
 
+        // Steps animations/particles/audio when there is no PlaySession (a scene without scripts).
+        ComponentSimulation components;
+        std::vector<std::string> componentSounds;
+        const Gorgon::Graphics::StyledPrinter *textPrinter = nullptr;
+
         std::string lastError;
         bool loaded = false;
 
         void clearRuntimeState() {
             play.reset();
             sprites.clear();
+            components.Reset();
+            componentSounds.clear();
+        }
+
+        /// The first active CameraComponent drives the projection when a scene carries one.
+        EntityId activeCameraEntity() const {
+            for(const auto &entity : scene.GetEntities()) {
+                if(entity.camera.has_value() && entity.camera->active)
+                    return entity.id;
+            }
+            return InvalidEntityId;
+        }
+
+        /// Copies the active camera component into the runtime camera (zoom + follow target).
+        void applyCameraComponent() {
+            const EntityId id = activeCameraEntity();
+            if(id == InvalidEntityId)
+                return;
+
+            const Entity *entity = scene.FindEntity(id);
+            if(!entity || !entity->camera)
+                return;
+
+            EntityId centerId = entity->camera->followTarget;
+            if(centerId == InvalidEntityId || !scene.HasEntity(centerId))
+                centerId = id;
+
+            const Transform world = scene.GetWorldTransform(centerId);
+            camera.panX = world.x;
+            camera.panY = world.y;
+            camera.zoom = std::clamp(entity->camera->zoom, 0.01f, 64.0f);
         }
 
         bool sceneHasScripts() const {
@@ -171,6 +231,12 @@ namespace Gorgon :: Editor {
         }
 
         Gorgon::Geometry::Pointf entityBaseSize(const Entity &entity) {
+            if(entity.spriteAnim.has_value()) {
+                const auto &anim = *entity.spriteAnim;
+                if(anim.frameW > 0 && anim.frameH > 0)
+                    return {float(anim.frameW), float(anim.frameH)};
+            }
+
             if(entity.sprite.has_value() && !entity.sprite->asset.empty()) {
                 if(const auto *bitmap = getSprite(entity.sprite->asset)) {
                     const auto size = bitmap->GetSize();
@@ -179,7 +245,20 @@ namespace Gorgon :: Editor {
                 }
             }
 
+            if(entity.tilemap.has_value()) {
+                const auto &map = *entity.tilemap;
+                if(map.cols > 0 && map.rows > 0)
+                    return {float(map.cols) * map.tileW, float(map.rows) * map.tileH};
+            }
+
+            if(entity.text.has_value()) {
+                const auto &text = *entity.text;
+                const float width = float(std::max<std::size_t>(1, text.text.size())) * text.fontSize * 0.6f;
+                return {std::max(16.0f, width), text.fontSize * 1.4f};
+            }
+
             if(entity.collider.has_value()) {
+
                 if(entity.collider->type == ColliderType::AABB &&
                    entity.collider->width > 0.0f && entity.collider->height > 0.0f) {
                     return {entity.collider->width, entity.collider->height};
@@ -233,6 +312,17 @@ namespace Gorgon :: Editor {
         impl.lastError.clear();
         impl.loaded = true;
 
+        // Component audio plays through the session when one runs, and is otherwise only recorded
+        // (the runtime has no audio device of its own).
+        Impl *self = &impl;
+        impl.components.Reset();
+        impl.components.SetSoundSink([self](const std::string &asset) {
+            if(self->play)
+                self->play->TriggerSound(asset);
+            else
+                self->componentSounds.push_back(self->ResolvePath(asset));
+        });
+
         impl.startScripts();
 
         if(outError)
@@ -257,8 +347,16 @@ namespace Gorgon :: Editor {
 
     void SceneRuntime::Update(float dt) {
         auto &impl = *impl_;
-        if(!impl.loaded || !impl.play)
+
+        // A scriptless scene still animates its sprites, particles and play-on-start audio.
+        if(!impl.loaded || !impl.play) {
+            if(!impl.loaded)
+                return;
+
+            impl.components.Step(impl.scene, dt);
+            impl.applyCameraComponent();
             return;
+        }
 
         // Hand the caller's state to the scripts for this step. Tick() clears the session's edge
         // flags, so the caller's own pressed/released flags are cleared here as well — they have
@@ -266,6 +364,9 @@ namespace Gorgon :: Editor {
         impl.play->GetInput() = impl.input;
         impl.play->Tick(impl.scene, dt);
         impl.input.ClearEdges();
+
+        // An active CameraComponent owns the projection; a script's SetCameraPos is overridden.
+        impl.applyCameraComponent();
 
         const auto &error = impl.play->GetLastError();
         if(!error.empty())
@@ -335,13 +436,149 @@ namespace Gorgon :: Editor {
                     ? impl.getSprite(entity->sprite->asset)
                     : nullptr;
 
-                if(bitmap) {
+                if(entity->spriteAnim.has_value()) {
+                    // Sprite sheet: the visible quad is one frame of the sheet, selected through
+                    // normalized texture coordinates.
+                    const auto &anim = *entity->spriteAnim;
+                    const auto *sheet = impl.getSprite(anim.asset);
+                    bool drew = false;
+                    if(sheet) {
+                        const auto size = sheet->GetSize();
+                        const int frameW = std::max(1, anim.frameW);
+                        const int frameH = std::max(1, anim.frameH);
+                        const float imageW = float(std::max(1, size.Width));
+                        const float imageH = float(std::max(1, size.Height));
+                        const int perRow = std::max(1, size.Width / frameW);
+                        const int frame = std::clamp(anim.currentFrame, 0,
+                                                     std::max(0, anim.frameCount - 1));
+                        const int fx = (frame % perRow) * frameW;
+                        const int fy = (frame / perRow) * frameH;
+
+                        const Gorgon::Geometry::Pointf t1{fx / imageW, fy / imageH};
+                        const Gorgon::Geometry::Pointf t2{(fx + frameW) / imageW, fy / imageH};
+                        const Gorgon::Geometry::Pointf t3{(fx + frameW) / imageW, (fy + frameH) / imageH};
+                        const Gorgon::Geometry::Pointf t4{fx / imageW, (fy + frameH) / imageH};
+                        target.Draw(*sheet, corners[0], corners[1], corners[2], corners[3],
+                                    t1, t2, t3, t4, ToRGBAf(anim.tint));
+                        drew = true;
+                    }
+                    if(!drew) {
+                        target.Draw(corners[0], corners[1], corners[2], corners[3],
+                                    Gorgon::Graphics::RGBAf(0.45f, 0.62f, 0.95f, 0.55f));
+                    }
+                }
+                else if(bitmap) {
                     target.Draw(*bitmap, corners[0], corners[1], corners[2], corners[3],
                                 ToRGBAf(entity->sprite->tint));
+                }
+                else if(entity->tilemap.has_value()) {
+                    // Tilemap: one quad per cell, either a sub-rect of the tileset or a stable
+                    // colour per tile index (so a map renders without a tileset asset).
+                    const auto &map = *entity->tilemap;
+                    const auto *tileset = map.tilesetAsset.empty() ? nullptr : impl.getSprite(map.tilesetAsset);
+                    const int cols = std::max(0, map.cols);
+                    const int rows = std::max(0, map.rows);
+                    const float originX = -float(cols) * map.tileW * 0.5f;
+                    const float originY = -float(rows) * map.tileH * 0.5f;
+
+                    for(int row = 0; row < rows; ++row) {
+                        for(int col = 0; col < cols; ++col) {
+                            const std::size_t index = std::size_t(row) * std::size_t(cols) + std::size_t(col);
+                            if(index >= map.tiles.size())
+                                continue;
+                            const int tile = map.tiles[index];
+                            if(tile < 0)
+                                continue;
+
+                            const float lx = originX + float(col) * map.tileW;
+                            const float ly = originY + float(row) * map.tileH;
+                            const Gorgon::Geometry::Pointf q[4] = {
+                                toScreen(lx, ly),
+                                toScreen(lx + map.tileW, ly),
+                                toScreen(lx + map.tileW, ly + map.tileH),
+                                toScreen(lx, ly + map.tileH)
+                            };
+
+                            if(tileset) {
+                                const auto size = tileset->GetSize();
+                                const int perRow = std::max(1, map.tilesetCols);
+                                const int tx = (tile % perRow) * int(map.tileW);
+                                const int ty = (tile / perRow) * int(map.tileH);
+                                const float imageW = float(std::max(1, size.Width));
+                                const float imageH = float(std::max(1, size.Height));
+                                const Gorgon::Geometry::Pointf t1{tx / imageW, ty / imageH};
+                                const Gorgon::Geometry::Pointf t2{(tx + map.tileW) / imageW, ty / imageH};
+                                const Gorgon::Geometry::Pointf t3{(tx + map.tileW) / imageW,
+                                                                  (ty + map.tileH) / imageH};
+                                const Gorgon::Geometry::Pointf t4{tx / imageW,
+                                                                  (ty + map.tileH) / imageH};
+                                target.Draw(*tileset, q[0], q[1], q[2], q[3],
+                                            t1, t2, t3, t4, Gorgon::Graphics::RGBAf(1.0f));
+                            }
+                            else {
+                                target.Draw(q[0], q[1], q[2], q[3], TileColor(tile));
+                            }
+                        }
+                    }
+                }
+                else if(entity->text.has_value()) {
+                    const auto &label = *entity->text;
+                    const Gorgon::Geometry::Pointf origin = toScreen(0.0f, 0.0f);
+                    bool drew = false;
+                    if(impl.textPrinter) {
+                        auto printer = *impl.textPrinter;
+                        printer.SetColor(ToRGBAf(label.color));
+                        const auto textSize = printer.GetSize(label.text);
+                        int x = int(origin.X);
+                        if(label.align == TextAlign::Center)
+                            x -= textSize.Width / 2;
+                        else if(label.align == TextAlign::Right)
+                            x -= textSize.Width;
+                        const int y = int(origin.Y) - textSize.Height / 2;
+                        const auto alignment = label.align == TextAlign::Center
+                            ? Gorgon::Graphics::TextAlignment::Center
+                            : (label.align == TextAlign::Right
+                                ? Gorgon::Graphics::TextAlignment::Right
+                                : Gorgon::Graphics::TextAlignment::Left);
+                        printer.PrintNoWrap(target, label.text, x, y,
+                                            std::max(1, textSize.Width), alignment);
+                        drew = true;
+                    }
+                    if(!drew)
+                        target.Draw(corners[0], corners[1], corners[2], corners[3],
+                                    Gorgon::Graphics::RGBAf(0.85f, 0.85f, 0.95f, 0.35f));
                 }
                 else {
                     const auto fill = FallbackColorForEntity(*entity);
                     target.Draw(corners[0], corners[1], corners[2], corners[3], fill);
+                }
+            }
+
+            // Particles are additive-looking quads, drawn over the entity that emits them. The live
+            // list belongs to whichever simulation is ticking: the session when scripts run, the
+            // runtime's own otherwise.
+            if(impl.options.drawEntities && entity->particles.has_value()) {
+                const auto &emitter = *entity->particles;
+                const auto *particles = impl.play
+                    ? impl.play->GetParticles(entity->id)
+                    : impl.components.GetParticles(entity->id);
+                if(particles) {
+                    const float baseSize = std::max(0.5f, emitter.size) *
+                                           std::max(0.01f, (std::abs(world.scaleX) + std::abs(world.scaleY)) * 0.5f);
+                    for(const auto &particle : *particles) {
+                        const float t = particle.life > 0.0f
+                            ? std::clamp(particle.age / particle.life, 0.0f, 1.0f)
+                            : 1.0f;
+                        const auto color = LerpColor(emitter.startColor, emitter.endColor, t);
+                        const float half = baseSize * 0.5f;
+                        const Gorgon::Geometry::Pointf quad[4] = {
+                            toScreen(particle.x - half, particle.y - half),
+                            toScreen(particle.x + half, particle.y - half),
+                            toScreen(particle.x + half, particle.y + half),
+                            toScreen(particle.x - half, particle.y + half)
+                        };
+                        target.Draw(quad[0], quad[1], quad[2], quad[3], color);
+                    }
                 }
             }
 
@@ -500,7 +737,23 @@ namespace Gorgon :: Editor {
 
     const std::vector<std::string> &SceneRuntime::GetPlayedSounds() const {
         static const std::vector<std::string> empty;
-        return impl_->play ? impl_->play->GetPlayedSounds() : empty;
+        if(impl_->play)
+            return impl_->play->GetPlayedSounds();
+        return impl_->componentSounds.empty() ? empty : impl_->componentSounds;
+    }
+
+    const std::vector<Particle> *SceneRuntime::GetParticles(EntityId id) const {
+        if(impl_->play)
+            return impl_->play->GetParticles(id);
+        return impl_->components.GetParticles(id);
+    }
+
+    EntityId SceneRuntime::GetActiveCameraEntity() const {
+        return impl_->activeCameraEntity();
+    }
+
+    void SceneRuntime::SetTextPrinter(const Gorgon::Graphics::StyledPrinter *printer) {
+        impl_->textPrinter = printer;
     }
 
     int SceneRuntime::GetLoadedSpriteCount() const {

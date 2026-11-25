@@ -6,6 +6,7 @@
 #include "Scene.h"
 
 #include <Gorgon/Graphics/Layer.h>
+#include <Gorgon/Graphics/Font.h>
 
 #include <memory>
 #include <string>
@@ -127,6 +128,20 @@ namespace Gorgon :: Editor {
         /// Overlapping collider pairs from the last Update(). Empty while no scripts run, because a
         /// scriptless scene has no play session to resolve collisions in.
         const std::vector<CollisionPair> &GetActiveOverlaps() const;
+
+        /// Live particles of an entity's ParticleComponent, or nullptr when it has none. Works with
+        /// and without scripts: a scriptless scene still steps its emitters in Update().
+        const std::vector<Particle> *GetParticles(EntityId id) const;
+
+        /// Id of the entity whose active CameraComponent drives Render(), or InvalidEntityId.
+        EntityId GetActiveCameraEntity() const;
+
+        /**
+         * Printer used for TextComponent entities. The runtime does not own a font (a headless
+         * consumer has none), so the host hands its own StyledPrinter in. Without one, text is
+         * drawn as a translucent placeholder quad.
+         */
+        void SetTextPrinter(const Gorgon::Graphics::StyledPrinter *printer);
 
         /// True when the last Update() reported an overlap between the two entities (either order).
         bool IsOverlapping(EntityId a, EntityId b) const;

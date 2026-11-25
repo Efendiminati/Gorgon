@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace Gorgon :: Editor {
 
@@ -107,6 +108,160 @@ namespace Gorgon :: Editor {
         bool operator!=(const ScriptComponent &other) const {
             return !(*this == other);
         }
+    };
+
+    /// A sprite sheet animation: one asset split into a `cols x rows` grid of frames.
+    /// `frameTime` is runtime state (advance accumulator) and is never serialized.
+    struct SpriteAnimComponent {
+        std::string asset;
+        int frameW = 32;
+        int frameH = 32;
+        int frameCount = 1;
+        float fps = 12.0f;
+        bool loop = true;
+        bool playing = true;
+        int currentFrame = 0;
+        ColorRGBA tint{255, 255, 255, 255};
+        float frameTime = 0.0f;
+
+        bool operator==(const SpriteAnimComponent &other) const {
+            return asset == other.asset &&
+                   frameW == other.frameW && frameH == other.frameH &&
+                   frameCount == other.frameCount && fps == other.fps &&
+                   loop == other.loop && playing == other.playing &&
+                   currentFrame == other.currentFrame && tint == other.tint;
+        }
+        bool operator!=(const SpriteAnimComponent &other) const {
+            return !(*this == other);
+        }
+    };
+
+    enum class TextAlign {
+        Left = 0,
+        Center,
+        Right
+    };
+
+    inline std::string TextAlignToString(TextAlign value) {
+        switch(value) {
+            case TextAlign::Center: return "center";
+            case TextAlign::Right:  return "right";
+            case TextAlign::Left:
+            default:                return "left";
+        }
+    }
+
+    inline bool TextAlignFromString(const std::string &str, TextAlign &out) {
+        if(str == "left")   { out = TextAlign::Left;   return true; }
+        if(str == "center") { out = TextAlign::Center; return true; }
+        if(str == "right")  { out = TextAlign::Right;  return true; }
+        return false;
+    }
+
+    /// Text drawn at the entity origin. `style` names a font registered by the host
+    /// ("regular", "bold", ...); unknown names fall back to the host's default font.
+    struct TextComponent {
+        std::string text = "Text";
+        ColorRGBA color{255, 255, 255, 255};
+        float fontSize = 16.0f;
+        std::string style = "regular";
+        TextAlign align = TextAlign::Left;
+
+        bool operator==(const TextComponent &other) const {
+            return text == other.text && color == other.color &&
+                   fontSize == other.fontSize && style == other.style &&
+                   align == other.align;
+        }
+        bool operator!=(const TextComponent &other) const {
+            return !(*this == other);
+        }
+    };
+
+    /// Background music / sound effect an entity plays.
+    struct AudioComponent {
+        std::string asset;
+        float volume = 1.0f;
+        bool loop = false;
+        bool playOnStart = true;
+
+        bool operator==(const AudioComponent &other) const {
+            return asset == other.asset && volume == other.volume &&
+                   loop == other.loop && playOnStart == other.playOnStart;
+        }
+        bool operator!=(const AudioComponent &other) const {
+            return !(*this == other);
+        }
+    };
+
+    /// Marks the entity as the scene camera. The runtime uses the active component when present,
+    /// and a follow target keeps the camera centred on another entity every frame.
+    struct CameraComponent {
+        bool active = true;
+        float zoom = 1.0f;
+        EntityId followTarget = InvalidEntityId;
+
+        bool operator==(const CameraComponent &other) const {
+            return active == other.active && zoom == other.zoom &&
+                   followTarget == other.followTarget;
+        }
+        bool operator!=(const CameraComponent &other) const {
+            return !(*this == other);
+        }
+    };
+
+    /// A uniform grid of tiles. `tiles` is row-major with cols * rows entries; a negative index
+    /// means the cell is empty. Tile indices address the tileset sheet in the same row-major order
+    /// with `tilesetCols` columns.
+    struct TilemapComponent {
+        float tileW = 32.0f;
+        float tileH = 32.0f;
+        int cols = 0;
+        int rows = 0;
+        int tilesetCols = 8;
+        std::string tilesetAsset;
+        std::vector<int> tiles;
+
+        bool operator==(const TilemapComponent &other) const {
+            return tileW == other.tileW && tileH == other.tileH &&
+                   cols == other.cols && rows == other.rows &&
+                   tilesetCols == other.tilesetCols &&
+                   tilesetAsset == other.tilesetAsset && tiles == other.tiles;
+        }
+        bool operator!=(const TilemapComponent &other) const {
+            return !(*this == other);
+        }
+    };
+
+    /// CPU particle emitter. The component holds the emitter settings; the live particles live in
+    /// the runtime (PlaySession / SceneRuntime) so nothing simulation-only reaches a scene file.
+    struct ParticleComponent {
+        float emitRate = 20.0f; // particles per second
+        float lifetime = 1.0f;  // seconds a particle lives
+        float speed = 60.0f;    // initial world units per second
+        ColorRGBA startColor{255, 200, 80, 255};
+        ColorRGBA endColor{255, 80, 20, 0};
+        float size = 4.0f;
+        bool active = true;
+
+        bool operator==(const ParticleComponent &other) const {
+            return emitRate == other.emitRate && lifetime == other.lifetime &&
+                   speed == other.speed && startColor == other.startColor &&
+                   endColor == other.endColor && size == other.size &&
+                   active == other.active;
+        }
+        bool operator!=(const ParticleComponent &other) const {
+            return !(*this == other);
+        }
+    };
+
+    /// One live particle. Positions are local to the emitter entity.
+    struct Particle {
+        float x = 0.0f;
+        float y = 0.0f;
+        float vx = 0.0f;
+        float vy = 0.0f;
+        float age = 0.0f;
+        float life = 1.0f;
     };
 
 } // namespace Gorgon::Editor
