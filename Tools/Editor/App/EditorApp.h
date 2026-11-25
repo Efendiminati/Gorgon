@@ -2,6 +2,7 @@
 
 #include "Core/CommandStack.h"
 #include "Core/FileWatcher.h"
+#include "Core/GameExporter.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "AssetBrowserPanel.h"
@@ -97,6 +98,16 @@ namespace Gorgon :: Editor {
 
         /// Directory new prefabs are written to (the scene's folder, else the asset browser root).
         std::string GetPrefabDirectory() const;
+
+        // ---- Standalone export (GorgonPlayer) --------------------------------
+        /// Default folder the Export dialog offers: `<scene folder>/Export/<scene name>`.
+        std::string GetDefaultExportDirectory() const;
+
+        /// Packages the current scene into a runnable folder: `game.json`, the scene, every
+        /// referenced asset (prefabs scanned recursively) and `GorgonPlayer.exe` plus its runtime
+        /// DLLs. Empty option fields default to the scene folder, the scene name and 1280x720.
+        /// Every step is reported to the console.
+        ExportResult ExportGame(const ExportOptions &options);
         HierarchyPanel &GetHierarchy() { return *hierarchy_; }
         InspectorPanel &GetInspector() { return *inspector_; }
         const std::string &GetCurrentFilePath() const { return currentFilePath_; }
@@ -200,6 +211,9 @@ namespace Gorgon :: Editor {
                                std::string &outPath) const;
         void onSavePrefabRequested(EntityId entityId);
 
+        // Export helpers
+        void onExportClicked();
+
         Gorgon::UI::Window &window_;
         Scene scene_;
         std::string currentFilePath_;
@@ -234,6 +248,7 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Button btnOpen_{"Open"};
         Gorgon::Widgets::Button btnSave_{"Save"};
         Gorgon::Widgets::Button btnSaveAs_{"Save As"};
+        Gorgon::Widgets::Button btnExport_{"Export"};
         Gorgon::Widgets::Button btnPlay_{"Play"};
         Gorgon::Widgets::Button btnPause_{"Pause"};
         Gorgon::Widgets::Button btnStop_{"Stop"};

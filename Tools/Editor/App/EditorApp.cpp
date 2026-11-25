@@ -396,6 +396,7 @@ namespace Gorgon :: Editor {
         btnOpen_.SetWidth(Units(2.5));
         btnSave_.SetWidth(Units(2.5));
         btnSaveAs_.SetWidth(Units(3.2));
+        btnExport_.SetWidth(Units(2.8));
         btnPlay_.SetWidth(Units(2.5));
         btnPause_.SetWidth(Units(2.7));
         btnStop_.SetWidth(Units(2.5));
@@ -411,6 +412,7 @@ namespace Gorgon :: Editor {
         btnOpen_.ClickEvent.Register(*this, &EditorApp::onOpenClicked);
         btnSave_.ClickEvent.Register(*this, &EditorApp::onSaveClicked);
         btnSaveAs_.ClickEvent.Register(*this, &EditorApp::onSaveAsClicked);
+        btnExport_.ClickEvent.Register([this]() { onExportClicked(); });
         btnPlay_.ClickEvent.Register(*this, &EditorApp::onPlayClicked);
         btnPause_.ClickEvent.Register(*this, &EditorApp::onPauseClicked);
         btnStop_.ClickEvent.Register(*this, &EditorApp::onStopClicked);
@@ -426,7 +428,7 @@ namespace Gorgon :: Editor {
         btnConsoleTab_.ClickEvent.Register([this]() { ShowBottomTab(BottomTab::Console); });
 
         toolbarOrganizer_
-            << btnNew_ << btnOpen_ << btnSave_ << btnSaveAs_
+            << btnNew_ << btnOpen_ << btnSave_ << btnSaveAs_ << btnExport_
             << btnPlay_ << btnPause_ << btnStop_
             << btnUndo_ << btnRedo_
             << btnResetView_ << chkGridSnap_
@@ -1271,6 +1273,88 @@ namespace Gorgon :: Editor {
         recordEdit(res.attachedScript ? "Attach Script" : "Drop Asset");
         updateStatusText(viewport_.GetCamera().panX, viewport_.GetCamera().panY, viewport_.GetCamera().zoom);
         return true;
+    }
+
+    // ---- Standalone export --------------------------------------------------
+
+    std::string EditorApp::GetDefaultExportDirectory() const {
+        std::string base = GetPrefabDirectory();
+        std::string name = scene_.name.empty() ? std::string("Game") : scene_.name;
+        for(char &c : name) {
+            if(c == '/' || c == '\\' || c == ':' || c == '*' || c == '?' || c == '"' ||
+               c == '<' || c == '>' || c == '|')
+                c = '_';
+        }
+
+        if(base.empty())
+            return "Export/" + name;
+        return base + "/Export/" + name;
+    }
+
+    ExportResult EditorApp::ExportGame(const ExportOptions &requested) {
+        ExportOptions options = requested;
+
+        if(options.sceneBaseDir.empty())
+            options.sceneBaseDir = viewport_.GetAssetBaseDir();
+        if(options.title.empty())
+            options.title = scene_.name.empty() ? std::string("Gorgon Game") : scene_.name;
+        if(options.outputDir.empty())
+            options.outputDir = GetDefaultExportDirectory();
+
+        const ExportResult result = GameExporter::Export(scene_, options);
+
+        if(!result.ok) {
+            LogMessage(LogSeverity::Error,
+                       "Export failed: " +
+                           (result.error.empty() ? std::string("unknown error") : result.error),
+                       "Export");
+            return result;
+        }
+
+        LogMessage(LogSeverity::Info,
+                   "Exported '" + options.title + "' to " + result.outputDir + " (" +
+                       std::to_string(result.copiedAssets.size()) + " assets, " +
+                       std::to_string(result.copiedRuntimeDlls.size()) + " runtime DLLs)",
+                   "Export");
+
+        if(!result.playerExecutablePath.empty())
+            LogMessage(LogSeverity::Info, "Player: " + result.playerExecutablePath, "Export");
+        else
+            LogMessage(LogSeverity::Warn,
+                       "No GorgonPlayer.exe was copied; build the GorgonPlayer target first.",
+                       "Export");
+
+        for(const auto &asset : result.missingAssets)
+            LogMessage(LogSeverity::Warn, "Missing asset, not exported: " + asset, "Export");
+        for(const auto &warning : result.warnings)
+            LogMessage(LogSeverity::Warn, warning, "Export");
+
+        return result;
+    }
+
+    void EditorApp::onExportClicked() {
+        if(playMode_ != PlayMode::Stopped) {
+            LogMessage(LogSeverity::Error, "Stop play mode before exporting.", "Export");
+            Gorgon::UI::ShowMessage("Export", "Stop play mode before exporting a game.");
+            return;
+        }
+
+        Gorgon::UI::Input<std::string>(
+            "Export Game",
+            "Write a standalone game bundle (game.json, scene, assets, GorgonPlayer.exe) to:",
+            "Folder",
+            [this](const std::string &path) {
+                ExportOptions options;
+                options.outputDir = path;
+                ExportGame(options);
+
+                // The log lines above are the result report; show them where they landed.
+                ShowBottomTab(BottomTab::Console);
+            },
+            GetDefaultExportDirectory(),
+            [](const std::string &s) { return !s.empty(); },
+            Gorgon::UI::CloseOption::Cancel
+        );
     }
 
     // ---- Console & script editor -------------------------------------------

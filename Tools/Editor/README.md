@@ -10,6 +10,7 @@ what Gorgon already needs.
 | `GorgonEditorCore` | static library (`Gorgon::EditorCore`) | Scene data model, `.gscene.json` serializer, undo stack, play-in-editor session and the `SceneRuntime` loader. Reusable from games. |
 | `GorgonEditor` | executable | The editor: toolbar, hierarchy, viewport, inspector, asset browser. |
 | `EditorDemo` | executable (example) | ~20 lines of `SceneRuntime` integration that loads `Examples/EditorDemo/Scene/DemoScene.gscene.json` through `SceneRuntime` and runs it. |
+| `GorgonPlayer` | executable | Standalone player for an exported bundle: reads `game.json`, loads its scene and runs it at 60 fps with keyboard/mouse input. |
 | `UnitTest-EditorCore` | test executable | Catch2 tests for the scene model, serializer, undo stack, scripts and runtime loader. |
 
 ## Building
@@ -29,12 +30,13 @@ added to `Examples/` when `Gorgon::EditorCore` exists, i.e. when `BUILD_EDITOR=O
 
 ```bat
 cmake --preset WindowsTesting -DBUILD_EDITOR=ON
-cmake --build build/WindowsTesting --config Release --target GorgonEditor EditorDemo UnitTest-EditorCore
+cmake --build build/WindowsTesting --config Release --target GorgonEditor GorgonPlayer EditorDemo UnitTest-EditorCore
 ```
 
 Outputs:
 
 - `build/<preset>/Bin/Release/GorgonEditor.exe`
+- `build/<preset>/Bin/Release/GorgonPlayer.exe`
 - `Examples/EditorDemo/Bin/EditorDemo.exe` (the `Scene/` folder is copied next to it on every build)
 
 Because MSVC needs its environment, build from a Developer Command Prompt (or run
@@ -73,9 +75,9 @@ scene path and a `*` while there are unsaved changes.
 `Ctrl+D`, `Delete` and `F` are ignored while a text field has focus, so typing in the inspector
 cannot delete or move anything.
 
-Toolbar buttons: **New**, **Open**, **Save**, **Save As**, **Play**, **Pause**, **Stop**, **Undo**,
-**Redo**, **Reset View**, plus the **Grid Snap** toggle and a status line showing the world position
-under the cursor and the current zoom.
+Toolbar buttons: **New**, **Open**, **Save**, **Save As**, **Export**, **Play**, **Pause**, **Stop**,
+**Undo**, **Redo**, **Reset View**, plus the **Grid Snap** toggle and a status line showing the world
+position under the cursor and the current zoom.
 
 Panels:
 
@@ -663,6 +665,69 @@ EditorDemo.exe --frames 120                      REM render 120 frames then exit
 `--selftest` needs no window: it loads the scene, verifies every sprite path resolves, ticks the
 scripts and writes `%TEMP%\gorgon_editor_demo_report.txt` with the resulting transforms.
 
+## Exporting a standalone game
+
+**Export** in the toolbar packages the open scene into a folder that runs on its own: no editor, no
+compiler and no project files. It asks for a destination folder (default
+`<scene folder>/Export/<scene name>`), then logs every step to the Console tab.
+
+The bundle layout mirrors the project, so every path stored in the scene keeps working:
+
+```
+MyGame/
+  game.json                  title, window size and the entry scene
+  GorgonPlayer.exe           the standalone player
+  <runtime DLLs>             whatever sits next to GorgonPlayer.exe (e.g. vulkan-1.dll)
+  scene.gscene.json          the scene itself
+  assets/*.png               copied with their relative paths intact
+  scripts/*.gs
+  prefabs/*.gprefab.json     prefabs are copied too, including the ones a prefab nests
+```
+
+`game.json` looks like this:
+
+```json
+{
+  "schemaVersion": 1,
+  "title": "EditorDemo",
+  "width": 1280,
+  "height": 720,
+  "startScene": "scene.gscene.json"
+}
+```
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schemaVersion` | int | Required, currently `1`. |
+| `title` | string | Window title; defaults to the scene name. |
+| `width`, `height` | int | Initial window size in pixels (`1280x720` when not given). |
+| `startScene` | string | Path to the scene, relative to `game.json`. |
+
+Double-clicking `GorgonPlayer.exe` (or running it) plays the bundle:
+
+```bat
+GorgonPlayer.exe                       rem game.json next to the exe
+GorgonPlayer.exe path\to\MyGame        rem any exported folder
+GorgonPlayer.exe --frames 120          rem render 120 frames then exit (CI friendly)
+GorgonPlayer.exe --selftest            rem headless: load + tick 30 frames + report, exit code 0
+```
+
+The player loads the scene through `SceneRuntime`, forwards the window's keyboard and mouse state
+into the script `Input` library, and steps everything at a fixed 60 fps. `--selftest` needs no
+window and writes `%TEMP%\gorgon_player_report.txt`.
+
+Export also runs headless, which is how the build verification uses it:
+
+```bat
+GorgonEditor.exe --export path\to\scene.gscene.json path\to\MyGame
+```
+
+What the exporter collects automatically: sprite, sprite-sheet, tilemap tileset, audio and script
+assets, plus every `prefabSource` prefab (scanned recursively, cycle-safe, and copied with the assets
+it references). Anything referenced but missing on disk is reported in the console instead of
+silently disappearing from the bundle. If `GorgonPlayer.exe` has not been built yet the export still
+writes the manifest, scene and assets and warns about the missing executable.
+
 ## Tests
 
 ```bat
@@ -671,6 +736,7 @@ ctest --test-dir build/WindowsTesting -C Release -R EditorCore --output-on-failu
 GorgonEditor.exe --selftest      rem camera, hit-testing, drag/snap, copy/paste, prefabs, console, syntax check, round-trip
 GorgonEditor.exe --smoke         rem real window: hierarchy/inspector sync, undo/redo, play-in-editor, console + script editor
 EditorDemo.exe --selftest        rem SceneRuntime: load, path resolution, script ticking
+GorgonPlayer.exe --selftest      rem exported bundle: game.json, scene load, 30 scripted frames
 ```
 
 The Catch2 suite covers the script runtime too: `[Lifecycle]` (Start → Update → OnDestroy order,
@@ -678,6 +744,16 @@ including a destroyed entity's hook and the Play-stop hooks), `[Scene]` (name lo
 destroy, camera, SpawnPrefab), `[Audio]` (sound calls are recorded with no device present) and
 `[Console]` (ring buffer, filter/scroll view, `Log()`/`Print()` capture, compile and runtime error
 attribution, compile-only `CheckSyntax`).
+
+`[Export]` covers the packager without a window: asset collection across every component plus nested
+prefabs, the `game.json` codec (defaults, invalid input, missing `startScene`) and a real export of
+`Examples/EditorDemo/Scene/DemoScene.gscene.json` that asserts the bundle layout (`game.json`, scene,
+7 assets, `GorgonPlayer.exe`) and reloads the exported scene. Running that bundle is the end-to-end
+check:
+
+```bat
+GorgonPlayer.exe --frames 30      rem inside the exported folder, exit code 0
+```
 
 The panel widgets need a window and the widget theme, so they are covered by `--smoke` rather than
 the headless `--selftest`: it opens the console tab, checks the All/Errors filter and Clear, then
@@ -689,11 +765,12 @@ back to disk and verifies the console received the outcome.
 ```
 Tools/Editor/
   PLAN.md                architecture and phase plan
-  CMakeLists.txt         GorgonEditorCore + app + tests
-  Core/                  Scene, Entity, Components, SceneSerializer,
-                         CommandStack, PlaySession, SceneRuntime
+  CMakeLists.txt         GorgonEditorCore + app + player + tests
+  Core/                  Scene, Entity, Components, SceneSerializer, GameExporter,
+                         CommandStack, PlaySession, SceneRuntime, FileWatcher
   App/                   EditorApp (window shell), Viewport, HierarchyPanel,
                          InspectorPanel, AssetBrowserPanel, EditorTheme, Main
+  Player/                GorgonPlayer entry point (exported game runtime)
   Tests/                 Catch2 tests for Core
 Examples/EditorDemo/     demo scene, assets, scripts and the small runtime example
 ```

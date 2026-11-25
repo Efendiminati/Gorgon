@@ -20,6 +20,8 @@ add_library(GorgonEditorCore STATIC
     Core/ScriptLog.cpp
     Core/FileWatcher.h
     Core/FileWatcher.cpp
+    Core/GameExporter.h
+    Core/GameExporter.cpp
     Core/PlaySession.h
     Core/PlaySession.cpp
     Core/SceneRuntime.h
@@ -38,6 +40,7 @@ target_link_libraries(GorgonEditorCore PUBLIC
 )
 
 add_subdirectory(App)
+add_subdirectory(Player)
 
 if(TESTS AND UNIT_TESTS AND TARGET Catch2::Catch2WithMain)
     add_subdirectory(Tests)

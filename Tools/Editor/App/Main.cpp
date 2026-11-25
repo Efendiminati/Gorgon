@@ -1,4 +1,5 @@
 #include "Core/ComponentSimulation.h"
+#include "Core/GameExporter.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "Core/SceneRuntime.h"
@@ -1396,6 +1397,52 @@ namespace {
         return 0;
     }
 
+    /// Headless packaging: `GorgonEditor --export <scene.gscene.json> <outputDir>` writes a
+    /// standalone bundle (game.json, scene, assets and GorgonPlayer.exe) and exits. Used by the
+    /// build verification, and it makes export scriptable without opening the editor.
+    int RunExport(const std::string &scenePath, const std::string &outputDir) {
+        using namespace Gorgon::Editor;
+
+        if(scenePath.empty() || outputDir.empty()) {
+            std::cerr << "usage: GorgonEditor --export <scene.gscene.json> <outputDir>\n";
+            return 1;
+        }
+
+        Scene scene;
+        std::string error;
+        if(!SceneSerializer::LoadFromFile(scenePath, scene, &error)) {
+            std::cerr << "FAIL: " << (error.empty() ? "could not load the scene" : error) << "\n";
+            return 1;
+        }
+
+        ExportOptions options;
+        options.outputDir = outputDir;
+        const auto parent = std::filesystem::path(scenePath).parent_path();
+        if(!parent.empty())
+            options.sceneBaseDir = parent.generic_string();
+        // The player sits next to GorgonEditor.exe in the build output.
+        options.playerBinaryPath = GameExporter::FindPlayerBinary(std::string());
+
+        const ExportResult result = GameExporter::Export(scene, options);
+        if(!result.ok) {
+            std::cerr << "FAIL: export: " << result.error << "\n";
+            return 1;
+        }
+
+        for(const auto &missing : result.missingAssets)
+            std::cerr << "missing asset: " << missing << "\n";
+        for(const auto &warning : result.warnings)
+            std::cerr << "warning: " << warning << "\n";
+
+        std::cout << "Exported '" << scene.name << "' to " << result.outputDir << " ("
+                  << result.copiedAssets.size() << " assets, "
+                  << result.copiedRuntimeDlls.size() << " runtime DLLs, player: "
+                  << (result.playerExecutablePath.empty() ? std::string("none")
+                                                          : result.playerExecutablePath)
+                  << ")\n";
+        return 0;
+    }
+
     /// Diagnostic: isolates which component's construction/teardown corrupts the heap.
     /// Run as `GorgonEditor --diag <variant>`; the process exit code is the verdict.
     int RunDiag(const std::string &variant) {
@@ -2282,6 +2329,8 @@ int main(int argc, char *argv[]) {
     bool smoke = false;
     std::string diagVariant;
     std::string initialScenePath;
+    std::string exportScene;
+    std::string exportOutput;
 
     for(int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -2293,6 +2342,14 @@ int main(int argc, char *argv[]) {
             if(i + 1 < argc) {
                 diagVariant = argv[++i];
             }
+        } else if(arg == "--export") {
+            if(i + 2 < argc) {
+                exportScene = argv[++i];
+                exportOutput = argv[++i];
+            } else {
+                std::cerr << "usage: GorgonEditor --export <scene.gscene.json> <outputDir>\n";
+                return 1;
+            }
         } else if(initialScenePath.empty() && !arg.empty() && arg[0] != '-') {
             initialScenePath = arg;
         }
@@ -2300,6 +2357,11 @@ int main(int argc, char *argv[]) {
 
     if(!diagVariant.empty()) {
         return RunDiag(diagVariant);
+    }
+
+    // Headless packaging runs before Gorgon::Initialize: it needs no window.
+    if(!exportScene.empty() || !exportOutput.empty()) {
+        return RunExport(exportScene, exportOutput);
     }
 
     if(selftest) {
@@ -2876,6 +2938,83 @@ int main(int argc, char *argv[]) {
             Gorgon::NextFrame();
         }
 
+        // ---- Standalone export: the toolbar path, end to end -----------------
+        {
+            using namespace Gorgon::Editor;
+
+            std::error_code eec;
+            const auto exportDir =
+                std::filesystem::temp_directory_path() / "gorgon_editor_smoke_export";
+            std::filesystem::remove_all(exportDir, eec);
+
+            ExportOptions exportOptions;
+            exportOptions.outputDir = exportDir.generic_string();
+            const ExportResult exported = app.ExportGame(exportOptions);
+
+            if(!exported.ok) {
+                std::cerr << "FAIL: export failed: " << exported.error << "\n";
+                window.Close();
+                return 1;
+            }
+            if(!std::filesystem::exists(exported.manifestPath) ||
+               !std::filesystem::exists(exported.scenePath)) {
+                std::cerr << "FAIL: export did not write game.json and the exported scene\n";
+                std::filesystem::remove_all(exportDir, eec);
+                window.Close();
+                return 1;
+            }
+
+            GameManifest manifest;
+            std::string manifestError;
+            if(!GameExporter::LoadManifestFromFile(exported.manifestPath, manifest, &manifestError)) {
+                std::cerr << "FAIL: the exported game.json is unreadable: " << manifestError << "\n";
+                std::filesystem::remove_all(exportDir, eec);
+                window.Close();
+                return 1;
+            }
+            if(manifest.startScene != "scene.gscene.json" ||
+               !std::filesystem::exists(std::filesystem::path(exportDir) / manifest.startScene)) {
+                std::cerr << "FAIL: game.json points at a missing scene: " << manifest.startScene << "\n";
+                std::filesystem::remove_all(exportDir, eec);
+                window.Close();
+                return 1;
+            }
+
+            // The report is the console line: the export has to say where it wrote the bundle.
+            app.ShowBottomTab(BottomTab::Console);
+            Gorgon::NextFrame();
+
+            auto &exportConsole = app.GetConsolePanel();
+            bool sawExportLine = false;
+            for(int i = 0; i < exportConsole.GetLineCount(); ++i) {
+                if(exportConsole.GetLineText(i).find("Exported '") != std::string::npos)
+                    sawExportLine = true;
+            }
+            if(!sawExportLine) {
+                std::cerr << "FAIL: the export result never reached the console\n";
+                std::filesystem::remove_all(exportDir, eec);
+                window.Close();
+                return 1;
+            }
+
+            {
+                std::ofstream report(std::filesystem::temp_directory_path() /
+                                         "gorgon_editor_export_report.txt",
+                                     std::ios::trunc);
+                report << "outputDir=" << exported.outputDir << "\n"
+                       << "manifest=" << exported.manifestPath << "\n"
+                       << "scene=" << exported.scenePath << "\n"
+                       << "assets=" << exported.copiedAssets.size() << "\n"
+                       << "missing=" << exported.missingAssets.size() << "\n"
+                       << "dlls=" << exported.copiedRuntimeDlls.size() << "\n"
+                       << "player=" << exported.playerExecutablePath << "\n";
+            }
+
+            std::filesystem::remove_all(exportDir, eec);
+            app.ShowBottomTab(BottomTab::Assets);
+            Gorgon::NextFrame();
+        }
+
         // Verify save/open round-trip through EditorApp in live window mode
         const auto tmpPath = (std::filesystem::temp_directory_path() / "gorgon_editor_smoke.gscene.json").string();
         std::string err;
@@ -2893,7 +3032,7 @@ int main(int argc, char *argv[]) {
             std::cerr << "FAIL: inspector edit did not persist through save/open\n";
             return 1;
         }
-        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + round-trip)\n";
+        std::cout << "GorgonEditor --smoke PASSED (window shell + dark theme + 3 frames + hierarchy/inspector + console panel + script editor + export + round-trip)\n";
         return 0;
     }
 

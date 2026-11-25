@@ -4,6 +4,7 @@
 #include "Core/CollisionSystem.h"
 #include "Core/CommandStack.h"
 #include "Core/FileWatcher.h"
+#include "Core/GameExporter.h"
 #include "Core/PlaySession.h"
 #include "Core/Scene.h"
 #include "Core/SceneRuntime.h"
@@ -2970,4 +2971,219 @@ TEST_CASE("FileWatcher detects added, modified, and removed files", "[EditorCore
     REQUIRE(watcher.GetTrackedFileCount() == 1);
 
     fs::remove_all(dir, ec);
+}
+
+// ---- Standalone export (GorgonPlayer) ---------------------------------------
+
+namespace {
+    namespace export_fs = std::filesystem;
+
+    std::string UniqueExportTempDir(const std::string &tag) {
+        const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+        const export_fs::path dir =
+            export_fs::temp_directory_path() / ("gorgon_export_" + tag + "_" +
+                                                std::to_string(static_cast<long long>(stamp)));
+        std::error_code ec;
+        export_fs::remove_all(dir, ec);
+        export_fs::create_directories(dir, ec);
+        return dir.generic_string();
+    }
+
+    void WriteTextFile(const std::string &path, const std::string &text) {
+        const export_fs::path p(path);
+        std::error_code ec;
+        if(p.has_parent_path())
+            export_fs::create_directories(p.parent_path(), ec);
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << text;
+    }
+
+    /// Finds a repository-relative file by walking up from the test's working directory.
+    std::string FindRepoFile(const std::string &relative) {
+        std::error_code ec;
+        export_fs::path dir = export_fs::current_path(ec);
+        for(int level = 0; level < 8 && !dir.empty(); ++level) {
+            const auto candidate = dir / relative;
+            if(export_fs::exists(candidate, ec))
+                return candidate.generic_string();
+
+            const auto parent = dir.parent_path();
+            if(parent == dir)
+                break;
+            dir = parent;
+        }
+        return {};
+    }
+} // namespace
+
+TEST_CASE("GameExporter collects scene assets, scripts and nested prefabs", "[EditorCore][Export]") {
+    const std::string dir = UniqueExportTempDir("collect");
+    const export_fs::path root(dir);
+
+    WriteTextFile((root / "prefabs" / "turret.gprefab.json").generic_string(), R"({
+  "schemaVersion": 1,
+  "type": "gorgon.prefab",
+  "name": "Turret",
+  "rootId": 1,
+  "entities": [
+    { "id": 1, "parentId": 0, "name": "Turret", "transform": { "x": 0.0, "y": 0.0 } },
+    { "id": 2, "parentId": 1, "name": "Barrel",
+      "transform": { "x": 8.0, "y": 0.0 }, "sprite": { "asset": "assets/barrel.png" } },
+    { "id": 3, "parentId": 1, "name": "Base",
+      "transform": { "x": 0.0, "y": 0.0 }, "prefabSource": "prefabs/base.gprefab.json" }
+  ]
+}
+)");
+    WriteTextFile((root / "prefabs" / "base.gprefab.json").generic_string(), R"({
+  "schemaVersion": 1,
+  "type": "gorgon.prefab",
+  "name": "Base",
+  "rootId": 1,
+  "entities": [
+    { "id": 1, "parentId": 0, "name": "Base",
+      "sprite": { "asset": "assets/base.png" }, "audio": { "asset": "sfx/hum.wav" } }
+  ]
+}
+)");
+
+    Scene scene;
+    Entity &hero = scene.CreateEntity("Hero");
+    hero.sprite = SpriteComponent{"assets/hero.png", ColorRGBA{}};
+    hero.script = ScriptComponent{"scripts/player.gs"};
+
+    Entity &runner = scene.CreateEntity("Runner");
+    runner.spriteAnim = SpriteAnimComponent{};
+    runner.spriteAnim->asset = "sheets/run.png";
+
+    Entity &ground = scene.CreateEntity("Ground");
+    ground.tilemap = TilemapComponent{};
+    ground.tilemap->tilesetAsset = "assets/tiles.png";
+    ground.tilemap->cols = 2;
+    ground.tilemap->rows = 1;
+    ground.tilemap->tiles = {0, 1};
+
+    Entity &props = scene.CreateEntity("Props");
+    props.audio = AudioComponent{};
+    props.audio->asset = "sfx/hit.wav";
+
+    Entity &turret = scene.CreateEntity("Turret");
+    turret.prefabSource = "prefabs/turret.gprefab.json";
+
+    // A duplicate reference must be collected once.
+    Entity &twin = scene.CreateEntity("Twin");
+    twin.sprite = SpriteComponent{"assets/hero.png", ColorRGBA{}};
+
+    const auto assets = GameExporter::CollectReferencedAssets(scene, dir);
+
+    REQUIRE(assets == std::vector<std::string>{
+        "assets/barrel.png",
+        "assets/base.png",
+        "assets/hero.png",
+        "assets/tiles.png",
+        "prefabs/base.gprefab.json",
+        "prefabs/turret.gprefab.json",
+        "scripts/player.gs",
+        "sfx/hit.wav",
+        "sfx/hum.wav",
+        "sheets/run.png",
+    });
+
+    std::error_code ec;
+    export_fs::remove_all(dir, ec);
+}
+
+TEST_CASE("GameExporter manifest codec round-trips and validates", "[EditorCore][Export]") {
+    GameManifest manifest;
+    manifest.title = "Manifest Test";
+    manifest.width = 960;
+    manifest.height = 540;
+    manifest.startScene = "levels/one.gscene.json";
+
+    const std::string json = GameExporter::ManifestToJsonString(manifest);
+    GameManifest loaded;
+    std::string error;
+    REQUIRE(GameExporter::LoadManifestFromJsonString(json, loaded, &error));
+    REQUIRE(loaded == manifest);
+
+    // Defaults fill in whatever the file omits.
+    GameManifest defaults;
+    REQUIRE(GameExporter::LoadManifestFromJsonString(
+        R"({ "schemaVersion": 1, "startScene": "scene.gscene.json" })", defaults, &error));
+    REQUIRE(defaults.title == "Gorgon Game");
+    REQUIRE(defaults.width == 1280);
+    REQUIRE(defaults.height == 720);
+
+    GameManifest rejected;
+    REQUIRE_FALSE(GameExporter::LoadManifestFromJsonString("{ not json", rejected, &error));
+    REQUIRE_FALSE(error.empty());
+
+    REQUIRE_FALSE(GameExporter::LoadManifestFromJsonString(
+        R"({ "schemaVersion": 1 })", rejected, &error));
+    REQUIRE(error.find("startScene") != std::string::npos);
+}
+
+TEST_CASE("GameExporter writes a runnable bundle for the demo scene", "[EditorCore][Export]") {
+    const std::string demoScene = FindRepoFile("Examples/EditorDemo/Scene/DemoScene.gscene.json");
+    REQUIRE_FALSE(demoScene.empty());
+
+    Scene scene;
+    std::string error;
+    REQUIRE(SceneSerializer::LoadFromFile(demoScene, scene, &error));
+
+    const std::string outputDir = UniqueExportTempDir("bundle");
+
+    ExportOptions options;
+    options.outputDir = outputDir;
+    options.sceneBaseDir = export_fs::path(demoScene).parent_path().generic_string();
+    options.playerBinaryPath = GameExporter::FindPlayerBinary(std::string());
+
+    const ExportResult result = GameExporter::Export(scene, options);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    REQUIRE(result.error.empty());
+
+    // ---- manifest -------------------------------------------------------
+    REQUIRE(result.manifestPath == export_fs::path(outputDir + "/game.json").generic_string());
+    REQUIRE(export_fs::exists(result.manifestPath));
+
+    GameManifest manifest;
+    REQUIRE(GameExporter::LoadManifestFromFile(result.manifestPath, manifest, &error));
+    REQUIRE(manifest.title == "EditorDemo");
+    REQUIRE(manifest.startScene == "scene.gscene.json");
+    REQUIRE(manifest.width == 1280);
+    REQUIRE(manifest.height == 720);
+
+    // ---- scene ----------------------------------------------------------
+    REQUIRE(export_fs::exists(result.scenePath));
+    Scene reloaded;
+    REQUIRE(SceneSerializer::LoadFromFile(result.scenePath, reloaded, &error));
+    REQUIRE(reloaded.GetEntityCount() == scene.GetEntityCount());
+    REQUIRE(reloaded.name == scene.name);
+
+    // ---- assets ---------------------------------------------------------
+    // Five sprites plus the two scripts the demo scene references.
+    REQUIRE(result.missingAssets.empty());
+    REQUIRE(result.collectedAssets.size() == 7);
+    REQUIRE(result.copiedAssets.size() == result.collectedAssets.size());
+    for(const auto &asset : result.collectedAssets) {
+        INFO(asset);
+        REQUIRE(export_fs::exists(export_fs::path(outputDir) / asset));
+    }
+    REQUIRE(export_fs::exists(export_fs::path(outputDir) / "assets" / "orb.png"));
+    REQUIRE(export_fs::exists(export_fs::path(outputDir) / "scripts" / "orbit.gs"));
+
+    // ---- player ---------------------------------------------------------
+    if(options.playerBinaryPath.empty()) {
+        WARN("GorgonPlayer.exe was not built; the bundle executable was not verified");
+        REQUIRE(result.playerExecutablePath.empty());
+        REQUIRE_FALSE(result.warnings.empty());
+    }
+    else {
+        REQUIRE(result.playerExecutablePath ==
+                export_fs::path(outputDir + "/GorgonPlayer.exe").generic_string());
+        REQUIRE(export_fs::exists(result.playerExecutablePath));
+    }
+
+    std::error_code ec;
+    export_fs::remove_all(outputDir, ec);
 }
