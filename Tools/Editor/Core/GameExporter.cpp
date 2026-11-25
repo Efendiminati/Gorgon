@@ -1,6 +1,7 @@
 #include "GameExporter.h"
 
 #include "SceneSerializer.h"
+#include "ZipArchive.h"
 
 #include <Gorgon/Encoding/JSON.h>
 
@@ -597,6 +598,28 @@ namespace Gorgon :: Editor {
             std::sort(result.missingAssets.begin(), result.missingAssets.end());
             std::sort(result.copiedRuntimeDlls.begin(), result.copiedRuntimeDlls.end());
 
+            // 5. One file to hand over. The folder stays exactly as it was, so an export that
+            // cannot zip (or asks not to) is still a complete, runnable bundle.
+            if(options.makeArchive) {
+                const std::string zipPath = ArchivePathFor(options.outputDir);
+                std::string archiveError;
+                std::uint64_t archiveBytes = 0;
+                std::size_t archiveFiles = 0;
+                if(zipPath.empty()) {
+                    result.warnings.push_back(
+                        "The bundle folder has no name to derive an archive path from");
+                } else if(PackBundle(result, zipPath, &archiveError, &archiveBytes,
+                                     &archiveFiles)) {
+                    result.archivePath = NormalizeRelative(zipPath);
+                    result.archiveBytes = archiveBytes;
+                    result.archiveFiles = archiveFiles;
+                } else {
+                    result.warnings.push_back(
+                        "The bundle was exported, but the zip archive was not written: " +
+                        archiveError);
+                }
+            }
+
             result.ok = true;
             return result;
         } catch(const std::exception &err) {
@@ -608,6 +631,113 @@ namespace Gorgon :: Editor {
             result.error = "Export failed with an unknown error";
             return result;
         }
+    }
+
+    // ---- Packaging -----------------------------------------------------------
+
+    std::string GameExporter::ArchivePathFor(const std::string &outputDir) {
+        if(outputDir.empty())
+            return {};
+
+        fs::path dir = fs::path(outputDir).lexically_normal();
+        if(!dir.has_filename())
+            dir = dir.parent_path();
+
+        const std::string name = dir.filename().generic_string();
+        if(name.empty() || name == "." || name == "..")
+            return {};
+
+        return (dir.parent_path() / (name + ".zip")).generic_string();
+    }
+
+    bool GameExporter::PackBundle(const ExportResult &bundle, const std::string &zipPath,
+                                  std::string *outError, std::uint64_t *outArchiveBytes,
+                                  std::size_t *outFileCount) {
+        if(outArchiveBytes)
+            *outArchiveBytes = 0;
+        if(outFileCount)
+            *outFileCount = 0;
+
+        if(zipPath.empty()) {
+            if(outError)
+                *outError = "No archive path given";
+            return false;
+        }
+
+        if(bundle.outputDir.empty()) {
+            if(outError)
+                *outError = "The bundle has no folder to pack";
+            return false;
+        }
+
+        const fs::path root = fs::path(bundle.outputDir).lexically_normal();
+        std::error_code ec;
+        if(!fs::is_directory(root, ec)) {
+            if(outError)
+                *outError = "The bundle folder does not exist: " + root.generic_string();
+            return false;
+        }
+
+        // Everything in the folder is packed — what the exporter wrote plus anything the user
+        // dropped in beside it — in sorted order so the same bundle always produces the same
+        // archive.
+        std::vector<std::string> relativePaths;
+        for(fs::recursive_directory_iterator it(
+                root, fs::directory_options::skip_permission_denied, ec),
+            end;
+            !ec && it != end; it.increment(ec)) {
+            std::error_code fileEc;
+            if(!it->is_regular_file(fileEc))
+                continue;
+
+            // Lexical only: the archive path must be the folder's own spelling, never a resolved
+            // absolute path.
+            const fs::path relative = it->path().lexically_relative(root);
+            if(relative.empty() || relative == ".")
+                continue;
+
+            relativePaths.push_back(relative.generic_string());
+        }
+
+        if(ec) {
+            if(outError)
+                *outError = "Could not read the bundle folder: " + ec.message();
+            return false;
+        }
+
+        std::sort(relativePaths.begin(), relativePaths.end());
+
+        // A previous archive living in the bundle folder must not be packed into this one.
+        const std::string archiveName = fs::path(zipPath).filename().generic_string();
+
+        ZipArchive archive;
+        for(const auto &relative : relativePaths) {
+            if(relative == archiveName)
+                continue;
+
+            std::string error;
+            const std::string source = (root / fs::path(relative)).generic_string();
+            if(!archive.AddFile(relative, source, &error)) {
+                if(outError)
+                    *outError = error;
+                return false;
+            }
+        }
+
+        std::uint64_t bytes = 0;
+        std::size_t entries = 0;
+        std::string error;
+        if(!archive.Save(zipPath, &bytes, &entries, &error)) {
+            if(outError)
+                *outError = error;
+            return false;
+        }
+
+        if(outArchiveBytes)
+            *outArchiveBytes = bytes;
+        if(outFileCount)
+            *outFileCount = entries;
+        return true;
     }
 
 } // namespace Gorgon::Editor

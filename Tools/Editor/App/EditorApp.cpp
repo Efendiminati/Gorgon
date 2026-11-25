@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <iomanip>
 #include <iostream>
@@ -44,6 +45,19 @@ namespace Gorgon :: Editor {
             }
 
             return path + ext;
+        }
+
+        /// "812 B", "12.3 KB", "4.5 MB" — the console's one-line size report for an archive.
+        std::string FormatBytes(std::uint64_t bytes) {
+            std::ostringstream out;
+            if(bytes < 1024)
+                out << bytes << " B";
+            else if(bytes < 1024ull * 1024ull)
+                out << std::fixed << std::setprecision(1) << (double(bytes) / 1024.0) << " KB";
+            else
+                out << std::fixed << std::setprecision(1)
+                    << (double(bytes) / (1024.0 * 1024.0)) << " MB";
+            return out.str();
         }
     } // namespace
 
@@ -478,6 +492,7 @@ namespace Gorgon :: Editor {
         btnTiles_.SetWidth(Units(4.4));
         chkGridSnap_.SetWidth(Units(4.0));
         chkLights_.SetWidth(Units(3.4));
+        chkZip_.SetWidth(Units(2.2));
         btnAssetsTab_.SetWidth(Units(2.7));
         btnConsoleTab_.SetWidth(Units(3.0));
         lblStatus_.SetWidth(Units(14.0));
@@ -515,7 +530,7 @@ namespace Gorgon :: Editor {
             << btnNew_ << btnOpen_ << btnSave_ << btnSaveAs_ << btnExport_
             << btnPlay_ << btnPause_ << btnStop_
             << btnUndo_ << btnRedo_
-            << btnResetView_ << btnTiles_ << chkGridSnap_ << chkLights_
+            << btnResetView_ << btnTiles_ << chkGridSnap_ << chkLights_ << chkZip_
             // Bottom dock tabs: asset browser, script console and animation timeline share one row.
             << btnAssetsTab_ << btnConsoleTab_ << btnTimelineTab_ << lblStatus_;
     }
@@ -1424,6 +1439,17 @@ namespace Gorgon :: Editor {
                        "No GorgonPlayer.exe was copied; build the GorgonPlayer target first.",
                        "Export");
 
+        // One file to hand over: where it is, how many files and how big.
+        if(!result.archivePath.empty())
+            LogMessage(LogSeverity::Info,
+                       "Archive: " + result.archivePath + " (" +
+                           std::to_string(result.archiveFiles) + " files, " +
+                           FormatBytes(result.archiveBytes) + ")",
+                       "Export");
+        else if(options.makeArchive)
+            LogMessage(LogSeverity::Warn,
+                       "The bundle folder was written, but its zip archive was not.", "Export");
+
         for(const auto &asset : result.missingAssets)
             LogMessage(LogSeverity::Warn, "Missing asset, not exported: " + asset, "Export");
         for(const auto &warning : result.warnings)
@@ -1446,6 +1472,9 @@ namespace Gorgon :: Editor {
             [this](const std::string &path) {
                 ExportOptions options;
                 options.outputDir = path;
+                // The same toolbar toggle the CLI's --zip/--no-zip overrides: folder export always
+                // happens, the zip is optional.
+                options.makeArchive = chkZip_.GetState();
                 ExportGame(options);
 
                 // The log lines above are the result report; show them where they landed.

@@ -1414,11 +1414,13 @@ namespace {
     /// Headless packaging: `GorgonEditor --export <scene.gscene.json> <outputDir>` writes a
     /// standalone bundle (game.json, scene, assets and GorgonPlayer.exe) and exits. Used by the
     /// build verification, and it makes export scriptable without opening the editor.
-    int RunExport(const std::string &scenePath, const std::string &outputDir) {
+    /// `makeArchive` packs the folder into `<outputDir>.zip` beside it (the editor's Zip toggle).
+    int RunExport(const std::string &scenePath, const std::string &outputDir, bool makeArchive) {
         using namespace Gorgon::Editor;
 
         if(scenePath.empty() || outputDir.empty()) {
-            std::cerr << "usage: GorgonEditor --export <scene.gscene.json> <outputDir>\n";
+            std::cerr << "usage: GorgonEditor --export <scene.gscene.json> <outputDir> "
+                         "[--zip|--no-zip]\n";
             return 1;
         }
 
@@ -1431,6 +1433,7 @@ namespace {
 
         ExportOptions options;
         options.outputDir = outputDir;
+        options.makeArchive = makeArchive;
         const auto parent = std::filesystem::path(scenePath).parent_path();
         if(!parent.empty())
             options.sceneBaseDir = parent.generic_string();
@@ -1454,6 +1457,9 @@ namespace {
                   << (result.playerExecutablePath.empty() ? std::string("none")
                                                           : result.playerExecutablePath)
                   << ")\n";
+        if(!result.archivePath.empty())
+            std::cout << "Archive: " << result.archivePath << " (" << result.archiveFiles
+                      << " files, " << result.archiveBytes << " bytes)\n";
         return 0;
     }
 
@@ -2646,6 +2652,8 @@ int main(int argc, char *argv[]) {
     std::string initialScenePath;
     std::string exportScene;
     std::string exportOutput;
+    // -1 keeps the default (zip on); --zip / --no-zip override it.
+    int archiveOverride = -1;
 
     for(int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
@@ -2657,12 +2665,17 @@ int main(int argc, char *argv[]) {
             if(i + 1 < argc) {
                 diagVariant = argv[++i];
             }
+        } else if(arg == "--zip") {
+            archiveOverride = 1;
+        } else if(arg == "--no-zip") {
+            archiveOverride = 0;
         } else if(arg == "--export") {
             if(i + 2 < argc) {
                 exportScene = argv[++i];
                 exportOutput = argv[++i];
             } else {
-                std::cerr << "usage: GorgonEditor --export <scene.gscene.json> <outputDir>\n";
+                std::cerr << "usage: GorgonEditor --export <scene.gscene.json> <outputDir> "
+                             "[--zip|--no-zip]\n";
                 return 1;
             }
         } else if(initialScenePath.empty() && !arg.empty() && arg[0] != '-') {
@@ -2676,7 +2689,7 @@ int main(int argc, char *argv[]) {
 
     // Headless packaging runs before Gorgon::Initialize: it needs no window.
     if(!exportScene.empty() || !exportOutput.empty()) {
-        return RunExport(exportScene, exportOutput);
+        return RunExport(exportScene, exportOutput, archiveOverride != 0);
     }
 
     if(selftest) {
@@ -3262,8 +3275,17 @@ int main(int argc, char *argv[]) {
                 std::filesystem::temp_directory_path() / "gorgon_editor_smoke_export";
             std::filesystem::remove_all(exportDir, eec);
 
+            // The export dialog copies the toolbar's Zip toggle into the options; the smoke path
+            // does the same so the checkbox is part of what is verified.
+            if(!app.GetZipToggle().GetState()) {
+                std::cerr << "FAIL: the export zip toggle is not on by default\n";
+                window.Close();
+                return 1;
+            }
+
             ExportOptions exportOptions;
             exportOptions.outputDir = exportDir.generic_string();
+            exportOptions.makeArchive = app.GetZipToggle().GetState();
             const ExportResult exported = app.ExportGame(exportOptions);
 
             if(!exported.ok) {
@@ -3301,12 +3323,57 @@ int main(int argc, char *argv[]) {
 
             auto &exportConsole = app.GetConsolePanel();
             bool sawExportLine = false;
+            bool sawArchiveLine = false;
             for(int i = 0; i < exportConsole.GetLineCount(); ++i) {
-                if(exportConsole.GetLineText(i).find("Exported '") != std::string::npos)
+                const std::string line = exportConsole.GetLineText(i);
+                if(line.find("Exported '") != std::string::npos)
                     sawExportLine = true;
+                if(line.find("Archive: ") != std::string::npos)
+                    sawArchiveLine = true;
             }
             if(!sawExportLine) {
                 std::cerr << "FAIL: the export result never reached the console\n";
+                std::filesystem::remove_all(exportDir, eec);
+                window.Close();
+                return 1;
+            }
+            if(!sawArchiveLine) {
+                std::cerr << "FAIL: the export archive never reached the console\n";
+                std::filesystem::remove_all(exportDir, eec);
+                window.Close();
+                return 1;
+            }
+
+            // ---- The archive: one file that unpacks into this same bundle ----------------
+            if(exported.archivePath.empty() ||
+               !std::filesystem::exists(exported.archivePath)) {
+                std::cerr << "FAIL: the export wrote no zip archive\n";
+                std::filesystem::remove_all(exportDir, eec);
+                window.Close();
+                return 1;
+            }
+
+            std::error_code sizeEc;
+            const auto archiveSize =
+                std::filesystem::file_size(exported.archivePath, sizeEc);
+            if(sizeEc || archiveSize != exported.archiveBytes) {
+                std::cerr << "FAIL: the archive size does not match the reported size\n";
+                std::filesystem::remove_all(exportDir, eec);
+                window.Close();
+                return 1;
+            }
+
+            // The reported file count has to be what is actually in the folder, or the archive
+            // silently lost (or duplicated) a file.
+            std::size_t bundleFiles = 0;
+            for(std::filesystem::recursive_directory_iterator it(exportDir), end; it != end;
+                ++it) {
+                if(it->is_regular_file())
+                    ++bundleFiles;
+            }
+            if(bundleFiles != exported.archiveFiles) {
+                std::cerr << "FAIL: the archive packed " << exported.archiveFiles
+                          << " of the bundle's " << bundleFiles << " files\n";
                 std::filesystem::remove_all(exportDir, eec);
                 window.Close();
                 return 1;
@@ -3322,9 +3389,13 @@ int main(int argc, char *argv[]) {
                        << "assets=" << exported.copiedAssets.size() << "\n"
                        << "missing=" << exported.missingAssets.size() << "\n"
                        << "dlls=" << exported.copiedRuntimeDlls.size() << "\n"
-                       << "player=" << exported.playerExecutablePath << "\n";
+                       << "player=" << exported.playerExecutablePath << "\n"
+                       << "zip=" << exported.archivePath << "\n"
+                       << "zipFiles=" << exported.archiveFiles << "\n"
+                       << "zipBytes=" << exported.archiveBytes << "\n";
             }
 
+            std::filesystem::remove(exported.archivePath, eec);
             std::filesystem::remove_all(exportDir, eec);
             app.ShowBottomTab(BottomTab::Assets);
             Gorgon::NextFrame();

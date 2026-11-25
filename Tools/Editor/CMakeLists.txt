@@ -30,6 +30,8 @@ add_library(GorgonEditorCore STATIC
     Core/FileWatcher.cpp
     Core/GameExporter.h
     Core/GameExporter.cpp
+    Core/ZipArchive.h
+    Core/ZipArchive.cpp
     Core/PlaySession.h
     Core/PlaySession.cpp
     Core/SceneRuntime.h

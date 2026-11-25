@@ -1028,7 +1028,10 @@ scripts and writes `%TEMP%\gorgon_editor_demo_report.txt` with the resulting tra
 
 **Export** in the toolbar packages the open scene into a folder that runs on its own: no editor, no
 compiler and no project files. It asks for a destination folder (default
-`<scene folder>/Export/<scene name>`), then logs every step to the Console tab.
+`<scene folder>/Export/<scene name>`), then logs every step to the Console tab. The **Zip** checkbox
+next to it is on by default: the folder is written as usual and the same files are also packed into
+one archive beside it, `<export folder>.zip` — the thing you hand to someone. Clear the checkbox for
+a folder-only export.
 
 The bundle layout mirrors the project, so every path stored in the scene keeps working:
 
@@ -1079,13 +1082,60 @@ Export also runs headless, which is how the build verification uses it:
 
 ```bat
 GorgonEditor.exe --export path\to\scene.gscene.json path\to\MyGame
+GorgonEditor.exe --export path\to\scene.gscene.json path\to\MyGame --no-zip   rem folder only
 ```
+
+It prints the bundle folder and then the archive it wrote:
+
+```
+Exported 'EditorDemo' to Export\MyGame (7 assets, 1 runtime DLLs, player: ...\MyGame\GorgonPlayer.exe)
+Archive: Export\MyGame.zip (11 files, 2570680 bytes)
+```
+
+`--zip` is the default; `--no-zip` turns the archive off. Whichever comes last wins.
+
+### Handing a game over
+
+`MyGame.zip` holds everything in the folder, with the same relative paths, so unzipping it anywhere
+reproduces a runnable game:
+
+```bat
+tar -xf MyGame.zip -C D:\Games\MyGame        rem Windows 10+ ships bsdtar; 7-Zip or Explorer work too
+D:\Games\MyGame\GorgonPlayer.exe
+```
+
+The archive is packed with deflate through zlib (already a build dependency), nothing else. Files
+that do not shrink are stored, and the writer refuses names that would escape the folder (`..`,
+absolute paths) rather than writing an archive that unpacks somewhere unexpected.
+
+**The bundle is portable as long as the runtime DLLs stay beside the executable.** `GorgonPlayer.exe`
+needs the DLLs that were next to it in the build output — `vulkan-1.dll` at minimum — so keep them
+together and do not move the exe out of its folder. The exporter copies them automatically, and the
+archive includes them; a bundle without them starts and then fails to create its window.
 
 What the exporter collects automatically: sprite, sprite-sheet, tilemap tileset, audio and script
 assets, plus every `prefabSource` prefab (scanned recursively, cycle-safe, and copied with the assets
 it references). Anything referenced but missing on disk is reported in the console instead of
 silently disappearing from the bundle. If `GorgonPlayer.exe` has not been built yet the export still
 writes the manifest, scene and assets and warns about the missing executable.
+
+## Packaging the editor (CPack)
+
+The build can also produce a distributable of the tools themselves:
+
+```bat
+cd build\WindowsTesting
+cpack -C Release        rem ZIP, plus an NSIS installer when makensis is on PATH
+```
+
+That writes `GorgonEditor-<version>-<arch>-EditorTools.zip` holding `GorgonEditor.exe`,
+`GorgonPlayer.exe` and the runtime DLLs that must sit beside them. Only the `EditorTools` component is
+packed, so the framework's SDK install (headers, static libraries, CMake package files) stays out of
+the archive, and nothing is written outside CPack's temporary staging directory.
+
+The CPack configuration lives at the end of the top-level `CMakeLists.txt`. `makensis` is looked up
+with `find_program` and is purely optional: without NSIS the ZIP generator is used alone and neither
+configure nor build changes.
 
 ## Tests
 
@@ -1154,14 +1204,23 @@ laid out at the viewport's corners and addressable by script id, clicks the butt
 entity, then removes both and confirms the plain scene is back.
 
 `[Export]` covers the packager without a window: asset collection across every component plus nested
-prefabs, the `game.json` codec (defaults, invalid input, missing `startScene`) and a real export of
+prefabs, the `game.json` codec (defaults, invalid input, missing `startScene`), a real export of
 `Examples/EditorDemo/Scene/DemoScene.gscene.json` that asserts the bundle layout (`game.json`, scene,
-7 assets, `GorgonPlayer.exe`) and reloads the exported scene. Running that bundle is the end-to-end
-check:
+7 assets, `GorgonPlayer.exe`) and the `<folder>.zip` beside it, and the archive itself. A fixture
+bundle is packed and read back the way an unzip tool would — end-of-central-directory record, central
+directory, then each entry inflated and checked against its stored size and CRC — so the test proves
+the archive's paths are exactly the folder's, the bytes round-trip (a PNG with NULs included), a
+compressible entry is deflated while a tiny one is stored, and `makeArchive=false` writes no zip
+while still producing a complete folder. The `--smoke` export stage packs through the real editor path
+and asserts the archive exists, matches the reported size, and holds as many files as the folder does.
+Running that bundle is the end-to-end check:
 
 ```bat
 GorgonPlayer.exe --frames 30      rem inside the exported folder, exit code 0
 ```
+
+Unzipping the archive into a fresh folder and running the player from there is the proof that the zip
+is self-contained.
 
 The panel widgets need a window and the widget theme, so they are covered by `--smoke` rather than
 the headless `--selftest`: it opens the console tab, checks the All/Errors filter and Clear, then
@@ -1175,6 +1234,7 @@ Tools/Editor/
   PLAN.md                architecture and phase plan
   CMakeLists.txt         GorgonEditorCore + app + player + tests
   Core/                  Scene, Entity, Components, SceneSerializer, GameExporter,
+                         ZipArchive (deflate/store zip writer for the export archive),
                          CommandStack, PlaySession, SceneRuntime, FileWatcher,
                          TilemapPainter (grid geometry, stroke math, palette layout),
                          AnimTimeline (frame model, per-frame durations, strip layout, playhead),

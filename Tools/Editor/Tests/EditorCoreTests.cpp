@@ -16,11 +16,15 @@
 #include <chrono>
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <vector>
 #include <string>
+
+#include <zlib.h>
 
 using namespace Gorgon::Editor;
 
@@ -3018,6 +3022,185 @@ namespace {
         }
         return {};
     }
+
+    // ---- A tiny zip reader, so a test proves an unzip tool would accept the archive ---------
+
+    struct UnpackedEntry {
+        std::string name;
+        std::string bytes;
+        std::uint16_t method = 0;
+    };
+
+    struct ZipContents {
+        bool ok = false;
+        std::string error;
+        std::vector<UnpackedEntry> entries;
+    };
+
+    std::uint16_t ZipU16(const std::string &buffer, std::size_t at) {
+        return std::uint16_t(std::uint8_t(buffer[at]) |
+                             (std::uint16_t(std::uint8_t(buffer[at + 1])) << 8));
+    }
+
+    std::uint32_t ZipU32(const std::string &buffer, std::size_t at) {
+        return std::uint32_t(std::uint8_t(buffer[at])) |
+               (std::uint32_t(std::uint8_t(buffer[at + 1])) << 8) |
+               (std::uint32_t(std::uint8_t(buffer[at + 2])) << 16) |
+               (std::uint32_t(std::uint8_t(buffer[at + 3])) << 24);
+    }
+
+    std::uint32_t ZipCrc32(const std::string &bytes) {
+        uLong crc = crc32(0L, Z_NULL, 0);
+        std::size_t done = 0;
+        while(done < bytes.size()) {
+            const std::size_t chunk = std::min<std::size_t>(bytes.size() - done, 1u << 16);
+            crc = crc32(crc, reinterpret_cast<const Bytef *>(bytes.data() + done), uInt(chunk));
+            done += chunk;
+        }
+        return std::uint32_t(crc);
+    }
+
+    bool ZipInflateRaw(const std::string &input, std::size_t expected, std::string &out) {
+        z_stream stream{};
+        if(inflateInit2(&stream, -15) != Z_OK)
+            return false;
+
+        out.assign(expected, '\0');
+        stream.next_in = reinterpret_cast<Bytef *>(const_cast<char *>(input.data()));
+        stream.avail_in = uInt(input.size());
+        stream.next_out = reinterpret_cast<Bytef *>(out.data());
+        stream.avail_out = uInt(expected);
+
+        const int status = inflate(&stream, Z_FINISH);
+        const uLong written = stream.total_out;
+        inflateEnd(&stream);
+
+        out.resize(std::size_t(written));
+        return status == Z_STREAM_END && written == expected;
+    }
+
+    /// Reads the archive back the way a zip tool would: end-of-central-directory record, then the
+    /// central directory, then each local entry, checked against its stored size and CRC.
+    ZipContents UnpackZip(const std::string &zipPath) {
+        ZipContents out;
+
+        std::ifstream in(zipPath, std::ios::binary);
+        if(!in) {
+            out.error = "could not open the archive";
+            return out;
+        }
+
+        const std::string zip((std::istreambuf_iterator<char>(in)),
+                              std::istreambuf_iterator<char>());
+        if(zip.size() < 22) {
+            out.error = "the archive is too small to hold an end record";
+            return out;
+        }
+
+        // The end record is the last 22 bytes (this writer adds no comment).
+        std::size_t end = std::string::npos;
+        for(std::size_t at = zip.size() - 22;; --at) {
+            if(ZipU32(zip, at) == 0x06054b50u) {
+                end = at;
+                break;
+            }
+            if(at == 0)
+                break;
+        }
+        if(end == std::string::npos) {
+            out.error = "no end-of-central-directory record";
+            return out;
+        }
+
+        const std::uint16_t count = ZipU16(zip, end + 10);
+        const std::uint32_t centralOffset = ZipU32(zip, end + 16);
+        if(centralOffset + 46ull > zip.size()) {
+            out.error = "the central directory offset is out of range";
+            return out;
+        }
+
+        std::size_t at = centralOffset;
+        for(std::uint16_t index = 0; index < count; ++index) {
+            if(at + 46 > zip.size() || ZipU32(zip, at) != 0x02014b50u) {
+                out.error = "a central directory record is truncated or corrupt";
+                return out;
+            }
+
+            UnpackedEntry entry;
+            entry.method = ZipU16(zip, at + 10);
+            const std::uint32_t crc = ZipU32(zip, at + 16);
+            const std::uint32_t packedSize = ZipU32(zip, at + 20);
+            const std::uint32_t size = ZipU32(zip, at + 24);
+            const std::uint16_t nameLength = ZipU16(zip, at + 28);
+            const std::uint16_t extraLength = ZipU16(zip, at + 30);
+            const std::uint16_t commentLength = ZipU16(zip, at + 32);
+            const std::uint32_t localOffset = ZipU32(zip, at + 42);
+
+            if(at + 46 + nameLength > zip.size()) {
+                out.error = "a central directory name is truncated";
+                return out;
+            }
+            entry.name = zip.substr(at + 46, nameLength);
+            at += 46 + nameLength + extraLength + commentLength;
+
+            if(localOffset + 30ull > zip.size() ||
+               ZipU32(zip, localOffset) != 0x04034b50u) {
+                out.error = "the local header for '" + entry.name + "' is corrupt";
+                return out;
+            }
+
+            const std::uint16_t localNameLength = ZipU16(zip, localOffset + 26);
+            const std::uint16_t localExtraLength = ZipU16(zip, localOffset + 28);
+            const std::uint64_t dataOffset =
+                std::uint64_t(localOffset) + 30 + localNameLength + localExtraLength;
+            if(dataOffset + packedSize > zip.size()) {
+                out.error = "the data for '" + entry.name + "' is truncated";
+                return out;
+            }
+
+            const std::string packed = zip.substr(std::size_t(dataOffset), packedSize);
+            if(entry.method == 0) {
+                entry.bytes = packed;
+            } else if(entry.method == 8) {
+                if(!ZipInflateRaw(packed, size, entry.bytes)) {
+                    out.error = "the deflated data for '" + entry.name + "' does not inflate";
+                    return out;
+                }
+            } else {
+                out.error = "unsupported compression method for '" + entry.name + "'";
+                return out;
+            }
+
+            if(entry.bytes.size() != size || ZipCrc32(entry.bytes) != crc) {
+                out.error = "the contents of '" + entry.name + "' do not match its checksum";
+                return out;
+            }
+
+            out.entries.push_back(std::move(entry));
+        }
+
+        out.ok = true;
+        return out;
+    }
+
+    /// Every regular file under `dir`, relative and sorted: what an archive of `dir` must hold.
+    std::vector<std::string> ListBundleFiles(const std::string &dir) {
+        std::vector<std::string> out;
+        std::error_code ec;
+        for(export_fs::recursive_directory_iterator it(dir, ec), end; !ec && it != end;
+            it.increment(ec)) {
+            if(!it->is_regular_file())
+                continue;
+            out.push_back(it->path().lexically_relative(export_fs::path(dir)).generic_string());
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    }
+
+    std::string ReadWholeFile(const std::string &path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
 } // namespace
 
 TEST_CASE("GameExporter collects scene assets, scripts and nested prefabs", "[EditorCore][Export]") {
@@ -3188,8 +3371,149 @@ TEST_CASE("GameExporter writes a runnable bundle for the demo scene", "[EditorCo
         REQUIRE(export_fs::exists(result.playerExecutablePath));
     }
 
+    // ---- archive --------------------------------------------------------
+    // makeArchive defaults to true, so a plain export leaves `<outputDir>.zip` beside the folder.
+    REQUIRE(result.archivePath == GameExporter::ArchivePathFor(outputDir));
+    REQUIRE(export_fs::exists(result.archivePath));
+    REQUIRE(export_fs::file_size(result.archivePath) == result.archiveBytes);
+    REQUIRE(result.archiveFiles == ListBundleFiles(outputDir).size());
+
     std::error_code ec;
+    export_fs::remove(result.archivePath, ec);
     export_fs::remove_all(outputDir, ec);
+}
+
+TEST_CASE("GameExporter packs a bundle into one zip that round-trips its files",
+          "[EditorCore][Export]") {
+    const std::string bundleDir = UniqueExportTempDir("pack");
+
+    // A bundle as the exporter leaves it: manifest, scene, a binary sprite, a script, and a file
+    // small enough that the writer stores instead of deflating.
+    const std::string spriteBytes = std::string("\x89PNG\r\n\x1a\n\0\0\0\rIHDR", 16);
+    WriteTextFile(bundleDir + "/game.json",
+                  "{\"schemaVersion\":1,\"startScene\":\"scene.gscene.json\"}\n");
+    WriteTextFile(bundleDir + "/scene.gscene.json", "{\"name\":\"Packed\"}\n");
+    WriteTextFile(bundleDir + "/assets/tile.png", spriteBytes);
+    WriteTextFile(bundleDir + "/scripts/run.gs",
+                  "Log(\"hello from the packed bundle\")\n"
+                  "Log(\"and again, so the entry is worth deflating and the writer uses deflate\")\n"
+                  "Log(\"once more to make sure the compressed entry really is smaller\")\n");
+    WriteTextFile(bundleDir + "/assets/empty.txt", "");
+
+    ExportResult bundle;
+    bundle.outputDir = bundleDir;
+
+    const std::string zipPath = GameExporter::ArchivePathFor(bundleDir);
+    REQUIRE(zipPath == export_fs::path(bundleDir + ".zip").generic_string());
+
+    std::string error;
+    std::uint64_t bytes = 0;
+    std::size_t files = 0;
+    REQUIRE(GameExporter::PackBundle(bundle, zipPath, &error, &bytes, &files));
+    INFO(error);
+    REQUIRE(error.empty());
+    REQUIRE(files == 5);
+    REQUIRE(export_fs::exists(zipPath));
+    REQUIRE(export_fs::file_size(zipPath) == bytes);
+    REQUIRE(bytes > 0);
+
+    // The archive an unzip tool sees: exactly the bundle's relative paths, sorted, and no others.
+    const ZipContents unpacked = UnpackZip(zipPath);
+    INFO(unpacked.error);
+    REQUIRE(unpacked.ok);
+    REQUIRE(unpacked.entries.size() == 5);
+
+    std::vector<std::string> names;
+    for(const auto &entry : unpacked.entries)
+        names.push_back(entry.name);
+    REQUIRE(names == std::vector<std::string>{"assets/empty.txt", "assets/tile.png", "game.json",
+                                              "scene.gscene.json", "scripts/run.gs"});
+
+    // Every file round-trips byte for byte, the binary sprite included.
+    for(const auto &entry : unpacked.entries) {
+        INFO(entry.name);
+        REQUIRE(entry.bytes == ReadWholeFile(bundleDir + "/" + entry.name));
+    }
+    REQUIRE(unpacked.entries[1].bytes == spriteBytes);
+    REQUIRE(unpacked.entries[1].bytes.find('\0') != std::string::npos);
+    // The long script deflates, the tiny files are stored: the writer picks the smaller of the two.
+    REQUIRE(unpacked.entries[3].method == 0);
+    REQUIRE(unpacked.entries[4].method == 8);
+
+    // A missing bundle folder is an error, not a silently empty archive.
+    ExportResult missing;
+    missing.outputDir = bundleDir + "/nope";
+    REQUIRE_FALSE(GameExporter::PackBundle(missing, bundleDir + "/nope.zip", &error));
+    REQUIRE_FALSE(error.empty());
+    REQUIRE_FALSE(export_fs::exists(bundleDir + "/nope.zip"));
+
+    std::error_code ec;
+    export_fs::remove(zipPath, ec);
+    export_fs::remove_all(bundleDir, ec);
+}
+
+TEST_CASE("Export zips the bundle unless makeArchive turns it off", "[EditorCore][Export]") {
+    const std::string projectDir = UniqueExportTempDir("zipon");
+    WriteTextFile(projectDir + "/assets/tile.png", std::string("\x89PNG\r\n\x1a\n tile bytes", 19));
+
+    Scene scene;
+    scene.name = "ZipOn";
+    Entity &entity = scene.CreateEntity("Sprite");
+    SpriteComponent sprite;
+    sprite.asset = "assets/tile.png";
+    entity.sprite = sprite;
+
+    const auto exportInto = [&](const std::string &dir, bool makeArchive) {
+        ExportOptions options;
+        options.outputDir = dir;
+        options.sceneBaseDir = projectDir;
+        options.makeArchive = makeArchive;
+        return GameExporter::Export(scene, options);
+    };
+
+    // Default: the folder and the archive next to it.
+    const std::string outputDir = UniqueExportTempDir("zipon_out");
+    const ExportResult packed = exportInto(outputDir, true);
+    INFO(packed.error);
+    REQUIRE(packed.ok);
+    REQUIRE(packed.error.empty());
+    REQUIRE(packed.archivePath == GameExporter::ArchivePathFor(outputDir));
+    REQUIRE(export_fs::exists(packed.archivePath));
+    REQUIRE(export_fs::file_size(packed.archivePath) == packed.archiveBytes);
+    REQUIRE(packed.archiveFiles == ListBundleFiles(outputDir).size());
+
+    const std::string zipPath = packed.archivePath;
+    const ZipContents unpacked = UnpackZip(zipPath);
+    INFO(unpacked.error);
+    REQUIRE(unpacked.ok);
+    REQUIRE(unpacked.entries.size() == packed.archiveFiles);
+
+    std::vector<std::string> names;
+    for(const auto &entry : unpacked.entries)
+        names.push_back(entry.name);
+    REQUIRE(names == ListBundleFiles(outputDir));
+    // The bundle is complete inside the archive, not just the manifest.
+    REQUIRE(std::find(names.begin(), names.end(), "game.json") != names.end());
+    REQUIRE(std::find(names.begin(), names.end(), "scene.gscene.json") != names.end());
+    REQUIRE(std::find(names.begin(), names.end(), "assets/tile.png") != names.end());
+
+    // makeArchive=false: the folder is still a complete bundle, and no archive appears.
+    const std::string folderOnly = UniqueExportTempDir("zipoff_out");
+    const ExportResult plain = exportInto(folderOnly, false);
+    INFO(plain.error);
+    REQUIRE(plain.ok);
+    REQUIRE(plain.archivePath.empty());
+    REQUIRE(plain.archiveBytes == 0);
+    REQUIRE(plain.archiveFiles == 0);
+    REQUIRE_FALSE(export_fs::exists(GameExporter::ArchivePathFor(folderOnly)));
+    REQUIRE(export_fs::exists(folderOnly + "/game.json"));
+    REQUIRE(export_fs::exists(folderOnly + "/assets/tile.png"));
+
+    std::error_code ec;
+    export_fs::remove(zipPath, ec);
+    export_fs::remove_all(outputDir, ec);
+    export_fs::remove_all(folderOnly, ec);
+    export_fs::remove_all(projectDir, ec);
 }
 
 // ---- Tilemap painting ------------------------------------------------------
@@ -4756,5 +5080,7 @@ TEST_CASE("A UI-only scene exports without any asset", "[EditorCore][UI][Export]
     runtime.Update(0.0f);
     REQUIRE(runtime.GetUserInterface().GetWidgetCount() == 2);
 
-    export_fs::remove_all(export_fs::path(outputDir));
+    std::error_code ec;
+    export_fs::remove(GameExporter::ArchivePathFor(outputDir), ec);
+    export_fs::remove_all(export_fs::path(outputDir), ec);
 }

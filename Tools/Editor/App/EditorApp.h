@@ -79,6 +79,10 @@ namespace Gorgon :: Editor {
         /// The *Lights* checkbox itself (state changes go through the same path as a click).
         Gorgon::Widgets::Checkbox &GetLightsToggle() { return chkLights_; }
 
+        /// Toolbar "Zip" toggle: when on, Export also writes `<export folder>.zip` next to the
+        /// bundle folder. The folder itself is always written.
+        Gorgon::Widgets::Checkbox &GetZipToggle() { return chkZip_; }
+
         BottomTab GetBottomTab() const { return bottomTab_; }
         /// Switches the bottom dock between the asset browser, the console and the timeline.
         void ShowBottomTab(BottomTab tab);
@@ -278,6 +282,7 @@ namespace Gorgon :: Editor {
         Gorgon::Widgets::Checkbox chkGridSnap_{"Grid Snap", true};
         /// Turns the viewport's 2D lighting preview on and off (see EditorViewport::SetLightingPreviewEnabled).
         Gorgon::Widgets::Checkbox chkLights_{"Lights", true};
+        Gorgon::Widgets::Checkbox chkZip_{"Zip", true};
         Gorgon::Widgets::Label lblStatus_{"Ready"};
 
         // 4-pane docks + center viewport
