@@ -1,6 +1,7 @@
 param(
     [string]$Version = "4.2.0",
     [string]$BinDir = "",
+    [string]$OutputDir = "",
     [switch]$Build
 )
 
@@ -36,7 +37,9 @@ if (-not $iscc) {
     throw "Inno Setup 6 (ISCC.exe) not found. Install with: winget install JRSoftware.InnoSetup"
 }
 
-$OutputDir = Join-Path $RepoRoot "build\WindowsTesting\Installer"
+if (-not $OutputDir) {
+    $OutputDir = Join-Path $RepoRoot "build\WindowsTesting\Installer"
+}
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
 
 $iss = Join-Path $ScriptDir "GorgonEditor.iss"

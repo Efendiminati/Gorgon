@@ -1,0 +1,174 @@
+name: Gorgon Editor Windows Installer
+
+on:
+  push:
+    tags:
+      - 'editor-v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Installer version (e.g. 4.2.1)'
+        required: true
+        default: '4.2.0'
+      publish_release:
+        description: 'Create or update GitHub Release (tag editor-v<version>)'
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-installer:
+    name: Build & Package Windows x64 Installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Resolve Version & Tag
+        id: meta
+        shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish_release }}
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $tag = $env:GITHUB_REF_NAME
+            $version = $tag -replace '^editor-v', ''
+            $publish = 'true'
+          } else {
+            $version = $env:INPUT_VERSION
+            $tag = "editor-v$version"
+            $publish = $env:INPUT_PUBLISH
+          }
+          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$') {
+            throw "Invalid version format: $version"
+          }
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "publish=$publish" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          Write-Host "Version=$version Tag=$tag Publish=$publish"
+
+      - name: Cache Tools and vcpkg
+        uses: actions/cache@v4
+        with:
+          path: |
+            .tools
+            build/WindowsQuick/vcpkg_installed
+          key: ${{ runner.os }}-editor-static-${{ hashFiles('vcpkg.json', 'Setup.ps1', 'CMakePresets.json') }}
+          restore-keys: |
+            ${{ runner.os }}-editor-static-
+
+      - name: Bootstrap Ninja & vcpkg
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File ./Setup.ps1
+
+      - name: Setup MSVC x64 Environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure (WindowsQuick static)
+        shell: cmd
+        run: cmake --preset WindowsQuick -DBUILD_EDITOR=ON
+
+      - name: Build GorgonEditor & GorgonPlayer
+        shell: cmd
+        run: cmake --build build/WindowsQuick --config Release --target GorgonEditor GorgonPlayer --parallel
+
+      - name: Ensure Inno Setup 6
+        shell: pwsh
+        run: |
+          $found = @(
+            "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "$env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $found) {
+            choco install innosetup -y --no-progress
+          } else {
+            Write-Host "Found ISCC: $found"
+          }
+
+      - name: Build One-Click Installer
+        id: pkg
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $ver = $env:APP_VERSION
+          $outDir = Join-Path $PWD 'dist\installer'
+          powershell -NoProfile -ExecutionPolicy Bypass -File Tools/Editor/Installer/build-installer.ps1 `
+            -Version $ver `
+            -BinDir (Join-Path $PWD 'build\WindowsQuick\Bin\Release') `
+            -OutputDir $outDir
+          $exe = Join-Path $outDir "GorgonEditor-Setup-$ver-x64.exe"
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          "$hash  GorgonEditor-Setup-$ver-x64.exe" | Out-File -FilePath (Join-Path $outDir 'SHA256SUMS.txt') -Encoding ascii
+          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Smoke Test Silent Install & Uninstall
+        shell: pwsh
+        env:
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          $ver = $env:APP_VERSION
+          $exe = Join-Path $PWD "dist\installer\GorgonEditor-Setup-$ver-x64.exe"
+          $testDir = Join-Path $env:RUNNER_TEMP 'gorgon-editor-smoke'
+          $p1 = Start-Process -FilePath $exe -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', "/DIR=$testDir") -Wait -PassThru
+          if ($p1.ExitCode -ne 0) { throw "Silent install failed with exit code $($p1.ExitCode)" }
+          foreach ($f in @('GorgonEditor.exe', 'GorgonPlayer.exe', 'vulkan-1.dll', 'DemoScene\DemoScene.gscene.json', 'unins000.exe')) {
+            $p = Join-Path $testDir $f
+            if (-not (Test-Path $p)) { throw "Smoke test missing: $p" }
+          }
+          $p2 = Start-Process -FilePath (Join-Path $testDir 'unins000.exe') -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($p2.ExitCode -ne 0) { throw "Silent uninstall failed with exit code $($p2.ExitCode)" }
+          Start-Sleep -Seconds 2
+          if (Test-Path $testDir) { throw "Uninstall left directory behind: $testDir" }
+          Write-Host 'Smoke test passed (install + files + clean uninstall).'
+
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: GorgonEditor-Setup-${{ steps.meta.outputs.version }}-x64
+          path: dist/installer/*
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: steps.meta.outputs.publish == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_VERSION: ${{ steps.meta.outputs.version }}
+          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
+          INSTALLER_SHA: ${{ steps.pkg.outputs.sha256 }}
+        run: |
+          $ver = $env:APP_VERSION
+          $tag = $env:RELEASE_TAG
+          $sha = $env:INSTALLER_SHA
+          $exe = "dist/installer/GorgonEditor-Setup-$ver-x64.exe"
+          $sums = 'dist/installer/SHA256SUMS.txt'
+          $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 2)
+          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
+          @(
+            '### One-Click Windows Installer (x64)',
+            '',
+            "Download and run **GorgonEditor-Setup-$ver-x64.exe** ($sizeMB MB).",
+            '',
+            '- **No admin/UAC required** — installs per-user into `%LOCALAPPDATA%\Programs\Gorgon 2D Editor`',
+            '- **Self-contained** — statically linked CRT + bundled `vulkan-1.dll` (no VC++ Redistributable or CMake build needed)',
+            '- **Includes:** `GorgonEditor.exe`, `GorgonPlayer.exe`, `DemoScene/`, Desktop & Start Menu shortcuts, `.json` right-click menu, and uninstaller',
+            '- **Languages:** Turkish & English',
+            '',
+            "**SHA256:** `$sha`"
+          ) | Set-Content -Path $notesFile -Encoding utf8
+          gh release view $tag 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag $exe $sums --clobber
+            gh release edit $tag --notes-file $notesFile
+          } else {
+            gh release create $tag $exe $sums --target $env:GITHUB_SHA --title "Gorgon 2D Editor v$ver (Windows Installer)" --notes-file $notesFile
+          }
