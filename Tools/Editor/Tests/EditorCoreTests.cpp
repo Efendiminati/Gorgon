@@ -552,6 +552,18 @@ TEST_CASE("Play session runs a GScript and restores the snapshot", "[EditorCore]
     session.Stop(scene);
     REQUIRE(Catch::Approx(scene.FindEntity(id)->transform.x) == 10.0);
 
+    // A scene without any attached scripts can still enter Play mode (animations, particles, UI, physics).
+    Scene scriptless;
+    scriptless.CreateEntity("Prop");
+    PlaySession noScripts;
+    std::string noScriptsError;
+    REQUIRE(noScripts.Start(scriptless, dir.generic_string(), &noScriptsError));
+    REQUIRE(noScriptsError.empty());
+    REQUIRE(noScripts.IsRunning());
+    noScripts.Tick(scriptless, 0.016f);
+    noScripts.Stop(scriptless);
+    REQUIRE_FALSE(noScripts.IsRunning());
+
     Scene broken;
     broken.CreateEntity("NoScript").script = ScriptComponent{"missing.gs"};
     PlaySession failing;

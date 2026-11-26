@@ -2062,15 +2062,12 @@ namespace Gorgon :: Editor {
                 break;
         }
 
-        if(impl.scripts.empty()) {
-            const std::string message = impl.lastError.empty()
-                ? std::string("No entity has an attached script that defines Update(self, dt).")
-                : impl.lastError;
-            impl.lastError = message;
+        if(impl.scripts.empty() && !impl.lastError.empty()) {
+            const std::string message = impl.lastError;
             impl.console.Add(LogSeverity::Error, "PlaySession", message);
             if(outError)
                 *outError = message;
-            // Nothing to run: restore immediately so play never leaves a half state behind.
+            // Every attached script failed: restore immediately so play never leaves a half state behind.
             Stop(scene);
             impl.lastError = message;
             return false;
