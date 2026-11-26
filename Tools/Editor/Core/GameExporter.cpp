@@ -88,6 +88,12 @@ namespace Gorgon :: Editor {
             if(length > 0 && length < DWORD(sizeof(buffer))) {
                 return fs::path(std::string(buffer, length)).parent_path().generic_string();
             }
+#elif defined(__linux__)
+            std::error_code symEc;
+            const fs::path exePath = fs::read_symlink("/proc/self/exe", symEc);
+            if(!symEc && !exePath.empty()) {
+                return exePath.parent_path().generic_string();
+            }
 #endif
             std::error_code ec;
             return fs::current_path(ec).generic_string();
@@ -562,6 +568,13 @@ namespace Gorgon :: Editor {
                 const std::string playerTarget = NormalizeRelative(
                     options.outputDir + "/" + fs::path(player).filename().generic_string());
                 if(CopyFile(player, playerTarget, &error)) {
+#ifndef _WIN32
+                    std::error_code permEc;
+                    fs::permissions(
+                        fs::path(playerTarget),
+                        fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec,
+                        fs::perm_options::add, permEc);
+#endif
                     result.playerExecutablePath = playerTarget;
                 } else {
                     result.warnings.push_back(error);

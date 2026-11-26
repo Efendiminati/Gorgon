@@ -1,0 +1,21 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Gorgon 2D Editor
+Name[tr]=Gorgon 2D Editör
+GenericName=2D Scene Editor
+GenericName[tr]=2D Sahne Editörü
+Comment=2D Scene Editor built with Gorgon
+Comment[tr]=Gorgon ile geliştirilmiş 2D Sahne Editörü
+Exec=gorgon-editor %f
+Icon=gorgon-editor
+Terminal=false
+Categories=Development;Graphics;2DGraphics;IDE;
+MimeType=application/x-gorgon-scene;
+StartupNotify=true
+Actions=OpenDemo;
+
+[Desktop Action OpenDemo]
+Name=Open Demo Scene
+Name[tr]=Demo Sahnesini Aç
+Exec=gorgon-editor /usr/share/gorgon-editor/DemoScene/DemoScene.gscene.json

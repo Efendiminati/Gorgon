@@ -1,4 +1,4 @@
-name: Gorgon Editor Windows Installer
+name: Gorgon Editor Installers (Windows & Fedora)
 
 on:
   push:
@@ -19,38 +19,47 @@ permissions:
   contents: write
 
 jobs:
-  build-installer:
+  resolve-meta:
+    name: Resolve Version & Tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      publish: ${{ steps.meta.outputs.publish }}
+    steps:
+      - name: Resolve Version & Tag
+        id: meta
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_PUBLISH: ${{ inputs.publish_release }}
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            version="${tag#editor-v}"
+            publish="true"
+          else
+            version="${INPUT_VERSION}"
+            tag="editor-v${version}"
+            publish="${INPUT_PUBLISH}"
+          fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$ ]]; then
+            echo "Invalid version format: ${version}" >&2
+            exit 1
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "publish=${publish}" >> "$GITHUB_OUTPUT"
+          echo "Version=${version} Tag=${tag} Publish=${publish}"
+
+  build-windows:
     name: Build & Package Windows x64 Installer
+    needs: resolve-meta
     runs-on: windows-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
-
-      - name: Resolve Version & Tag
-        id: meta
-        shell: pwsh
-        env:
-          INPUT_VERSION: ${{ inputs.version }}
-          INPUT_PUBLISH: ${{ inputs.publish_release }}
-        run: |
-          if ($env:GITHUB_REF_TYPE -eq 'tag') {
-            $tag = $env:GITHUB_REF_NAME
-            $version = $tag -replace '^editor-v', ''
-            $publish = 'true'
-          } else {
-            $version = $env:INPUT_VERSION
-            $tag = "editor-v$version"
-            $publish = $env:INPUT_PUBLISH
-          }
-          if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$') {
-            throw "Invalid version format: $version"
-          }
-          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          "publish=$publish" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-          Write-Host "Version=$version Tag=$tag Publish=$publish"
 
       - name: Cache Tools and vcpkg
         uses: actions/cache@v4
@@ -94,29 +103,27 @@ jobs:
           }
 
       - name: Build One-Click Installer
-        id: pkg
         shell: pwsh
         env:
-          APP_VERSION: ${{ steps.meta.outputs.version }}
+          APP_VERSION: ${{ needs.resolve-meta.outputs.version }}
         run: |
           $ver = $env:APP_VERSION
-          $outDir = Join-Path $PWD 'dist\installer'
+          $outDir = Join-Path $PWD 'dist\windows'
           powershell -NoProfile -ExecutionPolicy Bypass -File Tools/Editor/Installer/build-installer.ps1 `
             -Version $ver `
             -BinDir (Join-Path $PWD 'build\WindowsQuick\Bin\Release') `
             -OutputDir $outDir
           $exe = Join-Path $outDir "GorgonEditor-Setup-$ver-x64.exe"
-          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
-          "$hash  GorgonEditor-Setup-$ver-x64.exe" | Out-File -FilePath (Join-Path $outDir 'SHA256SUMS.txt') -Encoding ascii
-          "sha256=$hash" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  GorgonEditor-Setup-$ver-x64.exe" | Out-File -FilePath (Join-Path $outDir 'SHA256SUMS-windows.txt') -Encoding ascii
 
       - name: Smoke Test Silent Install & Uninstall
         shell: pwsh
         env:
-          APP_VERSION: ${{ steps.meta.outputs.version }}
+          APP_VERSION: ${{ needs.resolve-meta.outputs.version }}
         run: |
           $ver = $env:APP_VERSION
-          $exe = Join-Path $PWD "dist\installer\GorgonEditor-Setup-$ver-x64.exe"
+          $exe = Join-Path $PWD "dist\windows\GorgonEditor-Setup-$ver-x64.exe"
           $testDir = Join-Path $env:RUNNER_TEMP 'gorgon-editor-smoke'
           $p1 = Start-Process -FilePath $exe -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/NOICONS', "/DIR=$testDir") -Wait -PassThru
           if ($p1.ExitCode -ne 0) { throw "Silent install failed with exit code $($p1.ExitCode)" }
@@ -128,47 +135,146 @@ jobs:
           if ($p2.ExitCode -ne 0) { throw "Silent uninstall failed with exit code $($p2.ExitCode)" }
           Start-Sleep -Seconds 2
           if (Test-Path $testDir) { throw "Uninstall left directory behind: $testDir" }
-          Write-Host 'Smoke test passed (install + files + clean uninstall).'
+          Write-Host 'Windows smoke test passed (install + files + clean uninstall).'
 
-      - name: Upload Installer Artifact
+      - name: Upload Windows Installer Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: GorgonEditor-Setup-${{ steps.meta.outputs.version }}-x64
-          path: dist/installer/*
+          name: gorgon-editor-windows
+          path: dist/windows/*
           if-no-files-found: error
 
-      - name: Publish GitHub Release
-        if: steps.meta.outputs.publish == 'true'
-        shell: pwsh
+  build-fedora:
+    name: Build & Package Fedora x86_64 (RPM + Portable)
+    needs: resolve-meta
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build & Package inside Fedora 42 Container
+        env:
+          APP_VERSION: ${{ needs.resolve-meta.outputs.version }}
+        run: |
+          docker run --rm \
+            -e APP_VERSION="${APP_VERSION}" \
+            -v "$PWD:/work" \
+            -w /work \
+            fedora:42 \
+            bash -euxo pipefail -c '
+              dnf install -y --setopt=install_weak_deps=False \
+                gcc-c++ cmake ninja-build pkgconf-pkg-config rpm-build findutils tar gzip \
+                desktop-file-utils shared-mime-info \
+                libX11-devel libXinerama-devel libXrandr-devel libXext-devel \
+                libpng-devel libjpeg-turbo-devel zlib-ng-compat-devel xz-devel \
+                freetype-devel pulseaudio-libs-devel fontconfig-devel \
+                flac-devel libogg-devel libvorbis-devel libcurl-devel \
+                vulkan-loader-devel vulkan-headers VulkanMemoryAllocator-devel glslc
+
+              bash Tools/Editor/Installer/linux/build-fedora-rpm.sh \
+                --build \
+                --version "${APP_VERSION}" \
+                --output-dir dist/fedora
+
+              echo "==> Smoke testing Fedora RPM install & uninstall..."
+              dnf install -y dist/fedora/gorgon-editor-*.rpm
+              test -x /usr/bin/gorgon-editor
+              test -x /usr/bin/gorgon-player
+              test -x /usr/libexec/gorgon-editor/GorgonEditor
+              test -x /usr/libexec/gorgon-editor/GorgonPlayer
+              test -f /usr/share/gorgon-editor/DemoScene/DemoScene.gscene.json
+              desktop-file-validate /usr/share/applications/gorgon-editor.desktop
+              dnf remove -y gorgon-editor
+              test ! -e /usr/libexec/gorgon-editor/GorgonEditor
+
+              echo "==> Smoke testing portable no-root user installer..."
+              SMOKE_HOME=$(mktemp -d)
+              SMOKE_STAGE=$(mktemp -d)
+              tar -xzf dist/fedora/GorgonEditor-${APP_VERSION}-fedora-*.tar.gz -C "$SMOKE_STAGE"
+              HOME="$SMOKE_HOME" bash "$SMOKE_STAGE"/GorgonEditor-*/install-user.sh
+              test -x "$SMOKE_HOME/.local/bin/gorgon-editor"
+              test -x "$SMOKE_HOME/.local/share/gorgon-editor/GorgonPlayer"
+              test -f "$SMOKE_HOME/.local/share/gorgon-editor/DemoScene/DemoScene.gscene.json"
+              desktop-file-validate "$SMOKE_HOME/.local/share/applications/gorgon-editor.desktop"
+              HOME="$SMOKE_HOME" bash "$SMOKE_STAGE"/GorgonEditor-*/uninstall-user.sh
+              test ! -e "$SMOKE_HOME/.local/bin/gorgon-editor"
+              rm -rf "$SMOKE_HOME" "$SMOKE_STAGE"
+              echo "Fedora smoke tests passed (RPM + portable)."
+            '
+
+      - name: Upload Fedora Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: gorgon-editor-fedora
+          path: dist/fedora/*
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [resolve-meta, build-windows, build-fedora]
+    if: needs.resolve-meta.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download All Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Combine Checksums & Publish Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          APP_VERSION: ${{ steps.meta.outputs.version }}
-          RELEASE_TAG: ${{ steps.meta.outputs.tag }}
-          INSTALLER_SHA: ${{ steps.pkg.outputs.sha256 }}
+          APP_VERSION: ${{ needs.resolve-meta.outputs.version }}
+          RELEASE_TAG: ${{ needs.resolve-meta.outputs.tag }}
         run: |
-          $ver = $env:APP_VERSION
-          $tag = $env:RELEASE_TAG
-          $sha = $env:INSTALLER_SHA
-          $exe = "dist/installer/GorgonEditor-Setup-$ver-x64.exe"
-          $sums = 'dist/installer/SHA256SUMS.txt'
-          $sizeMB = [math]::Round((Get-Item $exe).Length / 1MB, 2)
-          $notesFile = Join-Path $env:RUNNER_TEMP 'release-notes.md'
-          @(
-            '### One-Click Windows Installer (x64)',
-            '',
-            "Download and run **GorgonEditor-Setup-$ver-x64.exe** ($sizeMB MB).",
-            '',
-            '- **No admin/UAC required** — installs per-user into `%LOCALAPPDATA%\Programs\Gorgon 2D Editor`',
-            '- **Self-contained** — statically linked CRT + bundled `vulkan-1.dll` (no VC++ Redistributable or CMake build needed)',
-            '- **Includes:** `GorgonEditor.exe`, `GorgonPlayer.exe`, `DemoScene/`, Desktop & Start Menu shortcuts, `.json` right-click menu, and uninstaller',
-            '- **Languages:** Turkish & English',
-            '',
-            "**SHA256:** `$sha`"
-          ) | Set-Content -Path $notesFile -Encoding utf8
-          gh release view $tag 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            gh release upload $tag $exe $sums --clobber
-            gh release edit $tag --notes-file $notesFile
-          } else {
-            gh release create $tag $exe $sums --target $env:GITHUB_SHA --title "Gorgon 2D Editor v$ver (Windows Installer)" --notes-file $notesFile
-          }
+          set -euo pipefail
+          cd release-assets
+          cat SHA256SUMS-windows.txt SHA256SUMS-fedora.txt > SHA256SUMS.txt
+          rm -f SHA256SUMS-windows.txt SHA256SUMS-fedora.txt
+
+          WIN_EXE=$(ls GorgonEditor-Setup-*.exe | head -n 1)
+          FEDORA_RPM=$(ls gorgon-editor-*.rpm | head -n 1)
+          FEDORA_TAR=$(ls GorgonEditor-*-fedora-*.tar.gz | head -n 1)
+
+          WIN_MB=$(awk -v b=$(stat -c%s "$WIN_EXE") 'BEGIN { printf "%.2f", b/1048576 }')
+          RPM_MB=$(awk -v b=$(stat -c%s "$FEDORA_RPM") 'BEGIN { printf "%.2f", b/1048576 }')
+          TAR_MB=$(awk -v b=$(stat -c%s "$FEDORA_TAR") 'BEGIN { printf "%.2f", b/1048576 }')
+
+          cat > /tmp/release-notes.md <<EOF
+          ### Windows (x64) — One-Click Installer
+          Download and run **${WIN_EXE}** (${WIN_MB} MB).
+          - **No admin/UAC required** — installs per-user into `%LOCALAPPDATA%\Programs\Gorgon 2D Editor`
+          - **Self-contained** — statically linked CRT + bundled `vulkan-1.dll`
+          - **Includes:** `GorgonEditor.exe`, `GorgonPlayer.exe`, `DemoScene/`, Desktop & Start Menu shortcuts, TR & EN languages, uninstaller
+
+          ### Fedora Linux (x86_64) — Native RPM & Portable Installer
+          **Option 1 — Native RPM** (**${FEDORA_RPM}**, ${RPM_MB} MB):
+          ```bash
+          sudo dnf install ./${FEDORA_RPM}
+          ```
+          - Auto-resolves Vulkan/FreeType/Audio runtime deps via `dnf`
+          - Installs `gorgon-editor`, `gorgon-player`, `DemoScene/`, desktop launcher (TR & EN), icon, and `.gscene.json` MIME type
+
+          **Option 2 — Portable / No-Root** (**${FEDORA_TAR}**, ${TAR_MB} MB):
+          ```bash
+          tar -xzf ${FEDORA_TAR} && cd GorgonEditor-${APP_VERSION}-fedora-x86_64 && ./install-user.sh
+          ```
+          - Installs per-user into `~/.local` without `sudo` (includes `uninstall-user.sh`)
+
+          ### SHA256 Checksums
+          ```
+          $(cat SHA256SUMS.txt)
+          ```
+          EOF
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            gh release upload "${RELEASE_TAG}" "$WIN_EXE" "$FEDORA_RPM" "$FEDORA_TAR" SHA256SUMS.txt --clobber
+            gh release edit "${RELEASE_TAG}" --title "Gorgon 2D Editor v${APP_VERSION}" --notes-file /tmp/release-notes.md
+          else
+            gh release create "${RELEASE_TAG}" "$WIN_EXE" "$FEDORA_RPM" "$FEDORA_TAR" SHA256SUMS.txt \
+              --target "${GITHUB_SHA}" \
+              --title "Gorgon 2D Editor v${APP_VERSION}" \
+              --notes-file /tmp/release-notes.md
+          fi

@@ -3373,13 +3373,15 @@ TEST_CASE("GameExporter writes a runnable bundle for the demo scene", "[EditorCo
 
     // ---- player ---------------------------------------------------------
     if(options.playerBinaryPath.empty()) {
-        WARN("GorgonPlayer.exe was not built; the bundle executable was not verified");
+        WARN("GorgonPlayer was not built; the bundle executable was not verified");
         REQUIRE(result.playerExecutablePath.empty());
         REQUIRE_FALSE(result.warnings.empty());
     }
     else {
+        const std::string expectedPlayerName =
+            export_fs::path(options.playerBinaryPath).filename().generic_string();
         REQUIRE(result.playerExecutablePath ==
-                export_fs::path(outputDir + "/GorgonPlayer.exe").generic_string());
+                export_fs::path(outputDir + "/" + expectedPlayerName).generic_string());
         REQUIRE(export_fs::exists(result.playerExecutablePath));
     }
 

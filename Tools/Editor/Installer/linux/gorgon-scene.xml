@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-gorgon-scene">
+    <comment>Gorgon 2D Scene</comment>
+    <comment xml:lang="tr">Gorgon 2D Sahnesi</comment>
+    <sub-class-of type="application/json"/>
+    <glob pattern="*.gscene.json"/>
+  </mime-type>
+</mime-info>

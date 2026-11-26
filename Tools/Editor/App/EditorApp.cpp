@@ -1436,7 +1436,7 @@ namespace Gorgon :: Editor {
             LogMessage(LogSeverity::Info, "Player: " + result.playerExecutablePath, "Export");
         else
             LogMessage(LogSeverity::Warn,
-                       "No GorgonPlayer.exe was copied; build the GorgonPlayer target first.",
+                       "No GorgonPlayer binary was copied; build the GorgonPlayer target first.",
                        "Export");
 
         // One file to hand over: where it is, how many files and how big.
